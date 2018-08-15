@@ -670,7 +670,7 @@ extern "C" {
 
     // Operations on instructions
     pub fn LLVMGetFirstBasicBlock(Fn: &Value) -> &BasicBlock;
-    pub fn LLVMGetFirstInstruction(BB: &BasicBlock) -> *const Value;
+    pub fn LLVMGetFirstInstruction(BB: &BasicBlock) -> Option<&Value>;
 
     // Operations on call sites
     pub fn LLVMSetInstructionCallConv(Instr: &Value, CC: c_uint);

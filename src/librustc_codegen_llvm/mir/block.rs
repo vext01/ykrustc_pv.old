@@ -52,16 +52,13 @@ impl FunctionCx<'a, 'll, 'tcx> {
             bx = self.codegen_statement(bx, statement);
         }
 
-        // Insert a DWARF label at the start of each block.
-        // ykrt uses this at runtime to map virtual addresses to MIR blocks.
-        let first_instr = unsafe { LLVMGetFirstInstruction(bx.llbb()) };
-
-        //let first_instr_p = first_instr as *const llvm::Value;
-        //first_instr_p = ();
-        if self.cx.has_debug() && !(first_instr.is_null()) {
+        // Insert a DWARF label at the start of each non-empty block.
+        // Yorick uses this at runtime to map virtual addresses to MIR blocks.
+        let first_instr_o = unsafe { LLVMGetFirstInstruction(bx.llbb()) };
+        if self.cx.has_debug() && first_instr_o.is_some() {
+            let first_instr = first_instr_o.unwrap();
             let di_bldr = DIB(self.cx);
-            //unsafe { LLVMPositionBuilderBefore(bx.llbuilder, first_instr); }
-            unsafe { LLVMPositionBuilderBefore(bx.llbuilder, &*first_instr) }
+            unsafe { LLVMPositionBuilderBefore(bx.llbuilder, first_instr) }
 
             // Make an appropriate name for the label.
             let did = self.instance.def.def_id();
@@ -74,7 +71,7 @@ impl FunctionCx<'a, 'll, 'tcx> {
             let (_, span) = self.debug_loc(*source_info);
             let di_sp = self.fn_metadata(span);
 
-            unsafe { LLVMRustAddYkBlockLabel(bx.llbuilder, di_bldr, di_sp, &*first_instr, lbl_name.as_ptr()) };
+            unsafe { LLVMRustAddYkBlockLabel(bx.llbuilder, di_bldr, di_sp, first_instr, lbl_name.as_ptr()) };
         }
 
         unsafe { LLVMPositionBuilderAtEnd(bx.llbuilder, bx.llbb()); }
