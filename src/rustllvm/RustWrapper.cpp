@@ -14,6 +14,7 @@
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Bitcode/BitcodeWriterPass.h"
@@ -869,6 +870,14 @@ extern "C" int64_t LLVMRustDIBuilderCreateOpPlusUconst() {
   // older LLVM used `plus` to behave like `plus_uconst`.
   return dwarf::DW_OP_plus;
 #endif
+}
+
+extern "C" bool LLVMRustAddYkBlockLabel(LLVMBuilderRef Builder, LLVMRustDIBuilderRef DBuilder, DISubprogram *SP, Instruction *Instr, char *Name) {
+    // XXX Add useful location info?
+    auto Loc = DebugLoc::get(0, 0, SP);
+    DILabel *label = DBuilder->createLabel(SP, Name, SP->getFile(), 0, true);
+    DBuilder->insertLabel(label, Loc, Instr);
+    return true;
 }
 
 extern "C" void LLVMRustWriteTypeToString(LLVMTypeRef Ty, RustStringRef Str) {

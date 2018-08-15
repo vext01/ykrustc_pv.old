@@ -8,11 +8,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use llvm::{self, BasicBlock};
+use llvm::{self, BasicBlock, LLVMGetFirstInstruction,
+           LLVMPositionBuilderBefore, LLVMPositionBuilderAtEnd,
+           LLVMRustAddYkBlockLabel};
+use std::ffi::CString;
+use rustc_data_structures::indexed_vec::Idx;
+
 use rustc::middle::lang_items;
 use rustc::ty::{self, Ty, TypeFoldable};
 use rustc::ty::layout::{self, LayoutOf};
-use rustc::mir;
+use rustc::mir::{self, Location};
 use rustc::mir::interpret::EvalErrorKind;
 use abi::{Abi, ArgType, ArgTypeExt, FnType, FnTypeExt, LlvmType, PassMode};
 use base;
@@ -28,6 +33,8 @@ use value::Value;
 
 use syntax::symbol::Symbol;
 use syntax_pos::Pos;
+
+use debuginfo::{DIB};
 
 use super::{FunctionCx, LocalRef};
 use super::place::PlaceRef;
@@ -45,6 +52,32 @@ impl FunctionCx<'a, 'll, 'tcx> {
             bx = self.codegen_statement(bx, statement);
         }
 
+        // Insert a DWARF label at the start of each block.
+        // ykrt uses this at runtime to map virtual addresses to MIR blocks.
+        let first_instr = unsafe { LLVMGetFirstInstruction(bx.llbb()) };
+
+        //let first_instr_p = first_instr as *const llvm::Value;
+        //first_instr_p = ();
+        if self.cx.has_debug() && !(first_instr.is_null()) {
+            let di_bldr = DIB(self.cx);
+            //unsafe { LLVMPositionBuilderBefore(bx.llbuilder, first_instr); }
+            unsafe { LLVMPositionBuilderBefore(bx.llbuilder, &*first_instr) }
+
+            // Make an appropriate name for the label.
+            let did = self.instance.def.def_id();
+            let lbl_name = CString::new(format!("__YK_BLK_{}_{}_{}", did.krate.as_u32(), did.index.as_raw_u32(), bb.index())).unwrap();
+
+            // Get the sub_program.
+            // XXX must be an easier way.
+            let loc = Location{block: bb, statement_index: 0};
+            let source_info = self.mir.source_info(loc);
+            let (_, span) = self.debug_loc(*source_info);
+            let di_sp = self.fn_metadata(span);
+
+            unsafe { LLVMRustAddYkBlockLabel(bx.llbuilder, di_bldr, di_sp, &*first_instr, lbl_name.as_ptr()) };
+        }
+
+        unsafe { LLVMPositionBuilderAtEnd(bx.llbuilder, bx.llbb()); }
         self.codegen_terminator(bx, bb, data.terminator());
     }
 
