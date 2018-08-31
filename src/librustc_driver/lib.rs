@@ -64,6 +64,7 @@ extern crate log;
 extern crate syntax;
 extern crate syntax_ext;
 extern crate syntax_pos;
+extern crate rustc_yk;
 
 use driver::CompileController;
 use pretty::{PpMode, UserIdentifiedItem};

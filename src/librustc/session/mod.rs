@@ -23,6 +23,7 @@ use session::config::{OutputType, Lto};
 use util::nodemap::{FxHashMap, FxHashSet};
 use util::common::{duration_to_secs_str, ErrorReported};
 use util::common::ProfileQueriesMsg;
+use data_section::DataSectionObject;
 
 use rustc_data_structures::base_n;
 use rustc_data_structures::sync::{self, Lrc, Lock, LockCell, OneThread, Once, RwLock};
@@ -164,6 +165,9 @@ pub struct Session {
 
     /// Cap lint level specified by a driver specifically.
     pub driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
+
+    /// A list of additional objects to link in for Yorick support.
+    pub yk_link_objects: RefCell<Vec<DataSectionObject>>,
 }
 
 pub struct PerfStats {
@@ -1165,6 +1169,7 @@ pub fn build_session_(
         has_global_allocator: Once::new(),
         has_panic_handler: Once::new(),
         driver_lint_caps: FxHashMap(),
+        yk_link_objects: RefCell::new(Vec::new()),
     };
 
     validate_commandline_args_with_session_available(&sess);

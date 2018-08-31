@@ -102,6 +102,7 @@ extern crate jobserver;
 extern crate proc_macro;
 extern crate chalk_engine;
 extern crate rustc_fs_util;
+extern crate data_section;
 
 extern crate serialize as rustc_serialize; // used by deriving
 

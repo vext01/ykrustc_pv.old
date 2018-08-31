@@ -38,6 +38,7 @@ use rustc_privacy;
 use rustc_plugin::registry::Registry;
 use rustc_plugin as plugin;
 use rustc_passes::{self, ast_validation, hir_stats, loops, rvalue_promotion};
+use rustc_yk::debug_sections::crate_map;
 use super::Compilation;
 
 use serialize::json;
@@ -335,6 +336,11 @@ pub fn compile_input(
                         sess.err(&format!("could not emit MIR: {}", e));
                         sess.abort_if_errors();
                     }
+                }
+
+                // XXX only do this if it's a binary crate.
+                if let Ok(_) = env::var("YK_DEBUG_SECTIONS") {
+                    tcx.sess.yk_link_objects.borrow_mut().push(crate_map::emit_crate_map(&tcx));
                 }
 
                 Ok((outputs.clone(), ongoing_codegen, tcx.dep_graph.clone()))

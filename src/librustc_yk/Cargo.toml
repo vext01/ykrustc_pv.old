@@ -1,0 +1,14 @@
+[package]
+authors = ["Edd Barrett"]
+name = "rustc_yk"
+version = "0.0.0"
+
+[lib]
+name = "rustc_yk"
+path = "lib.rs"
+crate-type = ["dylib"]
+test = false
+
+[dependencies]
+rustc = {path = "../librustc"}
+data_section = {path = "../../../data_section_pv"}
