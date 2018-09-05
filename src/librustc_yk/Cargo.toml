@@ -12,3 +12,4 @@ test = false
 [dependencies]
 rustc = {path = "../librustc"}
 data_section = {path = "../../../data_section_pv"}
+rustc_metadata = {path = "../librustc_metadata"}
