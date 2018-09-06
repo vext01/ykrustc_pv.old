@@ -13,3 +13,4 @@ test = false
 rustc = {path = "../librustc"}
 data_section = {path = "../../../data_section_pv"}
 rustc_metadata = {path = "../librustc_metadata"}
+rustc_data_structures = {path = "../librustc_data_structures"}

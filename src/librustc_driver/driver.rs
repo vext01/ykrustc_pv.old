@@ -341,8 +341,7 @@ pub fn compile_input(
                 // XXX only do this if it's a binary crate.
                 if let Ok(_) = env::var("YK_DEBUG_SECTIONS") {
                     tcx.sess.yk_link_objects.borrow_mut().push(crate_map::emit_crate_map(&tcx));
-                    //tcx.sess.yk_link_objects.borrow_mut().push(crate_map::emit_crate_map(&tcx));
-                    mir_cfg::emit_mir_cfg_section(&tcx, cstore, sess);
+                    tcx.sess.yk_link_objects.borrow_mut().push(mir_cfg::emit_mir_cfg_section(&tcx, cstore, sess));
                 }
 
                 Ok((outputs.clone(), ongoing_codegen, tcx.dep_graph.clone()))
