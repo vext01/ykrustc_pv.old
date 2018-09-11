@@ -1,12 +1,13 @@
 use rustc::ty::TyCtxt;
 
-use rustc_metadata::cstore::{CStore, CrateMetadata};
-use rustc::hir::def_id::{CRATE_DEF_INDEX, DefId};
-use rustc::hir::def::Def;
+use rustc_metadata::cstore::CStore; //, CrateMetadata};
+use rustc::hir::def_id::DefId; //{CRATE_DEF_INDEX, DefId};
+//use rustc::hir::def::Def;
 use rustc::mir::{Mir, TerminatorKind, BasicBlock};
 use rustc::session::Session;
 use data_section::{DataSection, DataSectionObject};
 use rustc_data_structures::indexed_vec::Idx;
+use rustc_mir::transform::mir_keys;
 
 // Edge kinds.
 const GOTO: u8 = 0;
@@ -34,53 +35,63 @@ const SENTINAL: u8 = 255;
 
 const MIR_CFG_SECTION_NAME: &'static str = ".yk_mir_cfg";
 
-pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, cstore: &CStore, sess: &Session) -> DataSectionObject {
+pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _cstore: &CStore, _sess: &Session) -> DataSectionObject {
     let mut sec = DataSection::new(MIR_CFG_SECTION_NAME);
 
-    // Iterate crates.
-    cstore.iter_crate_data(|k_num, k_md| {
+    //cstore.iter_crate_data(|k_num, k_md| {
+        //k_md.each_child_of_item(CRATE_DEF_INDEX, |exp| {
+        //    process_def(tcx, &mut sec, &exp.def);
+        //}, sess);
+
+    for k_num in tcx.crates().iter() {
         eprintln!("{:?}", k_num);
-        // Iterate top-level items.
-        k_md.each_child_of_item(CRATE_DEF_INDEX, |exp| {
-            process_def(tcx, k_md, &mut sec, &exp.def);
-        }, sess);
-    });
+        for def_id in tcx.mir_keys(*k_num).iter() {
+            process_mir(&mut sec, def_id, tcx.optimized_mir(*def_id));
+        }
+    };
 
     sec.write_u8(SENTINAL);
     sec.compile()
 }
 
-// XXX kill md?
-fn process_def<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _k_md: &CrateMetadata, sec: &mut DataSection, d: &Def) {
-    match d {
-        // XXX only top-level functions for now.
-        Def::Fn(def_id) => {
-            if tcx.is_mir_available(*def_id) {
-                process_mir(sec, def_id, tcx.optimized_mir(*def_id));
-            } else {
-                eprintln!("No MIR for {:?}", d);
-            }
-        },
-        _ => (),
-    }
-}
+//fn process_def<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, sec: &mut DataSection, d: &Def) {
+//    match d {
+//        // XXX only top-level functions for now.
+//        Def::Fn(def_id) => {
+//            if tcx.is_mir_available(*def_id) {
+//                process_mir(sec, def_id, tcx.optimized_mir(*def_id));
+//            } else {
+//                eprintln!("No MIR for {:?}", d);
+//            }
+//        },
+//        _ => (),
+//    }
+//}
 
 fn process_mir(sec: &mut DataSection, def_id: &DefId, mir: &Mir) {
     for (bb, maybe_bb_data) in mir.basic_blocks().iter_enumerated() {
         if maybe_bb_data.terminator.is_none() {
-            continue;
+            continue; // XXX find out what that would mean? Assert it can't?
         }
         let bb_data = maybe_bb_data.terminator.as_ref().unwrap();
+
+        // XXX
+        match bb_data.kind {
+            TerminatorKind::Call{..} => (),
+            _ => eprintln!("@ {}, {}, {}", def_id.krate.index(), def_id.index.as_raw_u32(), bb.index()),
+        }
+
         match bb_data.kind {
             // GOTO: <simple static edge>
             TerminatorKind::Goto{target: target_bb} => {
                 emit_simple_static_edge(sec, GOTO, def_id, bb, target_bb);
             },
-            // SWITCHINT: crate_num: u32, def_idx: u32, num_targets: usize, target_bb0, ..., target_bbN
+            // SWITCHINT: crate_num: u32, def_idx: u32, from_bb: u32, num_targets: usize, target_bb0, ..., target_bbN
             TerminatorKind::SwitchInt{ref targets, ..} => {
                 sec.write_u8(SWITCHINT);
                 sec.write_u32(def_id.krate.index() as u32);
                 sec.write_u32(def_id.index.as_raw_u32());
+                sec.write_u32(bb.index() as u32);
                 sec.write_usize(targets.len());
                 for target_bb in targets {
                     sec.write_u32(target_bb.index() as u32);
@@ -93,7 +104,7 @@ fn process_mir(sec: &mut DataSection, def_id: &DefId, mir: &Mir) {
             TerminatorKind::Unreachable => emit_simple_dynamic_edge(sec, UNREACHABLE, def_id, bb),
 
             // DROP_NO_UNWIND: <simple static edge>
-            // DROP_WITH_UNWIND: <simpl static edge> + unwind_bb: u32
+            // DROP_WITH_UNWIND: <simple static edge> + unwind_bb: u32
             TerminatorKind::Drop{target: target_bb, unwind: opt_unwind_bb, ..} => {
                 if let Some(unwind_bb) = opt_unwind_bb {
                     emit_simple_static_edge(sec, DROP_WITH_UNWIND, def_id, bb, target_bb);
