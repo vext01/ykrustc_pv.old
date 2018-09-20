@@ -325,7 +325,6 @@ impl<'a> CrateLoader<'a> {
 
         match result {
             LoadResult::Previous(cnum) => {
-                eprintln!(">>> Crate {:?} already loaded in {:?}", name, cnum);
                 let data = self.cstore.get_crate_data(cnum);
                 if data.root.macro_derive_registrar.is_some() {
                     dep_kind = DepKind::UnexportedMacrosOnly;
@@ -336,9 +335,7 @@ impl<'a> CrateLoader<'a> {
                 (cnum, data)
             }
             LoadResult::Loaded(library) => {
-                let res = self.register_crate(root, ident, span, library, dep_kind);
-                eprintln!(">>> Loading {:?} as {:?}", name, res.0);
-                res
+                self.register_crate(root, ident, span, library, dep_kind)
             }
         }
     }

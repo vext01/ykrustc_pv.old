@@ -1,13 +1,13 @@
 use rustc::ty::TyCtxt;
 
 use rustc_metadata::cstore::CStore; //, CrateMetadata};
-use rustc::hir::def_id::DefId; //{CRATE_DEF_INDEX, DefId};
-//use rustc::hir::def::Def;
+use rustc::hir::def_id::{CRATE_DEF_INDEX, DefId, LOCAL_CRATE};
+use rustc::hir::def::Def;
 use rustc::mir::{Mir, TerminatorKind, BasicBlock};
 use rustc::session::Session;
 use data_section::{DataSection, DataSectionObject};
-use rustc_data_structures::indexed_vec::Idx;
-use rustc_mir::transform::mir_keys;
+//use rustc_data_structures::indexed_vec::Idx;
+//use rustc_mir::transform::mir_keys;
 
 // Edge kinds.
 const GOTO: u8 = 0;
@@ -43,30 +43,37 @@ pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _cs
         //    process_def(tcx, &mut sec, &exp.def);
         //}, sess);
 
+    // Process the local crate.
+    for def_id in tcx.mir_keys(LOCAL_CRATE).iter() {
+        process_mir(&mut sec, def_id, tcx.optimized_mir(*def_id));
+    }
+
+    // Process other crates.
     for k_num in tcx.crates().iter() {
         eprintln!("{:?}", k_num);
-        for def_id in tcx.mir_keys(*k_num).iter() {
-            process_mir(&mut sec, def_id, tcx.optimized_mir(*def_id));
+        let crate_def_id = DefId{krate: *k_num, index: CRATE_DEF_INDEX};
+        for exp in tcx.item_children(crate_def_id).iter() {
+            process_def(tcx, &mut sec, &exp.def);
         }
-    };
+    }
 
     sec.write_u8(SENTINAL);
     sec.compile()
 }
 
-//fn process_def<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, sec: &mut DataSection, d: &Def) {
-//    match d {
-//        // XXX only top-level functions for now.
-//        Def::Fn(def_id) => {
-//            if tcx.is_mir_available(*def_id) {
-//                process_mir(sec, def_id, tcx.optimized_mir(*def_id));
-//            } else {
-//                eprintln!("No MIR for {:?}", d);
-//            }
-//        },
-//        _ => (),
-//    }
-//}
+fn process_def<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, sec: &mut DataSection, d: &Def) {
+    match d {
+        // XXX only top-level functions for now.
+        Def::Fn(def_id) => {
+            if tcx.is_mir_available(*def_id) {
+                process_mir(sec, def_id, tcx.optimized_mir(*def_id));
+            } else {
+                eprintln!("No MIR for {:?}", d);
+            }
+        },
+        _ => (),
+    }
+}
 
 fn process_mir(sec: &mut DataSection, def_id: &DefId, mir: &Mir) {
     for (bb, maybe_bb_data) in mir.basic_blocks().iter_enumerated() {
@@ -130,7 +137,8 @@ fn process_mir(sec: &mut DataSection, def_id: &DefId, mir: &Mir) {
             },
             // ASSERT_NO_CLEANUP: <simple static edge>
             // ASSERT_WITH_CLEANUP: <simple static edge> + cleanup_bb: u32
-            TerminatorKind::Assert{target: target_bb, cleanup: opt_cleanup_bb, ..} => {
+            TerminatorKind::Assert{ref cond, target: target_bb, cleanup: opt_cleanup_bb, ..} => {
+                eprintln!("---ASSERT: cond={:?}", cond);
                 if let Some(cleanup_bb) = opt_cleanup_bb {
                     emit_simple_static_edge(sec, ASSERT_WITH_CLEANUP, def_id, bb, target_bb);
                     sec.write_u32(cleanup_bb.index() as u32);

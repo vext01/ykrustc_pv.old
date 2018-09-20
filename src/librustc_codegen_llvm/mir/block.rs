@@ -12,7 +12,7 @@ use llvm::{self, BasicBlock, LLVMGetFirstInstruction,
            LLVMPositionBuilderBefore, LLVMPositionBuilderAtEnd,
            LLVMRustAddYkBlockLabel};
 use std::ffi::CString;
-use rustc_data_structures::indexed_vec::Idx;
+//use rustc_data_structures::indexed_vec::Idx;
 
 use rustc::middle::lang_items;
 use rustc::ty::{self, Ty, TypeFoldable};
@@ -350,7 +350,7 @@ impl FunctionCx<'a, 'll, 'tcx> {
 
             mir::TerminatorKind::Assert { ref cond, expected, ref msg, target, cleanup } => {
                 let cond = self.codegen_operand(&bx, cond).immediate();
-                let mut const_cond = common::const_to_opt_u128(cond, false).map(|c| c == 1);
+                let mut _const_cond = common::const_to_opt_u128(cond, false).map(|c| c == 1);
 
                 // This case can currently arise only from functions marked
                 // with #[rustc_inherit_overflow_checks] and inlined from
@@ -361,15 +361,16 @@ impl FunctionCx<'a, 'll, 'tcx> {
                 // value, so we have to check for the assert message.
                 if !bx.cx.check_overflow {
                     if let mir::interpret::EvalErrorKind::OverflowNeg = *msg {
-                        const_cond = Some(expected);
+                        _const_cond = Some(expected);
                     }
                 }
 
                 // Don't codegen the panic block if success if known.
-                if const_cond == Some(expected) {
-                    funclet_br(self, bx, target);
-                    return;
-                }
+                // XXX disable this for yorick.
+                //if const_cond == Some(expected) {
+                //    funclet_br(self, bx, target);
+                //    return;
+                //}
 
                 // Pass the condition through llvm.expect for branch hinting.
                 let expect = bx.cx.get_intrinsic(&"llvm.expect.i1");
