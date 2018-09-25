@@ -35,5 +35,5 @@ pub fn emit_crate_map<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>) -> DataSe
         sec.write_str(path);
     }
 
-    sec.compile()
+    sec.compile().unwrap()
 }

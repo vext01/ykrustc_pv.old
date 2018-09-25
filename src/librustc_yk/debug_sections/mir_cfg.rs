@@ -58,7 +58,7 @@ pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _cs
     }
 
     sec.write_u8(SENTINAL);
-    sec.compile()
+    sec.compile().unwrap()
 }
 
 fn process_def<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, sec: &mut DataSection, d: &Def) {
