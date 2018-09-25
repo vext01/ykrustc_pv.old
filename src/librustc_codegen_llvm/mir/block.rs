@@ -10,7 +10,7 @@
 
 use llvm::{self, BasicBlock, LLVMGetFirstInstruction,
            LLVMPositionBuilderBefore, LLVMPositionBuilderAtEnd,
-           LLVMRustAddYkBlockLabel};
+           LLVMRustAddYkBlockLabel, LLVMRustAddYkBlockLabelAfter};
 use std::ffi::CString;
 //use rustc_data_structures::indexed_vec::Idx;
 
@@ -62,7 +62,7 @@ impl FunctionCx<'a, 'll, 'tcx> {
 
             // Make an appropriate name for the label.
             let did = self.instance.def.def_id();
-            let lbl_name = CString::new(format!("__YK_BLK_{}_{}_{}", did.krate.as_u32(), did.index.as_raw_u32(), bb.index())).unwrap();
+            let lbl_name = CString::new(format!("__YK_START_BLK_{}_{}_{}", did.krate.as_u32(), did.index.as_raw_u32(), bb.index())).unwrap();
 
             // Get the sub_program.
             // XXX must be an easier way.
@@ -74,8 +74,25 @@ impl FunctionCx<'a, 'll, 'tcx> {
             unsafe { LLVMRustAddYkBlockLabel(bx.llbuilder, di_bldr, di_sp, first_instr, lbl_name.as_ptr()) };
         }
 
+        // Yorick terminator label.
+        // Ideally we'd have put this after the terminatir and called it the "end label", but since
+        // the bx's ownership is passed off to `codegen_terminator`, this makes that strategy hard.
+        if self.cx.has_debug() && first_instr_o.is_some() {
+            let di_bldr = DIB(self.cx);
+            let did = self.instance.def.def_id();
+            let lbl_name = CString::new(format!("__YK_TERM_BLK_{}_{}_{}", did.krate.as_u32(), did.index.as_raw_u32(), bb.index())).unwrap();
+            let loc = Location{block: bb, statement_index: 0};
+            let source_info = self.mir.source_info(loc);
+            let (_, span) = self.debug_loc(*source_info);
+            {
+                let di_sp = self.fn_metadata(span);
+                unsafe { LLVMRustAddYkBlockLabelAfter(bx.llbuilder, di_bldr, di_sp, bx.llbb(), lbl_name.as_ptr()) };
+            }
+        }
+
         unsafe { LLVMPositionBuilderAtEnd(bx.llbuilder, bx.llbb()); }
         self.codegen_terminator(bx, bb, data.terminator());
+
     }
 
     fn codegen_terminator(&mut self,
