@@ -1,3 +1,5 @@
+#![feature(box_patterns)]
+
 extern crate data_section;
 extern crate rustc;
 extern crate rustc_metadata;

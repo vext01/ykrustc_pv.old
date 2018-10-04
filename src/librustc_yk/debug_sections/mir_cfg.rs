@@ -3,7 +3,8 @@ use rustc::ty::TyCtxt;
 use rustc_metadata::cstore::CStore; //, CrateMetadata};
 use rustc::hir::def_id::{CRATE_DEF_INDEX, DefId, LOCAL_CRATE};
 use rustc::hir::def::Def;
-use rustc::mir::{Mir, TerminatorKind, BasicBlock};
+use rustc::mir::{Mir, TerminatorKind, BasicBlock, Operand, Constant};
+use rustc::ty::{TyS, TyKind, Const};
 use rustc::session::Session;
 use data_section::{DataSection, DataSectionObject};
 //use rustc_data_structures::indexed_vec::Idx;
@@ -20,10 +21,10 @@ const DROP_NO_UNWIND: u8 = 6;
 const DROP_WITH_UNWIND: u8 = 7;
 const DROP_AND_REPLACE_NO_UNWIND: u8 = 8;
 const DROP_AND_REPLACE_WITH_UNWIND: u8 = 9;
-const _CALL_NO_UNWIND: u8 = 10;
-const _CALL_WITH_UNWIND: u8 = 11;
-const _CALL_UNKNOWN_NO_UNWIND: u8 = 12;
-const _CALL_UNKNOWN_WITH_UNWIND: u8 = 13;
+const CALL_NO_CLEANUP: u8 = 10;
+const CALL_WITH_CLEANUP: u8 = 11;
+const CALL_UNKNOWN_NO_CLEANUP: u8 = 12;
+const CALL_UNKNOWN_WITH_CLEANUP: u8 = 13;
 const ASSERT_NO_CLEANUP: u8 = 14;
 const ASSERT_WITH_CLEANUP: u8 = 15;
 const YIELD_NO_DROP: u8 = 16;
@@ -50,7 +51,6 @@ pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _cs
 
     // Process other crates.
     for k_num in tcx.crates().iter() {
-        eprintln!("{:?}", k_num);
         let crate_def_id = DefId{krate: *k_num, index: CRATE_DEF_INDEX};
         for exp in tcx.item_children(crate_def_id).iter() {
             process_def(tcx, &mut sec, &exp.def);
@@ -65,10 +65,9 @@ fn process_def<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, sec: &mut DataSe
     match d {
         // XXX only top-level functions for now.
         Def::Fn(def_id) => {
+            // Not all functions will have MIR available.
             if tcx.is_mir_available(*def_id) {
                 process_mir(sec, def_id, tcx.optimized_mir(*def_id));
-            } else {
-                eprintln!("No MIR for {:?}", d);
             }
         },
         _ => (),
@@ -81,12 +80,6 @@ fn process_mir(sec: &mut DataSection, def_id: &DefId, mir: &Mir) {
             continue; // XXX find out what that would mean? Assert it can't?
         }
         let bb_data = maybe_bb_data.terminator.as_ref().unwrap();
-
-        // XXX
-        match bb_data.kind {
-            TerminatorKind::Call{..} => (),
-            _ => eprintln!("@ {}, {}, {}", def_id.krate.index(), def_id.index.as_raw_u32(), bb.index()),
-        }
 
         match bb_data.kind {
             // GOTO: <simple static edge>
@@ -130,15 +123,57 @@ fn process_mir(sec: &mut DataSection, def_id: &DefId, mir: &Mir) {
                     emit_simple_static_edge(sec, DROP_AND_REPLACE_NO_UNWIND, def_id, bb, target_bb);
                 }
             },
-            TerminatorKind::Call{cleanup: _opt_cleanup_bb, ..} => {
+            TerminatorKind::Call{ref func, cleanup: opt_cleanup_bb, ..} => {
                 // XXX
-                //if let Some(cleanup_bb) = opt_cleanup_bb {
-                //}
+                if let Operand::Constant(box Constant {
+                    literal: Const {
+                        ty: &TyS {
+                            sty: TyKind::FnDef(target_def_id, _substs), ..
+                        }, ..
+                    }, ..
+                }, ..) = func {
+                    // A statically known call target.
+                    if opt_cleanup_bb.is_some() {
+                        sec.write_u8(CALL_WITH_CLEANUP);
+                    } else {
+                        sec.write_u8(CALL_NO_CLEANUP);
+                    }
+
+                    // Source.
+                    sec.write_u32(def_id.krate.index() as u32);
+                    sec.write_u32(def_id.index.as_raw_u32());
+                    sec.write_u32(bb.index() as u32);
+
+                    // Destination.
+                    sec.write_u32(target_def_id.krate.index() as u32);
+                    sec.write_u32(target_def_id.index.as_raw_u32()); // Assume destination bb is 0.
+
+                    // Cleanup (if any).
+                    if let Some(cleanup_bb) = opt_cleanup_bb {
+                        sec.write_u32(cleanup_bb.index() as u32);
+                    }
+                } else {
+                    // It's a kind of call that we can't statically know the target of.
+                    if opt_cleanup_bb.is_some() {
+                        sec.write_u8(CALL_UNKNOWN_WITH_CLEANUP);
+                    } else {
+                        sec.write_u8(CALL_UNKNOWN_NO_CLEANUP);
+                    }
+
+                    // Source.
+                    sec.write_u32(def_id.krate.index() as u32);
+                    sec.write_u32(def_id.index.as_raw_u32());
+                    sec.write_u32(bb.index() as u32);
+
+                    // Cleanup (if any).
+                    if let Some(cleanup_bb) = opt_cleanup_bb {
+                        sec.write_u32(cleanup_bb.index() as u32);
+                    }
+                }
             },
             // ASSERT_NO_CLEANUP: <simple static edge>
             // ASSERT_WITH_CLEANUP: <simple static edge> + cleanup_bb: u32
-            TerminatorKind::Assert{ref cond, target: target_bb, cleanup: opt_cleanup_bb, ..} => {
-                eprintln!("---ASSERT: cond={:?}", cond);
+            TerminatorKind::Assert{target: target_bb, cleanup: opt_cleanup_bb, ..} => {
                 if let Some(cleanup_bb) = opt_cleanup_bb {
                     emit_simple_static_edge(sec, ASSERT_WITH_CLEANUP, def_id, bb, target_bb);
                     sec.write_u32(cleanup_bb.index() as u32);
