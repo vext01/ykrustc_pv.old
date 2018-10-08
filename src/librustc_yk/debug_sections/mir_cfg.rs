@@ -32,6 +32,7 @@ const YIELD_WITH_DROP: u8 = 17;
 const GENERATOR_DROP: u8 = 18;
 const FALSE_EDGES: u8 = 19;
 const FALSE_UNWIND: u8 = 20;
+const NO_MIR: u8 = 254;
 const SENTINAL: u8 = 255;
 
 const MIR_CFG_SECTION_NAME: &'static str = ".yk_mir_cfg";
@@ -50,10 +51,14 @@ pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _cs
     }
 
     // Process other crates.
+    let mut seen_def_ids = Vec::new();
     for k_num in tcx.crates().iter() {
         let crate_def_id = DefId{krate: *k_num, index: CRATE_DEF_INDEX};
-        for exp in tcx.item_children(crate_def_id).iter() {
-            process_def(tcx, &mut sec, &exp.def);
+        if !seen_def_ids.contains(&crate_def_id) {
+            seen_def_ids.push(crate_def_id);
+            for exp in tcx.item_children(crate_def_id).iter() {
+                process_def(tcx, &mut sec, &mut seen_def_ids, &exp.def);
+            }
         }
     }
 
@@ -61,15 +66,65 @@ pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _cs
     sec.compile().unwrap()
 }
 
-fn process_def<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, sec: &mut DataSection, d: &Def) {
+fn process_def<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, sec: &mut DataSection, seen_def_ids: &mut Vec<DefId>, d: &Def) {
+    // We are delving deeper into anywhere that might contain MIR.
     match d {
-        // XXX only top-level functions for now.
-        Def::Fn(def_id) => {
-            // Not all functions will have MIR available.
-            if tcx.is_mir_available(*def_id) {
-                process_mir(sec, def_id, tcx.optimized_mir(*def_id));
+        // XXX incomplete.
+        //Def::Fn(def_id) => {
+        //    // Not all functions will have MIR available.
+        //    if tcx.is_mir_available(*def_id) && !seen_def_ids.contains(def_id) {
+        //        seen_def_ids.push(*def_id);
+        //        process_mir(sec, def_id, tcx.optimized_mir(*def_id));
+        //    }
+        //},
+        Def::Mod(def_id)
+            | Def::Struct(def_id)
+            | Def::Union(def_id)
+            | Def::Enum(def_id)
+            | Def::Variant(def_id)
+            | Def::Trait(def_id)
+            | Def::Existential(def_id)
+            | Def::TyAlias(def_id)
+            | Def::ForeignTy(def_id)
+            | Def::TraitAlias(def_id)
+            | Def::AssociatedTy(def_id)
+            | Def::AssociatedExistential(def_id)
+            | Def::TyParam(def_id)
+            | Def::Fn(def_id)
+            | Def::Const(def_id)
+            | Def::Static(def_id, ..)
+            | Def::StructCtor(def_id, ..)
+            | Def::VariantCtor(def_id, ..)
+            | Def::Method(def_id)
+            | Def::AssociatedConst(def_id)
+            | Def::Macro(def_id, ..) => {
+            if !seen_def_ids.contains(def_id) {
+                seen_def_ids.push(*def_id);
+                if tcx.is_mir_available(*def_id) {
+                    process_mir(sec, def_id, tcx.optimized_mir(*def_id));
+                    for exp in tcx.item_children(*def_id).iter() {
+                        process_def(tcx, sec, seen_def_ids, &exp.def);
+                    }
+                } else {
+                    // We explcitely record if MIR was unavailable for a DefId.
+                    sec.write_u8(NO_MIR);
+                    sec.write_u32(def_id.krate.index() as u32);
+                    sec.write_u32(def_id.index.as_raw_u32());
+                }
             }
         },
+        // XXX
+        //
+        //Local(ast::NodeId),
+        //Upvar(ast::NodeId,  // node id of closed over local
+        //      usize,        // index in the freevars list of the closure
+        //      ast::NodeId), // expr node that creates the closure
+        //Label(ast::NodeId),
+        // Macro namespace
+        //NonMacroAttr(NonMacroAttrKind), // e.g. `#[inline]` or `#[rustfmt::skip]`
+        //| Def::PrimTy(hir::PrimTy),
+        //| Def::ToolMod, // e.g. `rustfmt` in `#[rustfmt::skip]`
+        //Def::Err,
         _ => (),
     }
 }
