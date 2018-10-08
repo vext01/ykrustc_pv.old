@@ -41,6 +41,15 @@ impl<'tcx> MonoItem<'tcx> {
             MonoItem::GlobalAsm(_) => 1,
         }
     }
+
+    /// Get the DefId of the item.
+    pub fn def_id(&self) -> Option<DefId> {
+        match self {
+            MonoItem::Fn(ref instance) => Some(instance.def.def_id()),
+            MonoItem::Static(def_id) => Some(*def_id),
+            MonoItem::GlobalAsm(..) => None, // XXX
+        }
+    }
 }
 
 impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for MonoItem<'tcx> {
