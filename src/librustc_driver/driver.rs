@@ -38,7 +38,7 @@ use rustc_privacy;
 use rustc_plugin::registry::Registry;
 use rustc_plugin as plugin;
 use rustc_passes::{self, ast_validation, hir_stats, loops, rvalue_promotion};
-//use rustc_yk::debug_sections::{crate_map};  //, mir_cfg};
+use rustc_yk::debug_sections::{crate_map, mir_cfg};
 use super::Compilation;
 
 use serialize::json;
@@ -341,8 +341,8 @@ pub fn compile_input(
                 // Output Yorick debug sections into binary targets.
                 if let Ok(_) = env::var("YK_DEBUG_SECTIONS") {
                     if tcx.sess.opts.output_types.contains_key(&OutputType::Exe) {
-                        //tcx.sess.yk_link_objects.borrow_mut().push(crate_map::emit_crate_map(&tcx));
-                        //tcx.sess.yk_link_objects.borrow_mut().push(mir_cfg::emit_mir_cfg_section(&tcx, cstore, sess));
+                        tcx.sess.yk_link_objects.borrow_mut().push(crate_map::emit_crate_map(&tcx));
+                        tcx.sess.yk_link_objects.borrow_mut().push(mir_cfg::emit_mir_cfg_section(&tcx, cstore, sess));
                     }
                 }
 

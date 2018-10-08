@@ -33,9 +33,9 @@ const GENERATOR_DROP: u8 = 18;
 const FALSE_EDGES: u8 = 19;
 const FALSE_UNWIND: u8 = 20;
 const NO_MIR: u8 = 254;
-pub const SENTINAL: u8 = 255;
+const SENTINAL: u8 = 255;
 
-pub const MIR_CFG_SECTION_NAME: &'static str = ".yk_mir_cfg";
+const MIR_CFG_SECTION_NAME: &'static str = ".yk_mir_cfg";
 
 pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _cstore: &CStore, _sess: &Session) -> DataSectionObject {
     let mut sec = DataSection::new(MIR_CFG_SECTION_NAME);

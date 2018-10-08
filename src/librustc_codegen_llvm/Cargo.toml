@@ -15,8 +15,6 @@ num_cpus = "1.0"
 rustc-demangle = "0.1.4"
 rustc_llvm = { path = "../librustc_llvm" }
 memmap = "0.6"
-#rustc_yk = { path = "../librustc_yk" }
-data_section = {path = "../../../data_section_pv"}
 
 [features]
 # This is used to convince Cargo to separately cache builds of `rustc_codegen_llvm`

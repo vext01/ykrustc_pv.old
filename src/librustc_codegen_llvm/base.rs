@@ -28,11 +28,6 @@ use super::ModuleCodegen;
 use super::ModuleKind;
 use super::CachedModuleCodegen;
 
-//use rustc_yk::debug_sections::mir_cfg::{MIR_CFG_SECTION_NAME, SENTINAL};
-//use data_section::{DataSection}; //, DataSectionObject};
-use mir_cfg_section::{new_mir_cfg_section, finalise_mir_cfg_section, emit_mir_cfg_info};
-
-use std::collections::HashSet;
 use abi;
 use back::write::{self, OngoingCodegen};
 use llvm::{self, TypeKind, get_param};
@@ -818,7 +813,6 @@ pub fn codegen_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         tcx.collect_and_partition_mono_items(LOCAL_CRATE).1;
     let codegen_units = (*codegen_units).clone();
 
-
     // Force all codegen_unit queries so they are already either red or green
     // when compile_codegen_unit accesses them. We are not able to re-execute
     // the codegen_unit query from just the DepNode, so an unknown color would
@@ -829,6 +823,7 @@ pub fn codegen_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             tcx.codegen_unit(cgu.name().clone());
         }
     }
+
     let ongoing_codegen = write::start_async_codegen(
         tcx,
         time_graph.clone(),
@@ -1218,7 +1213,7 @@ fn compile_codegen_unit<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     return stats;
 
     fn module_codegen<'a, 'tcx>(
-        mut tcx: TyCtxt<'a, 'tcx, 'tcx>,
+        tcx: TyCtxt<'a, 'tcx, 'tcx>,
         cgu_name: InternedString)
         -> (Stats, ModuleCodegen)
     {
@@ -1235,23 +1230,9 @@ fn compile_codegen_unit<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             }
 
             // ... and now that we have everything pre-defined, fill out those definitions.
-            // Also collect the DefIds we need to emit Yorick CFG section entries for. A set is
-            // used because we are iterating after monomorphisation and we don't want to emit
-            // duplicates.
-            let mut mir_cfg_def_ids = HashSet::new();
             for &(mono_item, _) in &mono_items {
                 mono_item.define(&cx);
-                mono_item.def_id().map(|def_id| mir_cfg_def_ids.insert(def_id));
             }
-
-            // Generate a Yorick MIR CFG section in the binary.
-            let mut sec = new_mir_cfg_section();
-            for def_id in mir_cfg_def_ids {
-                if tcx.is_mir_available(def_id) {
-                    emit_mir_cfg_info(&mut sec, &def_id, tcx.optimized_mir(def_id));
-                }
-            }
-            finalise_mir_cfg_section(&mut tcx, sec);
 
             // If this codegen unit contains the main function, also create the
             // wrapper here

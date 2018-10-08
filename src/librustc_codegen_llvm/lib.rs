@@ -41,9 +41,6 @@ use back::write::create_target_machine;
 use rustc::dep_graph::WorkProduct;
 use syntax_pos::symbol::Symbol;
 
-//extern crate rustc_yk;
-extern crate data_section;
-
 #[macro_use] extern crate bitflags;
 extern crate flate2;
 extern crate libc;
@@ -94,7 +91,6 @@ use rustc_mir::monomorphize;
 use rustc_codegen_utils::codegen_backend::CodegenBackend;
 use rustc_data_structures::svh::Svh;
 
-mod mir_cfg_section;
 mod diagnostics;
 
 mod back {
