@@ -61,14 +61,13 @@ impl FunctionCx<'a, 'll, 'tcx> {
             unsafe { LLVMPositionBuilderBefore(bx.llbuilder, first_instr) }
 
             // Make an appropriate name for the label.
-            // The label identifies the crate by its disabiguator. It might be tempting to use the
-            // crate number, but this wouldn't serve as a unique ID as crate numbers are only
-            // unique to any given compilation session.
+            // The label identifies the crate by its hash. It might be tempting to use the crate
+            // number, but this wouldn't serve as a unique ID as crate numbers are only unique to
+            // any given compilation session.
             let did = self.instance.def.def_id();
-            let fingerprint = bx.tcx().sess.crate_disambiguator.get().to_fingerprint().as_value();
-            let crate_dis = (fingerprint.1 as u128) << 64 | fingerprint.0 as u128;
+            let k_hash = bx.tcx().crate_hash(did.krate).as_u64();
             let lbl_name = CString::new(format!("__YK_START_BLK_{}_{}_{}",
-                                        crate_dis, did.index.as_raw_u32(), bb.index())).unwrap();
+                                        k_hash, did.index.as_raw_u32(), bb.index())).unwrap();
 
             // Get the sub_program.
             // XXX must be an easier way.

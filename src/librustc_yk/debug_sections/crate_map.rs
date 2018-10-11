@@ -1,5 +1,6 @@
 use rustc::ty::TyCtxt;
 use data_section::{DataSection, DataSectionObject};
+use rustc::hir::def_id::LOCAL_CRATE;
 
 const CRATE_MAP_SECTION_NAME: &str = ".yk_crate_map";
 
@@ -19,16 +20,19 @@ pub fn emit_crate_map<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>) -> DataSe
 
     // First field in the section is the number of crate records to process.
     let num_crates = tcx.crates().iter().count();
-    sec.write_u32(num_crates as u32);
+    sec.write_u32((num_crates + 1) as u32);
+
+    // Local crate record.
+    sec.write_u32(LOCAL_CRATE.as_u32());
+    sec.write_u64(tcx.crate_hash(LOCAL_CRATE).as_u64());
 
     // Now there's a record for each crate.
     for krate in tcx.crates().iter() {
         sec.write_u32(krate.as_u32());
 
-        eprintln!("MAP: {:?} -> 0x{}", krate, tcx.crate_disambiguator(*krate).to_fingerprint().to_hex());
-        let dis = tcx.crate_disambiguator(*krate).to_fingerprint().as_value();
-        sec.write_u64(dis.1);
-        sec.write_u64(dis.0);
+        let hash = tcx.crate_hash(*krate).as_u64();
+        eprintln!("MAP: {:?} ({}) -> 0x{:x}", krate, tcx.crate_name(*krate), hash);
+        sec.write_u64(hash);
 
         //sec.write_str(&tcx.crate_name(*krate).as_str());
         //sec.write_u8(0);
