@@ -339,11 +339,12 @@ pub fn compile_input(
                 }
 
                 // Output Yorick debug sections into binary targets.
-                if let Ok(_) = env::var("YK_DEBUG_SECTIONS") {
-                    if tcx.sess.opts.output_types.contains_key(&OutputType::Exe) {
-                        tcx.sess.yk_link_objects.borrow_mut().push(crate_map::emit_crate_map(&tcx));
-                        tcx.sess.yk_link_objects.borrow_mut().push(mir_cfg::emit_mir_cfg_section(&tcx, cstore, sess));
-                    }
+                let is_exe = sess.crate_types
+                    .borrow()
+                    .contains(&config::CrateType::Executable);
+                if is_exe {
+                    tcx.sess.yk_link_objects.borrow_mut().push(crate_map::emit_crate_map(&tcx));
+                    tcx.sess.yk_link_objects.borrow_mut().push(mir_cfg::emit_mir_cfg_section(&tcx, cstore, sess));
                 }
 
                 Ok((outputs.clone(), ongoing_codegen, tcx.dep_graph.clone()))

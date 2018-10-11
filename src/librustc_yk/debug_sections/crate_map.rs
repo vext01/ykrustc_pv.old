@@ -24,15 +24,22 @@ pub fn emit_crate_map<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>) -> DataSe
     // Now there's a record for each crate.
     for krate in tcx.crates().iter() {
         sec.write_u32(krate.as_u32());
-        sec.write_str(&tcx.crate_name(*krate).as_str());
 
-        let source = tcx.used_crate_source(*krate);
-        let path = if let Some((ref p, _))  = source.rlib {
-            p.to_str().unwrap()
-        } else {
-            ""  // Not an rlib.
-        };
-        sec.write_str(path);
+        eprintln!("MAP: {:?} -> 0x{}", krate, tcx.crate_disambiguator(*krate).to_fingerprint().to_hex());
+        let dis = tcx.crate_disambiguator(*krate).to_fingerprint().as_value();
+        sec.write_u64(dis.1);
+        sec.write_u64(dis.0);
+
+        //sec.write_str(&tcx.crate_name(*krate).as_str());
+        //sec.write_u8(0);
+
+        //let source = tcx.used_crate_source(*krate);
+        //let path = if let Some((ref p, _))  = source.rlib {
+        //    p.to_str().unwrap()
+        //} else {
+        //    ""  // Not an rlib.
+        //};
+        //sec.write_str(path);
     }
 
     sec.compile().unwrap()
