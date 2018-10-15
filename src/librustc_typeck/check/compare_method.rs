@@ -16,10 +16,11 @@ use rustc::traits::{self, ObligationCause, ObligationCauseCode, Reveal};
 use rustc::ty::error::{ExpectedFound, TypeError};
 use rustc::ty::subst::{Subst, Substs};
 use rustc::util::common::ErrorReported;
+use errors::Applicability;
 
 use syntax_pos::Span;
 
-use super::{Inherited, FnCtxt};
+use super::{Inherited, FnCtxt, potentially_plural_count};
 
 /// Checks that a method from an impl conforms to the signature of
 /// the same method as declared in the trait.
@@ -127,14 +128,14 @@ fn compare_predicate_entailment<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // We create a mapping `dummy_substs` that maps from the impl type
     // parameters to fresh types and regions. For type parameters,
     // this is the identity transform, but we could as well use any
-    // skolemized types. For regions, we convert from bound to free
+    // placeholder types. For regions, we convert from bound to free
     // regions (Note: but only early-bound regions, i.e., those
     // declared on the impl or used in type parameter bounds).
     //
     //     impl_to_skol_substs = {'i => 'i0, U => U0, N => N0 }
     //
     // Now we can apply skol_substs to the type of the impl method
-    // to yield a new function type in terms of our fresh, skolemized
+    // to yield a new function type in terms of our fresh, placeholder
     // types:
     //
     //     <'b> fn(t: &'i0 U0, m: &'b) -> Foo
@@ -162,15 +163,15 @@ fn compare_predicate_entailment<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // We do this by creating a parameter environment which contains a
     // substitution corresponding to impl_to_skol_substs. We then build
     // trait_to_skol_substs and use it to convert the predicates contained
-    // in the trait_m.generics to the skolemized form.
+    // in the trait_m.generics to the placeholder form.
     //
     // Finally we register each of these predicates as an obligation in
     // a fresh FulfillmentCtxt, and invoke select_all_or_error.
 
-    // Create mapping from impl to skolemized.
+    // Create mapping from impl to placeholder.
     let impl_to_skol_substs = Substs::identity_for_item(tcx, impl_m.def_id);
 
-    // Create mapping from trait to skolemized.
+    // Create mapping from trait to placeholder.
     let trait_to_skol_substs = impl_to_skol_substs.rebase_onto(tcx,
                                                                impl_m.container.id(),
                                                                trait_to_impl_substs);
@@ -208,10 +209,10 @@ fn compare_predicate_entailment<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     //
     // We then register the obligations from the impl_m and check to see
     // if all constraints hold.
-    hybrid_preds.predicates
-                .extend(trait_m_predicates.instantiate_own(tcx, trait_to_skol_substs).predicates);
+    hybrid_preds.predicates.extend(
+        trait_m_predicates.instantiate_own(tcx, trait_to_skol_substs).predicates);
 
-    // Construct trait parameter environment and then shift it into the skolemized viewpoint.
+    // Construct trait parameter environment and then shift it into the placeholder viewpoint.
     // The key step here is to update the caller_bounds's predicates to be
     // the new hybrid bounds we computed.
     let normalize_cause = traits::ObligationCause::misc(impl_m_span, impl_m_node_id);
@@ -258,7 +259,7 @@ fn compare_predicate_entailment<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         // any associated types appearing in the fn arguments or return
         // type.
 
-        // Compute skolemized form of impl and trait method tys.
+        // Compute placeholder form of impl and trait method tys.
         let tcx = infcx.tcx;
 
         let (impl_sig, _) =
@@ -319,12 +320,13 @@ fn compare_predicate_entailment<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                             trait_m.ident);
             if let TypeError::Mutability = terr {
                 if let Some(trait_err_span) = trait_err_span {
-                    if let Ok(trait_err_str) = tcx.sess.source_map().
-                                               span_to_snippet(trait_err_span) {
-                        diag.span_suggestion(
+                    if let Ok(trait_err_str) = tcx.sess.source_map()
+                                                       .span_to_snippet(trait_err_span) {
+                        diag.span_suggestion_with_applicability(
                             impl_err_span,
                             "consider change the type to match the mutability in trait",
-                            format!("{}", trait_err_str),
+                            trait_err_str.to_string(),
+                            Applicability::MachineApplicable,
                         );
                     }
                 }
@@ -332,7 +334,7 @@ fn compare_predicate_entailment<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
             infcx.note_type_err(&mut diag,
                                 &cause,
-                                trait_err_span.map(|sp| (sp, "type in trait".to_string())),
+                                trait_err_span.map(|sp| (sp, "type in trait".to_owned())),
                                 Some(infer::ValuePairs::Types(ExpectedFound {
                                     expected: trait_fty,
                                     found: impl_fty,
@@ -406,7 +408,7 @@ fn check_region_bounds_on_impl_method<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         return Err(ErrorReported);
     }
 
-    return Ok(());
+    Ok(())
 }
 
 fn extract_spans_for_error_reporting<'a, 'gcx, 'tcx>(infcx: &infer::InferCtxt<'a, 'gcx, 'tcx>,
@@ -468,14 +470,14 @@ fn extract_spans_for_error_reporting<'a, 'gcx, 'tcx>(infcx: &infer::InferCtxt<'a
                 impl_iter.zip(trait_iter)
                          .zip(impl_m_iter)
                          .zip(trait_m_iter)
-                         .filter_map(|(((&impl_arg_ty, &trait_arg_ty), impl_arg), trait_arg)| {
+                         .filter_map(|(((&impl_arg_ty, &trait_arg_ty), impl_arg), trait_arg)|
                              match infcx.at(&cause, param_env).sub(trait_arg_ty, impl_arg_ty) {
                                  Ok(_) => None,
                                  Err(_) => Some((impl_arg.span, Some(trait_arg.span))),
                              }
-                         })
+                         )
                          .next()
-                         .unwrap_or_else(|| {
+                         .unwrap_or_else(||
                              if
                                  infcx.at(&cause, param_env)
                                       .sup(trait_sig.output(), impl_sig.output())
@@ -485,7 +487,7 @@ fn extract_spans_for_error_reporting<'a, 'gcx, 'tcx>(infcx: &infer::InferCtxt<'a
                              } else {
                                  (cause.span(&tcx), tcx.hir.span_if_local(trait_m.def_id))
                              }
-                         })
+                         )
             } else {
                 (cause.span(&tcx), tcx.hir.span_if_local(trait_m.def_id))
             }
@@ -524,9 +526,9 @@ fn compare_self_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             );
             let can_eq_self = |ty| infcx.can_eq(param_env, untransformed_self_ty, ty).is_ok();
             match ExplicitSelf::determine(self_arg_ty, can_eq_self) {
-                ExplicitSelf::ByValue => "self".to_string(),
-                ExplicitSelf::ByReference(_, hir::MutImmutable) => "&self".to_string(),
-                ExplicitSelf::ByReference(_, hir::MutMutable) => "&mut self".to_string(),
+                ExplicitSelf::ByValue => "self".to_owned(),
+                ExplicitSelf::ByReference(_, hir::MutImmutable) => "&self".to_owned(),
+                ExplicitSelf::ByReference(_, hir::MutMutable) => "&mut self".to_owned(),
                 _ => format!("self: {}", self_arg_ty)
             }
         })
@@ -589,6 +591,7 @@ fn compare_number_of_generics<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let trait_m_generics = tcx.generics_of(trait_m.def_id);
     let num_impl_m_type_params = impl_m_generics.own_counts().types;
     let num_trait_m_type_params = trait_m_generics.own_counts().types;
+
     if num_impl_m_type_params != num_trait_m_type_params {
         let impl_m_node_id = tcx.hir.as_local_node_id(impl_m.def_id).unwrap();
         let impl_m_item = tcx.hir.expect_impl_item(impl_m_node_id);
@@ -598,43 +601,26 @@ fn compare_number_of_generics<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             impl_m_item.generics.span
         };
 
-        let mut err = struct_span_err!(tcx.sess,
-                                       span,
-                                       E0049,
-                                       "method `{}` has {} type parameter{} but its trait \
-                                        declaration has {} type parameter{}",
-                                       trait_m.ident,
-                                       num_impl_m_type_params,
-                                       if num_impl_m_type_params == 1 { "" } else { "s" },
-                                       num_trait_m_type_params,
-                                       if num_trait_m_type_params == 1 {
-                                           ""
-                                       } else {
-                                           "s"
-                                       });
+        let mut err = struct_span_err!(tcx.sess, span, E0049,
+            "method `{}` has {} but its trait declaration has {}",
+            trait_m.ident,
+            potentially_plural_count(num_impl_m_type_params, "type parameter"),
+            potentially_plural_count(num_trait_m_type_params, "type parameter")
+        );
 
         let mut suffix = None;
 
         if let Some(span) = trait_item_span {
-            err.span_label(span,
-                           format!("expected {}",
-                                    &if num_trait_m_type_params != 1 {
-                                        format!("{} type parameters", num_trait_m_type_params)
-                                    } else {
-                                        format!("{} type parameter", num_trait_m_type_params)
-                                    }));
+            err.span_label(span, format!("expected {}",
+                potentially_plural_count(num_trait_m_type_params, "type parameter")));
         } else {
             suffix = Some(format!(", expected {}", num_trait_m_type_params));
         }
 
         err.span_label(span,
                        format!("found {}{}",
-                                &if num_impl_m_type_params != 1 {
-                                    format!("{} type parameters", num_impl_m_type_params)
-                                } else {
-                                    "1 type parameter".to_string()
-                                },
-                                suffix.as_ref().map(|s| &s[..]).unwrap_or("")));
+                           potentially_plural_count(num_impl_m_type_params, "type parameter"),
+                           suffix.as_ref().map(|s| &s[..]).unwrap_or("")));
 
         err.emit();
 
@@ -692,33 +678,21 @@ fn compare_number_of_method_arguments<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         let mut err = struct_span_err!(tcx.sess,
                                        impl_span,
                                        E0050,
-                                       "method `{}` has {} parameter{} but the declaration in \
+                                       "method `{}` has {} but the declaration in \
                                         trait `{}` has {}",
                                        trait_m.ident,
-                                       impl_number_args,
-                                       if impl_number_args == 1 { "" } else { "s" },
+                                       potentially_plural_count(impl_number_args, "parameter"),
                                        tcx.item_path_str(trait_m.def_id),
                                        trait_number_args);
         if let Some(trait_span) = trait_span {
-            err.span_label(trait_span,
-                           format!("trait requires {}",
-                                    &if trait_number_args != 1 {
-                                        format!("{} parameters", trait_number_args)
-                                    } else {
-                                        format!("{} parameter", trait_number_args)
-                                    }));
+            err.span_label(trait_span, format!("trait requires {}",
+                potentially_plural_count(trait_number_args, "parameter")));
         } else {
             err.note_trait_signature(trait_m.ident.to_string(),
                                      trait_m.signature(&tcx));
         }
-        err.span_label(impl_span,
-                       format!("expected {}, found {}",
-                                &if trait_number_args != 1 {
-                                    format!("{} parameters", trait_number_args)
-                                } else {
-                                    format!("{} parameter", trait_number_args)
-                                },
-                                impl_number_args));
+        err.span_label(impl_span, format!("expected {}, found {}",
+            potentially_plural_count(trait_number_args, "parameter"), impl_number_args));
         err.emit();
         return Err(ErrorReported);
     }
@@ -748,8 +722,9 @@ fn compare_synthetic_generics<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             GenericParamDefKind::Lifetime => None,
         }
     });
-    for ((impl_def_id, impl_synthetic),
-         (trait_def_id, trait_synthetic)) in impl_m_type_params.zip(trait_m_type_params) {
+    for ((impl_def_id, impl_synthetic), (trait_def_id, trait_synthetic))
+        in impl_m_type_params.zip(trait_m_type_params)
+    {
         if impl_synthetic != trait_synthetic {
             let impl_node_id = tcx.hir.as_local_node_id(impl_def_id).unwrap();
             let impl_span = tcx.hir.span(impl_node_id);
@@ -799,7 +774,7 @@ fn compare_synthetic_generics<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                             .span_to_snippet(trait_m.generics.span)
                             .ok()?;
 
-                        err.multipart_suggestion(
+                        err.multipart_suggestion_with_applicability(
                             "try changing the `impl Trait` argument to a generic parameter",
                             vec![
                                 // replace `impl Trait` with `T`
@@ -809,6 +784,7 @@ fn compare_synthetic_generics<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                 // of the generics, but it works for the common case
                                 (generics_span, new_generics),
                             ],
+                            Applicability::MaybeIncorrect,
                         );
                         Some(())
                     })();
@@ -828,15 +804,14 @@ fn compare_synthetic_generics<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                         impl<'v> hir::intravisit::Visitor<'v> for Visitor {
                             fn visit_ty(&mut self, ty: &'v hir::Ty) {
                                 hir::intravisit::walk_ty(self, ty);
-                                match ty.node {
-                                    hir::TyKind::Path(hir::QPath::Resolved(None, ref path)) => {
-                                        if let hir::def::Def::TyParam(def_id) = path.def {
-                                            if def_id == self.1 {
-                                                self.0 = Some(ty.span);
-                                            }
+                                if let hir::TyKind::Path(
+                                    hir::QPath::Resolved(None, ref path)) = ty.node
+                                {
+                                    if let hir::def::Def::TyParam(def_id) = path.def {
+                                        if def_id == self.1 {
+                                            self.0 = Some(ty.span);
                                         }
-                                    },
-                                    _ => {}
+                                    }
                                 }
                             }
                             fn nested_visit_map<'this>(
@@ -870,7 +845,7 @@ fn compare_synthetic_generics<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                             .span_to_snippet(bounds)
                             .ok()?;
 
-                        err.multipart_suggestion(
+                        err.multipart_suggestion_with_applicability(
                             "try removing the generic parameter and using `impl Trait` instead",
                             vec![
                                 // delete generic parameters
@@ -878,6 +853,7 @@ fn compare_synthetic_generics<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                 // replace param usage with `impl Trait`
                                 (span, format!("impl {}", bounds)),
                             ],
+                            Applicability::MaybeIncorrect,
                         );
                         Some(())
                     })();
@@ -918,7 +894,7 @@ pub fn compare_const_impl<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         // method.
         let impl_c_node_id = tcx.hir.as_local_node_id(impl_c.def_id).unwrap();
 
-        // Compute skolemized form of impl and trait const tys.
+        // Compute placeholder form of impl and trait const tys.
         let impl_ty = tcx.type_of(impl_c.def_id);
         let trait_ty = tcx.type_of(trait_c.def_id).subst(tcx, trait_to_impl_substs);
         let mut cause = ObligationCause::misc(impl_c_span, impl_c_node_id);
@@ -971,7 +947,7 @@ pub fn compare_const_impl<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
             infcx.note_type_err(&mut diag,
                                 &cause,
-                                trait_c_span.map(|span| (span, "type in trait".to_string())),
+                                trait_c_span.map(|span| (span, "type in trait".to_owned())),
                                 Some(infer::ValuePairs::Types(ExpectedFound {
                                     expected: trait_ty,
                                     found: impl_ty,

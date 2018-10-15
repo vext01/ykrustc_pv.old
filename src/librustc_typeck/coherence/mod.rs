@@ -36,8 +36,8 @@ fn check_impl<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, node_id: ast::NodeId) {
 
     if let Some(trait_ref) = tcx.impl_trait_ref(impl_def_id) {
         debug!("(checking implementation) adding impl for trait '{:?}', item '{}'",
-                trait_ref,
-                tcx.item_path_str(impl_def_id));
+               trait_ref,
+               tcx.item_path_str(impl_def_id));
 
         // Skip impls where one of the self type is an error type.
         // This occurs with e.g. resolve failures (#30589).
@@ -46,6 +46,7 @@ fn check_impl<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, node_id: ast::NodeId) {
         }
 
         enforce_trait_manually_implementable(tcx, impl_def_id, trait_ref.def_id);
+        enforce_empty_impls_for_marker_traits(tcx, impl_def_id, trait_ref.def_id);
     }
 }
 
@@ -96,6 +97,25 @@ fn enforce_trait_manually_implementable(tcx: TyCtxt, impl_def_id: DefId, trait_d
                      trait_name)
         .span_label(span, format!("manual implementations of `{}` are experimental", trait_name))
         .help("add `#![feature(unboxed_closures)]` to the crate attributes to enable")
+        .emit();
+}
+
+/// We allow impls of marker traits to overlap, so they can't override impls
+/// as that could make it ambiguous which associated item to use.
+fn enforce_empty_impls_for_marker_traits(tcx: TyCtxt, impl_def_id: DefId, trait_def_id: DefId) {
+    if !tcx.trait_def(trait_def_id).is_marker {
+        return;
+    }
+
+    if tcx.associated_item_def_ids(trait_def_id).is_empty() {
+        return;
+    }
+
+    let span = tcx.sess.source_map().def_span(tcx.span_of_impl(impl_def_id).unwrap());
+    struct_span_err!(tcx.sess,
+                     span,
+                     E0715,
+                     "impls for marker traits cannot contain items")
         .emit();
 }
 
@@ -161,13 +181,12 @@ fn check_impl_overlap<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, node_id: ast::NodeI
         // This is something like impl Trait1 for Trait2. Illegal
         // if Trait1 is a supertrait of Trait2 or Trait2 is not object safe.
 
-        if data.principal().map_or(true, |p| !tcx.is_object_safe(p.def_id())) {
+        if !tcx.is_object_safe(data.principal().def_id()) {
             // This is an error, but it will be reported by wfcheck.  Ignore it here.
             // This is tested by `coherence-impl-trait-for-trait-object-safe.rs`.
         } else {
             let mut supertrait_def_ids =
-                traits::supertrait_def_ids(tcx,
-                                           data.principal().unwrap().def_id());
+                traits::supertrait_def_ids(tcx, data.principal().def_id());
             if supertrait_def_ids.any(|d| d == trait_def_id) {
                 let sp = tcx.sess.source_map().def_span(tcx.span_of_impl(impl_def_id).unwrap());
                 struct_span_err!(tcx.sess,

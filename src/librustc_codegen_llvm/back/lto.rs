@@ -18,6 +18,7 @@ use llvm::{True, False};
 use llvm;
 use memmap;
 use rustc::dep_graph::WorkProduct;
+use rustc::dep_graph::cgu_reuse_tracker::CguReuse;
 use rustc::hir::def_id::LOCAL_CRATE;
 use rustc::middle::exported_symbols::SymbolExportLevel;
 use rustc::session::config::{self, Lto};
@@ -118,7 +119,7 @@ pub(crate) fn run(cgcx: &CodegenContext,
         Lto::ThinLocal => SymbolExportLevel::Rust,
 
         // We're doing LTO for the entire crate graph
-        Lto::Yes | Lto::Fat | Lto::Thin => {
+        Lto::Fat | Lto::Thin => {
             symbol_export::crates_export_threshold(&cgcx.crate_types)
         }
 
@@ -201,7 +202,6 @@ pub(crate) fn run(cgcx: &CodegenContext,
                                              .map(|c| c.as_ptr())
                                              .collect::<Vec<_>>();
     match cgcx.lto {
-        Lto::Yes | // `-C lto` == fat LTO by default
         Lto::Fat => {
             assert!(cached_modules.is_empty());
             let opt_jobs = fat_lto(cgcx,
@@ -539,6 +539,8 @@ fn thin_lto(cgcx: &CodegenContext,
                     let work_product = green_modules[module_name].clone();
                     copy_jobs.push(work_product);
                     info!(" - {}: re-used", module_name);
+                    cgcx.cgu_reuse_tracker.set_actual_reuse(module_name,
+                                                            CguReuse::PostLto);
                     continue
                 }
             }

@@ -24,10 +24,12 @@ impl_stable_hash_for!(enum mir::LocalKind { Var, Temp, Arg, ReturnPointer });
 impl_stable_hash_for!(struct mir::LocalDecl<'tcx> {
     mutability,
     ty,
+    user_ty,
     name,
     source_info,
     visibility_scope,
     internal,
+    is_block_tail,
     is_user_variable
 });
 impl_stable_hash_for!(struct mir::UpvarDecl { debug_name, var_hir_id, by_ref, mutability });
@@ -45,6 +47,7 @@ for mir::BorrowKind {
 
         match *self {
             mir::BorrowKind::Shared |
+            mir::BorrowKind::Shallow |
             mir::BorrowKind::Unique => {}
             mir::BorrowKind::Mut { allow_two_phase_borrow } => {
                 allow_two_phase_borrow.hash_stable(hcx, hasher);
@@ -192,11 +195,13 @@ for mir::TerminatorKind<'gcx> {
             mir::TerminatorKind::Call { ref func,
                                         ref args,
                                         ref destination,
-                                        cleanup } => {
+                                        cleanup,
+                                        from_hir_call, } => {
                 func.hash_stable(hcx, hasher);
                 args.hash_stable(hcx, hasher);
                 destination.hash_stable(hcx, hasher);
                 cleanup.hash_stable(hcx, hasher);
+                from_hir_call.hash_stable(hcx, hasher);
             }
             mir::TerminatorKind::Assert { ref cond,
                                           expected,
@@ -237,7 +242,8 @@ for mir::StatementKind<'gcx> {
                 place.hash_stable(hcx, hasher);
                 rvalue.hash_stable(hcx, hasher);
             }
-            mir::StatementKind::ReadForMatch(ref place) => {
+            mir::StatementKind::FakeRead(ref cause, ref place) => {
+                cause.hash_stable(hcx, hasher);
                 place.hash_stable(hcx, hasher);
             }
             mir::StatementKind::SetDiscriminant { ref place, variant_index } => {
@@ -255,9 +261,10 @@ for mir::StatementKind<'gcx> {
                 op.hash_stable(hcx, hasher);
                 places.hash_stable(hcx, hasher);
             }
-            mir::StatementKind::UserAssertTy(ref c_ty, ref local) => {
+            mir::StatementKind::AscribeUserType(ref place, ref variance, ref c_ty) => {
+                place.hash_stable(hcx, hasher);
+                variance.hash_stable(hcx, hasher);
                 c_ty.hash_stable(hcx, hasher);
-                local.hash_stable(hcx, hasher);
             }
             mir::StatementKind::Nop => {}
             mir::StatementKind::InlineAsm { ref asm, ref outputs, ref inputs } => {
@@ -268,6 +275,8 @@ for mir::StatementKind<'gcx> {
         }
     }
 }
+
+impl_stable_hash_for!(enum mir::FakeReadCause { ForMatchGuard, ForMatchedPlace, ForLet });
 
 impl<'a, 'gcx, T> HashStable<StableHashingContext<'a>>
     for mir::ValidationOperand<'gcx, T>
@@ -542,7 +551,23 @@ impl_stable_hash_for!(struct mir::ClosureRegionRequirements<'tcx> {
 impl_stable_hash_for!(struct mir::ClosureOutlivesRequirement<'tcx> {
     subject,
     outlived_free_region,
-    blame_span
+    blame_span,
+    category
+});
+
+impl_stable_hash_for!(enum mir::ConstraintCategory {
+    Return,
+    TypeAnnotation,
+    Cast,
+    ClosureBounds,
+    CallArgument,
+    CopyBound,
+    SizedBound,
+    Assignment,
+    OpaqueType,
+    Boring,
+    BoringNoLocation,
+    Internal,
 });
 
 impl<'a, 'gcx> HashStable<StableHashingContext<'a>> for mir::ClosureOutlivesSubject<'gcx> {

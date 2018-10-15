@@ -29,6 +29,8 @@ pub mod cx;
 pub mod pattern;
 pub use self::pattern::{BindingMode, Pattern, PatternKind, FieldPattern};
 
+mod util;
+
 #[derive(Copy, Clone, Debug)]
 pub enum LintLevel {
     Inherited,
@@ -93,11 +95,10 @@ pub enum StmtKind<'tcx> {
         /// lifetime of temporaries
         init_scope: region::Scope,
 
-        /// let <PAT>: ty = ...
+        /// `let <PAT> = ...`
+        ///
+        /// if a type is included, it is added as an ascription pattern
         pattern: Pattern<'tcx>,
-
-        /// let pat: <TY> = init ...
-        ty: Option<hir::HirId>,
 
         /// let pat: ty = <INIT> ...
         initializer: Option<ExprRef<'tcx>>,
@@ -151,6 +152,9 @@ pub enum ExprKind<'tcx> {
         ty: Ty<'tcx>,
         fun: ExprRef<'tcx>,
         args: Vec<ExprRef<'tcx>>,
+        // Whether this is from a call in HIR, rather than from an overloaded
+        // operator. True for overloaded function call.
+        from_hir_call: bool,
     },
     Deref {
         arg: ExprRef<'tcx>,
@@ -268,6 +272,16 @@ pub enum ExprKind<'tcx> {
 
         fields: Vec<FieldExprRef<'tcx>>,
         base: Option<FruInfo<'tcx>>
+    },
+    PlaceTypeAscription {
+        source: ExprRef<'tcx>,
+        /// Type that the user gave to this expression
+        user_ty: CanonicalTy<'tcx>,
+    },
+    ValueTypeAscription {
+        source: ExprRef<'tcx>,
+        /// Type that the user gave to this expression
+        user_ty: CanonicalTy<'tcx>,
     },
     Closure {
         closure_id: DefId,

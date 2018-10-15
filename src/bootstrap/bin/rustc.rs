@@ -263,6 +263,10 @@ fn main() {
         if env::var_os("RUSTC_FORCE_UNSTABLE").is_some() {
             cmd.arg("-Z").arg("force-unstable-if-unmarked");
         }
+
+        if let Ok(map) = env::var("RUSTC_DEBUGINFO_MAP") {
+            cmd.arg("--remap-path-prefix").arg(&map);
+        }
     } else {
         // Override linker if necessary.
         if let Ok(host_linker) = env::var("RUSTC_HOST_LINKER") {
@@ -285,15 +289,6 @@ fn main() {
 
     if env::var_os("RUSTC_VERIFY_LLVM_IR").is_some() {
         cmd.arg("-Z").arg("verify-llvm-ir");
-    }
-
-    let color = match env::var("RUSTC_COLOR") {
-        Ok(s) => usize::from_str(&s).expect("RUSTC_COLOR should be an integer"),
-        Err(_) => 0,
-    };
-
-    if color != 0 {
-        cmd.arg("--color=always");
     }
 
     if env::var_os("RUSTC_DENY_WARNINGS").is_some() && env::var_os("RUSTC_EXTERNAL_TOOL").is_none()

@@ -11,6 +11,7 @@
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::fold::{TypeFoldable, TypeVisitor};
 use rustc::util::nodemap::FxHashSet;
+use syntax::source_map::Span;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Parameter(pub u32);
@@ -76,22 +77,19 @@ impl<'tcx> TypeVisitor<'tcx> for ParameterCollector {
     }
 
     fn visit_region(&mut self, r: ty::Region<'tcx>) -> bool {
-        match *r {
-            ty::ReEarlyBound(data) => {
-                self.parameters.push(Parameter::from(data));
-            }
-            _ => {}
+        if let ty::ReEarlyBound(data) = *r {
+            self.parameters.push(Parameter::from(data));
         }
         false
     }
 }
 
-pub fn identify_constrained_type_params<'tcx>(tcx: TyCtxt,
-                                              predicates: &[ty::Predicate<'tcx>],
+pub fn identify_constrained_type_params<'tcx>(tcx: TyCtxt<'_, 'tcx, 'tcx>,
+                                              predicates: &ty::GenericPredicates<'tcx>,
                                               impl_trait_ref: Option<ty::TraitRef<'tcx>>,
                                               input_parameters: &mut FxHashSet<Parameter>)
 {
-    let mut predicates = predicates.to_owned();
+    let mut predicates = predicates.predicates.clone();
     setup_constraining_predicates(tcx, &mut predicates, impl_trait_ref, input_parameters);
 }
 
@@ -137,7 +135,7 @@ pub fn identify_constrained_type_params<'tcx>(tcx: TyCtxt,
 /// by 0. I should probably pick a less tangled example, but I can't
 /// think of any.
 pub fn setup_constraining_predicates<'tcx>(tcx: TyCtxt,
-                                           predicates: &mut [ty::Predicate<'tcx>],
+                                           predicates: &mut [(ty::Predicate<'tcx>, Span)],
                                            impl_trait_ref: Option<ty::TraitRef<'tcx>>,
                                            input_parameters: &mut FxHashSet<Parameter>)
 {
@@ -169,7 +167,7 @@ pub fn setup_constraining_predicates<'tcx>(tcx: TyCtxt,
         changed = false;
 
         for j in i..predicates.len() {
-            if let ty::Predicate::Projection(ref poly_projection) = predicates[j] {
+            if let ty::Predicate::Projection(ref poly_projection) = predicates[j].0 {
                 // Note that we can skip binder here because the impl
                 // trait ref never contains any late-bound regions.
                 let projection = poly_projection.skip_binder();
@@ -203,6 +201,6 @@ pub fn setup_constraining_predicates<'tcx>(tcx: TyCtxt,
         }
         debug!("setup_constraining_predicates: predicates={:?} \
                 i={} impl_trait_ref={:?} input_parameters={:?}",
-           predicates, i, impl_trait_ref, input_parameters);
+               predicates, i, impl_trait_ref, input_parameters);
     }
 }

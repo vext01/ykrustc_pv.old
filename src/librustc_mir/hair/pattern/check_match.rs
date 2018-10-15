@@ -35,7 +35,7 @@ use std::slice;
 
 use syntax::ast;
 use syntax::ptr::P;
-use syntax_pos::{Span, DUMMY_SP};
+use syntax_pos::{Span, DUMMY_SP, MultiSpan};
 
 struct OuterVisitor<'a, 'tcx: 'a> { tcx: TyCtxt<'a, 'tcx, 'tcx> }
 
@@ -527,8 +527,8 @@ fn check_legality_of_move_bindings(cx: &MatchVisitor,
             }
         })
     }
-
-    let check_move = |p: &Pat, sub: Option<&Pat>| {
+    let span_vec = &mut Vec::new();
+    let check_move = |p: &Pat, sub: Option<&Pat>, span_vec: &mut Vec<Span>| {
         // check legality of moving out of the enum
 
         // x @ Foo(..) is legal, but x @ Foo(y) isn't.
@@ -537,21 +537,17 @@ fn check_legality_of_move_bindings(cx: &MatchVisitor,
                              "cannot bind by-move with sub-bindings")
                 .span_label(p.span, "binds an already bound by-move value by moving it")
                 .emit();
-        } else if has_guard {
-            struct_span_err!(cx.tcx.sess, p.span, E0008,
-                      "cannot bind by-move into a pattern guard")
-                .span_label(p.span, "moves value into pattern guard")
-                .emit();
-        } else if let Some(by_ref_span) = by_ref_span {
-            struct_span_err!(
-                cx.tcx.sess,
-                p.span,
-                E0009,
-                "cannot bind by-move and by-ref in the same pattern",
-            )
-            .span_label(p.span, "by-move pattern here")
-            .span_label(by_ref_span, "both by-ref and by-move used")
-            .emit();
+        } else if has_guard && !cx.tcx.allow_bind_by_move_patterns_with_guards() {
+            let mut err = struct_span_err!(cx.tcx.sess, p.span, E0008,
+                                           "cannot bind by-move into a pattern guard");
+            err.span_label(p.span, "moves value into pattern guard");
+            if cx.tcx.sess.opts.unstable_features.is_nightly_build() && cx.tcx.use_mir_borrowck() {
+                err.help("add #![feature(bind_by_move_pattern_guards)] to the \
+                          crate attributes to enable");
+            }
+            err.emit();
+        } else if let Some(_by_ref_span) = by_ref_span {
+            span_vec.push(p.span);
         }
     };
 
@@ -563,7 +559,7 @@ fn check_legality_of_move_bindings(cx: &MatchVisitor,
                         ty::BindByValue(..) => {
                             let pat_ty = cx.tables.node_id_to_type(p.hir_id);
                             if pat_ty.moves_by_default(cx.tcx, cx.param_env, pat.span) {
-                                check_move(p, sub.as_ref().map(|p| &**p));
+                                check_move(p, sub.as_ref().map(|p| &**p), span_vec);
                             }
                         }
                         _ => {}
@@ -574,6 +570,20 @@ fn check_legality_of_move_bindings(cx: &MatchVisitor,
             }
             true
         });
+    }
+    if !span_vec.is_empty(){
+        let span = MultiSpan::from_spans(span_vec.clone());
+        let mut err = struct_span_err!(
+            cx.tcx.sess,
+            span,
+            E0009,
+            "cannot bind by-move and by-ref in the same pattern",
+        );
+        err.span_label(by_ref_span.unwrap(), "both by-ref and by-move used");
+        for span in span_vec.iter(){
+            err.span_label(*span, "by-move pattern here");
+        }
+        err.emit();
     }
 }
 
@@ -613,10 +623,16 @@ impl<'a, 'tcx> Delegate<'tcx> for MutationChecker<'a, 'tcx> {
               _: LoanCause) {
         match kind {
             ty::MutBorrow => {
-                struct_span_err!(self.cx.tcx.sess, span, E0301,
-                          "cannot mutably borrow in a pattern guard")
-                    .span_label(span, "borrowed mutably in pattern guard")
-                    .emit();
+                let mut err = struct_span_err!(self.cx.tcx.sess, span, E0301,
+                          "cannot mutably borrow in a pattern guard");
+                err.span_label(span, "borrowed mutably in pattern guard");
+                if self.cx.tcx.sess.opts.unstable_features.is_nightly_build() &&
+                    self.cx.tcx.use_mir_borrowck()
+                {
+                    err.help("add #![feature(bind_by_move_pattern_guards)] to the \
+                              crate attributes to enable");
+                }
+                err.emit();
             }
             ty::ImmBorrow | ty::UniqueImmBorrow => {}
         }

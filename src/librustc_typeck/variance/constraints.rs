@@ -311,11 +311,11 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 let contra = self.contravariant(variance);
                 self.add_constraints_from_region(current, r, contra);
 
-                if let Some(p) = data.principal() {
-                    let poly_trait_ref = p.with_self_ty(self.tcx(), self.tcx().types.err);
-                    self.add_constraints_from_trait_ref(
-                        current, *poly_trait_ref.skip_binder(), variance);
-                }
+                let poly_trait_ref = data
+                    .principal()
+                    .with_self_ty(self.tcx(), self.tcx().types.err);
+                self.add_constraints_from_trait_ref(
+                    current, *poly_trait_ref.skip_binder(), variance);
 
                 for projection in data.projection_bounds() {
                     self.add_constraints_from_ty(
@@ -336,6 +336,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 // types, where we use Error as the Self type
             }
 
+            ty::UnnormalizedProjection(..) |
             ty::GeneratorWitness(..) |
             ty::Infer(..) => {
                 bug!("unexpected type encountered in \
@@ -430,7 +431,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
             ty::ReClosureBound(..) |
             ty::ReScope(..) |
             ty::ReVar(..) |
-            ty::ReSkolemized(..) |
+            ty::RePlaceholder(..) |
             ty::ReEmpty |
             ty::ReErased => {
                 // We don't expect to see anything but 'static or bound

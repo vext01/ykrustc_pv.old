@@ -12,10 +12,8 @@
 
 use syntax::ast::NodeId;
 use rustc::mir::{BasicBlock, Mir};
-use rustc_data_structures::bitslice::bits_to_string;
 
 use dot;
-use dot::IntoCow;
 
 use std::fs;
 use std::io;
@@ -217,13 +215,12 @@ where MWF: MirWithFlowState<'tcx>,
         let i = n.index();
 
         let flow = self.mbcx.flow_state();
-        let bits_per_block = flow.sets.bits_per_block();
 
         write!(w, "<tr>")?;
 
         // Entry
         let set = flow.sets.on_entry_set_for(i);
-        write!(w, "<td>{:?}</td>", dot::escape_html(&bits_to_string(set.words(), bits_per_block)))?;
+        write!(w, "<td>{:?}</td>", dot::escape_html(&set.to_string()))?;
 
         // Terminator
         write!(w, "<td>")?;
@@ -259,7 +256,7 @@ impl<'a, 'tcx, MWF, P> dot::GraphWalk<'a> for Graph<'a, 'tcx, MWF, P>
             .basic_blocks()
             .indices()
             .collect::<Vec<_>>()
-            .into_cow()
+            .into()
     }
 
     fn edges(&self) -> dot::Edges<Edge> {
@@ -269,7 +266,7 @@ impl<'a, 'tcx, MWF, P> dot::GraphWalk<'a> for Graph<'a, 'tcx, MWF, P>
            .indices()
            .flat_map(|bb| outgoing(mir, bb))
            .collect::<Vec<_>>()
-           .into_cow()
+           .into()
     }
 
     fn source(&self, edge: &Edge) -> Node {

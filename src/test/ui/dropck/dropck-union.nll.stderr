@@ -7,9 +7,7 @@ LL | }
    | -
    | |
    | `v` dropped here while still borrowed
-   | borrow later used here, when `v` is dropped
-   |
-   = note: values in a scope are dropped in the opposite order they are defined
+   | borrow might be used here, when `v` is dropped and runs the `Drop` code for type `Wrap`
 
 error: aborting due to previous error
 

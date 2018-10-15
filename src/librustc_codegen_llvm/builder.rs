@@ -110,10 +110,10 @@ impl Builder<'a, 'll, 'tcx> {
         }
         if self.cx.sess().count_llvm_insns() {
             *self.cx.stats
-                .borrow_mut()
-                .llvm_insns
-                .entry(category.to_string())
-                .or_insert(0) += 1;
+                    .borrow_mut()
+                    .llvm_insns
+                    .entry(category.to_string())
+                    .or_insert(0) += 1;
         }
     }
 
@@ -496,6 +496,14 @@ impl Builder<'a, 'll, 'tcx> {
 
 
     pub fn range_metadata(&self, load: &'ll Value, range: Range<u128>) {
+        if self.sess().target.target.arch == "amdgpu" {
+            // amdgpu/LLVM does something weird and thinks a i64 value is
+            // split into a v2i32, halving the bitwidth LLVM expects,
+            // tripping an assertion. So, for now, just disable this
+            // optimization.
+            return;
+        }
+
         unsafe {
             let llty = val_ty(load);
             let v = [
@@ -727,9 +735,9 @@ impl Builder<'a, 'll, 'tcx> {
     }
 
     pub fn inline_asm_call(&self, asm: *const c_char, cons: *const c_char,
-                         inputs: &[&'ll Value], output: &'ll Type,
-                         volatile: bool, alignstack: bool,
-                         dia: AsmDialect) -> &'ll Value {
+                           inputs: &[&'ll Value], output: &'ll Type,
+                           volatile: bool, alignstack: bool,
+                           dia: AsmDialect) -> Option<&'ll Value> {
         self.count_insn("inlineasm");
 
         let volatile = if volatile { llvm::True }
@@ -745,9 +753,17 @@ impl Builder<'a, 'll, 'tcx> {
         debug!("Asm Output Type: {:?}", output);
         let fty = Type::func(&argtys[..], output);
         unsafe {
-            let v = llvm::LLVMRustInlineAsm(
-                fty, asm, cons, volatile, alignstack, dia);
-            self.call(v, inputs, None)
+            // Ask LLVM to verify that the constraints are well-formed.
+            let constraints_ok = llvm::LLVMRustInlineAsmVerify(fty, cons);
+            debug!("Constraint verification result: {:?}", constraints_ok);
+            if constraints_ok == llvm::True {
+                let v = llvm::LLVMRustInlineAsm(
+                    fty, asm, cons, volatile, alignstack, dia);
+                Some(self.call(v, inputs, None))
+            } else {
+                // LLVM has detected an issue with our constaints, bail out
+                None
+            }
         }
     }
 
@@ -1077,7 +1093,7 @@ impl Builder<'a, 'll, 'tcx> {
     ) -> &'ll Value {
         unsafe {
             llvm::LLVMRustBuildAtomicCmpXchg(self.llbuilder, dst, cmp, src,
-                                         order, failure_order, weak)
+                                             order, failure_order, weak)
         }
     }
     pub fn atomic_rmw(
@@ -1178,7 +1194,7 @@ impl Builder<'a, 'll, 'tcx> {
             })
             .collect();
 
-        return Cow::Owned(casted_args);
+        Cow::Owned(casted_args)
     }
 
     pub fn lifetime_start(&self, ptr: &'ll Value, size: Size) {

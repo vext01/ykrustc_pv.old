@@ -12,8 +12,7 @@
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
 
-#![cfg_attr(not(stage0), feature(nll))]
-#![cfg_attr(not(stage0), feature(infer_outlives_requirements))]
+#![feature(nll)]
 #![feature(rustc_diagnostic_macros)]
 
 #![recursion_limit="256"]
@@ -94,8 +93,7 @@ impl<'a, 'tcx> EmbargoVisitor<'a, 'tcx> {
         let ty_def_id = match self.tcx.type_of(item_def_id).sty {
             ty::Adt(adt, _) => adt.did,
             ty::Foreign(did) => did,
-            ty::Dynamic(ref obj, ..) if obj.principal().is_some() =>
-                obj.principal().unwrap().def_id(),
+            ty::Dynamic(ref obj, ..) => obj.principal().def_id(),
             ty::Projection(ref proj) => proj.trait_ref(self.tcx).def_id,
             _ => return Some(AccessLevel::Public)
         };
@@ -435,7 +433,7 @@ impl<'b, 'a, 'tcx> ReachEverythingInTheInterfaceVisitor<'b, 'a, 'tcx> {
 
     fn predicates(&mut self) -> &mut Self {
         let predicates = self.ev.tcx.predicates_of(self.item_def_id);
-        for predicate in &predicates.predicates {
+        for (predicate, _) in &predicates.predicates {
             predicate.visit_with(self);
             match predicate {
                 &ty::Predicate::Trait(poly_predicate) => {
@@ -485,7 +483,7 @@ impl<'b, 'a, 'tcx> TypeVisitor<'tcx> for ReachEverythingInTheInterfaceVisitor<'b
         let ty_def_id = match ty.sty {
             ty::Adt(adt, _) => Some(adt.did),
             ty::Foreign(did) => Some(did),
-            ty::Dynamic(ref obj, ..) => obj.principal().map(|p| p.def_id()),
+            ty::Dynamic(ref obj, ..) => Some(obj.principal().def_id()),
             ty::Projection(ref proj) => Some(proj.item_def_id),
             ty::FnDef(def_id, ..) |
             ty::Closure(def_id, ..) |
@@ -782,7 +780,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypePrivacyVisitor<'a, 'tcx> {
             if self.check_trait_ref(*principal.skip_binder()) {
                 return;
             }
-            for poly_predicate in projections {
+            for (poly_predicate, _) in projections {
                 let tcx = self.tcx;
                 if self.check_trait_ref(poly_predicate.skip_binder().projection_ty.trait_ref(tcx)) {
                     return;
@@ -957,7 +955,7 @@ impl<'a, 'tcx> TypeVisitor<'tcx> for TypePrivacyVisitor<'a, 'tcx> {
                 }
             }
             ty::Opaque(def_id, ..) => {
-                for predicate in &self.tcx.predicates_of(def_id).predicates {
+                for (predicate, _) in &self.tcx.predicates_of(def_id).predicates {
                     let trait_ref = match *predicate {
                         ty::Predicate::Trait(ref poly_trait_predicate) => {
                             Some(poly_trait_predicate.skip_binder().trait_ref)
@@ -1381,8 +1379,14 @@ impl<'a, 'tcx: 'a> SearchInterfaceForPrivateItemsVisitor<'a, 'tcx> {
     }
 
     fn predicates(&mut self) -> &mut Self {
-        let predicates = self.tcx.predicates_of(self.item_def_id);
-        for predicate in &predicates.predicates {
+        // NB: We use `explicit_predicates_of` and not `predicates_of`
+        // because we don't want to report privacy errors due to where
+        // clauses that the compiler inferred. We only want to
+        // consider the ones that the user wrote. This is important
+        // for the inferred outlives rules; see
+        // `src/test/ui/rfc-2093-infer-outlives/privacy.rs`.
+        let predicates = self.tcx.explicit_predicates_of(self.item_def_id);
+        for (predicate, _) in &predicates.predicates {
             predicate.visit_with(self);
             match predicate {
                 &ty::Predicate::Trait(poly_predicate) => {
@@ -1451,7 +1455,7 @@ impl<'a, 'tcx: 'a> TypeVisitor<'tcx> for SearchInterfaceForPrivateItemsVisitor<'
         let ty_def_id = match ty.sty {
             ty::Adt(adt, _) => Some(adt.did),
             ty::Foreign(did) => Some(did),
-            ty::Dynamic(ref obj, ..) => obj.principal().map(|p| p.def_id()),
+            ty::Dynamic(ref obj, ..) => Some(obj.principal().def_id()),
             ty::Projection(ref proj) => {
                 if self.required_visibility == ty::Visibility::Invisible {
                     // Conservatively approximate the whole type alias as public without

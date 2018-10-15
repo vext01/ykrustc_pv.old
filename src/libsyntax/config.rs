@@ -9,13 +9,21 @@
 // except according to those terms.
 
 use attr::HasAttrs;
-use feature_gate::{feature_err, EXPLAIN_STMT_ATTR_SYNTAX, Features, get_features, GateIssue};
+use feature_gate::{
+    feature_err,
+    EXPLAIN_STMT_ATTR_SYNTAX,
+    Features,
+    get_features,
+    GateIssue,
+    emit_feature_err,
+};
 use {fold, attr};
 use ast;
 use source_map::Spanned;
 use edition::Edition;
 use parse::{token, ParseSess};
-use OneVector;
+use smallvec::SmallVec;
+use errors::Applicability;
 
 use ptr::P;
 
@@ -72,48 +80,103 @@ impl<'a> StripUnconfigured<'a> {
         if self.in_cfg(node.attrs()) { Some(node) } else { None }
     }
 
+    /// Parse and expand all `cfg_attr` attributes into a list of attributes
+    /// that are within each `cfg_attr` that has a true configuration predicate.
+    ///
+    /// Gives compiler warnigns if any `cfg_attr` does not contain any
+    /// attributes and is in the original source code. Gives compiler errors if
+    /// the syntax of any `cfg_attr` is incorrect.
     pub fn process_cfg_attrs<T: HasAttrs>(&mut self, node: T) -> T {
         node.map_attrs(|attrs| {
-            attrs.into_iter().filter_map(|attr| self.process_cfg_attr(attr)).collect()
+            attrs.into_iter().flat_map(|attr| self.process_cfg_attr(attr)).collect()
         })
     }
 
-    fn process_cfg_attr(&mut self, attr: ast::Attribute) -> Option<ast::Attribute> {
+    /// Parse and expand a single `cfg_attr` attribute into a list of attributes
+    /// when the configuration predicate is true, or otherwise expand into an
+    /// empty list of attributes.
+    ///
+    /// Gives a compiler warning when the `cfg_attr` contains no attribtes and
+    /// is in the original source file. Gives a compiler error if the syntax of
+    /// the attribute is incorrect
+    fn process_cfg_attr(&mut self, attr: ast::Attribute) -> Vec<ast::Attribute> {
         if !attr.check_name("cfg_attr") {
-            return Some(attr);
+            return vec![attr];
         }
 
-        let (cfg, path, tokens, span) = match attr.parse(self.sess, |parser| {
+        let gate_cfg_attr_multi = if let Some(ref features) = self.features {
+            !features.cfg_attr_multi
+        } else {
+            false
+        };
+        let cfg_attr_span = attr.span;
+
+        let (cfg_predicate, expanded_attrs) = match attr.parse(self.sess, |parser| {
             parser.expect(&token::OpenDelim(token::Paren))?;
-            let cfg = parser.parse_meta_item()?;
+
+            let cfg_predicate = parser.parse_meta_item()?;
             parser.expect(&token::Comma)?;
-            let lo = parser.span.lo();
-            let (path, tokens) = parser.parse_meta_item_unrestricted()?;
+
+            // Presumably, the majority of the time there will only be one attr.
+            let mut expanded_attrs = Vec::with_capacity(1);
+
+            while !parser.check(&token::CloseDelim(token::Paren)) {
+                let lo = parser.span.lo();
+                let (path, tokens) = parser.parse_meta_item_unrestricted()?;
+                expanded_attrs.push((path, tokens, parser.prev_span.with_lo(lo)));
+                parser.expect_one_of(&[token::Comma], &[token::CloseDelim(token::Paren)])?;
+            }
+
             parser.expect(&token::CloseDelim(token::Paren))?;
-            Ok((cfg, path, tokens, parser.prev_span.with_lo(lo)))
+            Ok((cfg_predicate, expanded_attrs))
         }) {
             Ok(result) => result,
             Err(mut e) => {
                 e.emit();
-                return None;
+                return Vec::new();
             }
         };
 
-        if attr::cfg_matches(&cfg, self.sess, self.features) {
-            self.process_cfg_attr(ast::Attribute {
+        // Check feature gate and lint on zero attributes in source. Even if the feature is gated,
+        // we still compute as if it wasn't, since the emitted error will stop compilation futher
+        // along the compilation.
+        match (expanded_attrs.len(), gate_cfg_attr_multi) {
+            (0, false) => {
+                // FIXME: Emit unused attribute lint here.
+            },
+            (1, _) => {},
+            (_, true) => {
+                emit_feature_err(
+                    self.sess,
+                    "cfg_attr_multi",
+                    cfg_attr_span,
+                    GateIssue::Language,
+                    "cfg_attr with zero or more than one attributes is experimental",
+                );
+            },
+            (_, false) => {}
+        }
+
+        if attr::cfg_matches(&cfg_predicate, self.sess, self.features) {
+            // We call `process_cfg_attr` recursively in case there's a
+            // `cfg_attr` inside of another `cfg_attr`. E.g.
+            //  `#[cfg_attr(false, cfg_attr(true, some_attr))]`.
+            expanded_attrs.into_iter()
+            .flat_map(|(path, tokens, span)| self.process_cfg_attr(ast::Attribute {
                 id: attr::mk_attr_id(),
                 style: attr.style,
                 path,
                 tokens,
                 is_sugared_doc: false,
                 span,
-            })
+            }))
+            .collect()
         } else {
-            None
+            Vec::new()
         }
     }
 
-    // Determine if a node with the given attributes should be included in this configuration.
+    /// Determine if a node with the given attributes should be included in this configuration.
     pub fn in_cfg(&mut self, attrs: &[ast::Attribute]) -> bool {
         attrs.iter().all(|attr| {
             if !is_cfg(attr) {
@@ -123,7 +186,12 @@ impl<'a> StripUnconfigured<'a> {
             let error = |span, msg, suggestion: &str| {
                 let mut err = self.sess.span_diagnostic.struct_span_err(span, msg);
                 if !suggestion.is_empty() {
-                    err.span_suggestion(span, "expected syntax is", suggestion.into());
+                    err.span_suggestion_with_applicability(
+                        span,
+                        "expected syntax is",
+                        suggestion.into(),
+                        Applicability::MaybeIncorrect,
+                    );
                 }
                 err.emit();
                 true
@@ -158,7 +226,7 @@ impl<'a> StripUnconfigured<'a> {
         })
     }
 
-    // Visit attributes on expression and statements (but not attributes on items in blocks).
+    /// Visit attributes on expression and statements (but not attributes on items in blocks).
     fn visit_expr_attrs(&mut self, attrs: &[ast::Attribute]) {
         // flag the offending attributes
         for attr in attrs.iter() {
@@ -332,22 +400,23 @@ impl<'a> fold::Folder for StripUnconfigured<'a> {
         Some(P(fold::noop_fold_expr(expr, self)))
     }
 
-    fn fold_stmt(&mut self, stmt: ast::Stmt) -> OneVector<ast::Stmt> {
+    fn fold_stmt(&mut self, stmt: ast::Stmt) -> SmallVec<[ast::Stmt; 1]> {
         match self.configure_stmt(stmt) {
             Some(stmt) => fold::noop_fold_stmt(stmt, self),
-            None => return OneVector::new(),
+            None => return SmallVec::new(),
         }
     }
 
-    fn fold_item(&mut self, item: P<ast::Item>) -> OneVector<P<ast::Item>> {
+    fn fold_item(&mut self, item: P<ast::Item>) -> SmallVec<[P<ast::Item>; 1]> {
         fold::noop_fold_item(configure!(self, item), self)
     }
 
-    fn fold_impl_item(&mut self, item: ast::ImplItem) -> OneVector<ast::ImplItem> {
+    fn fold_impl_item(&mut self, item: ast::ImplItem) -> SmallVec<[ast::ImplItem; 1]>
+    {
         fold::noop_fold_impl_item(configure!(self, item), self)
     }
 
-    fn fold_trait_item(&mut self, item: ast::TraitItem) -> OneVector<ast::TraitItem> {
+    fn fold_trait_item(&mut self, item: ast::TraitItem) -> SmallVec<[ast::TraitItem; 1]> {
         fold::noop_fold_trait_item(configure!(self, item), self)
     }
 

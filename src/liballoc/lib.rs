@@ -76,8 +76,6 @@
 
 #![cfg_attr(not(test), feature(fn_traits))]
 #![cfg_attr(not(test), feature(generator_trait))]
-#![cfg_attr(not(stage0), feature(nll))]
-#![cfg_attr(not(stage0), feature(infer_outlives_requirements))]
 #![cfg_attr(test, feature(test))]
 
 #![feature(allocator_api)]
@@ -88,8 +86,7 @@
 #![feature(box_syntax)]
 #![feature(cfg_target_has_atomic)]
 #![feature(coerce_unsized)]
-#![cfg_attr(stage0, feature(const_fn))]
-#![cfg_attr(not(stage0), feature(min_const_fn))]
+#![cfg_attr(stage0, feature(min_const_fn))]
 #![feature(core_intrinsics)]
 #![feature(custom_attribute)]
 #![feature(dropck_eyepatch)]
@@ -100,6 +97,7 @@
 #![feature(lang_items)]
 #![feature(libc)]
 #![feature(needs_allocator)]
+#![feature(nll)]
 #![feature(optin_builtin_traits)]
 #![feature(pattern)]
 #![feature(pin)]
@@ -117,9 +115,11 @@
 #![feature(unsize)]
 #![feature(allocator_internals)]
 #![feature(on_unimplemented)]
-#![feature(exact_chunks)]
+#![feature(chunks_exact)]
 #![feature(rustc_const_unstable)]
 #![feature(const_vec_new)]
+#![feature(slice_partition_dedup)]
+#![feature(maybe_uninit)]
 
 // Allow testing this library
 
@@ -161,7 +161,6 @@ pub mod collections;
 pub mod sync;
 pub mod rc;
 pub mod raw_vec;
-pub mod pin;
 pub mod prelude;
 pub mod borrow;
 pub mod fmt;

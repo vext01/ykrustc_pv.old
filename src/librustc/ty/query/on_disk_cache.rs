@@ -11,8 +11,7 @@
 use dep_graph::{DepNodeIndex, SerializedDepNodeIndex};
 use errors::Diagnostic;
 use hir;
-use hir::def_id::{CrateNum, DefIndex, DefId, LocalDefId,
-                  RESERVED_FOR_INCR_COMP_CACHE, LOCAL_CRATE};
+use hir::def_id::{CrateNum, DefIndex, DefId, LocalDefId, LOCAL_CRATE};
 use hir::map::definitions::DefPathHash;
 use ich::{CachingSourceMapView, Fingerprint};
 use mir::{self, interpret};
@@ -213,23 +212,23 @@ impl<'sess> OnDiskCache<'sess> {
                 let enc = &mut encoder;
                 let qri = &mut query_result_index;
 
-                encode_query_results::<type_of, _>(tcx, enc, qri)?;
-                encode_query_results::<generics_of, _>(tcx, enc, qri)?;
-                encode_query_results::<predicates_of, _>(tcx, enc, qri)?;
-                encode_query_results::<used_trait_imports, _>(tcx, enc, qri)?;
-                encode_query_results::<typeck_tables_of, _>(tcx, enc, qri)?;
-                encode_query_results::<codegen_fulfill_obligation, _>(tcx, enc, qri)?;
-                encode_query_results::<optimized_mir, _>(tcx, enc, qri)?;
-                encode_query_results::<unsafety_check_result, _>(tcx, enc, qri)?;
-                encode_query_results::<borrowck, _>(tcx, enc, qri)?;
-                encode_query_results::<mir_borrowck, _>(tcx, enc, qri)?;
-                encode_query_results::<mir_const_qualif, _>(tcx, enc, qri)?;
-                encode_query_results::<def_symbol_name, _>(tcx, enc, qri)?;
-                encode_query_results::<const_is_rvalue_promotable_to_static, _>(tcx, enc, qri)?;
-                encode_query_results::<symbol_name, _>(tcx, enc, qri)?;
-                encode_query_results::<check_match, _>(tcx, enc, qri)?;
-                encode_query_results::<codegen_fn_attrs, _>(tcx, enc, qri)?;
-                encode_query_results::<specialization_graph_of, _>(tcx, enc, qri)?;
+                encode_query_results::<type_of<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<generics_of<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<predicates_of<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<used_trait_imports<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<typeck_tables_of<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<codegen_fulfill_obligation<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<optimized_mir<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<unsafety_check_result<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<borrowck<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<mir_borrowck<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<mir_const_qualif<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<def_symbol_name<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<const_is_rvalue_promotable_to_static<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<symbol_name<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<check_match<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<codegen_fn_attrs<'_>, _>(tcx, enc, qri)?;
+                encode_query_results::<specialization_graph_of<'_>, _>(tcx, enc, qri)?;
 
                 // const eval is special, it only encodes successfully evaluated constants
                 use ty::query::QueryAccessors;
@@ -255,23 +254,19 @@ impl<'sess> OnDiskCache<'sess> {
             })?;
 
             // Encode diagnostics
-            let diagnostics_index = {
-                let mut diagnostics_index = EncodedDiagnosticsIndex::new();
+            let diagnostics_index: EncodedDiagnosticsIndex = self.current_diagnostics.borrow()
+                .iter()
+                .map(|(dep_node_index, diagnostics)|
+            {
+                let pos = AbsoluteBytePos::new(encoder.position());
+                // Let's make sure we get the expected type here:
+                let diagnostics: &EncodedDiagnostics = diagnostics;
+                let dep_node_index = SerializedDepNodeIndex::new(dep_node_index.index());
+                encoder.encode_tagged(dep_node_index, diagnostics)?;
 
-                for (dep_node_index, diagnostics) in self.current_diagnostics
-                                                        .borrow()
-                                                        .iter() {
-                    let pos = AbsoluteBytePos::new(encoder.position());
-                    // Let's make sure we get the expected type here:
-                    let diagnostics: &EncodedDiagnostics = diagnostics;
-                    let dep_node_index =
-                        SerializedDepNodeIndex::new(dep_node_index.index());
-                    encoder.encode_tagged(dep_node_index, diagnostics)?;
-                    diagnostics_index.push((dep_node_index, pos));
-                }
-
-                diagnostics_index
-            };
+                Ok((dep_node_index, pos))
+            })
+            .collect::<Result<_, _>>()?;
 
             let interpret_alloc_index = {
                 let mut interpret_alloc_index = Vec::new();
@@ -283,6 +278,7 @@ impl<'sess> OnDiskCache<'sess> {
                         // otherwise, abort
                         break;
                     }
+                    interpret_alloc_index.reserve(new_n);
                     for idx in n..new_n {
                         let id = encoder.interpret_allocs_inverse[idx];
                         let pos = encoder.position() as u32;
@@ -324,7 +320,7 @@ impl<'sess> OnDiskCache<'sess> {
 
             return Ok(());
 
-            fn sorted_cnums_including_local_crate(tcx: TyCtxt) -> Vec<CrateNum> {
+            fn sorted_cnums_including_local_crate(tcx: TyCtxt<'_, '_, '_>) -> Vec<CrateNum> {
                 let mut cnums = vec![LOCAL_CRATE];
                 cnums.extend_from_slice(&tcx.crates()[..]);
                 cnums.sort_unstable();
@@ -435,23 +431,22 @@ impl<'sess> OnDiskCache<'sess> {
     // current-session-CrateNum. There might be CrateNums from the previous
     // Session that don't occur in the current one. For these, the mapping
     // maps to None.
-    fn compute_cnum_map(tcx: TyCtxt,
+    fn compute_cnum_map(tcx: TyCtxt<'_, '_, '_>,
                         prev_cnums: &[(u32, String, CrateDisambiguator)])
                         -> IndexVec<CrateNum, Option<CrateNum>>
     {
         tcx.dep_graph.with_ignore(|| {
             let current_cnums = tcx.all_crate_nums(LOCAL_CRATE).iter().map(|&cnum| {
                 let crate_name = tcx.original_crate_name(cnum)
-                                    .as_str()
                                     .to_string();
                 let crate_disambiguator = tcx.crate_disambiguator(cnum);
                 ((crate_name, crate_disambiguator), cnum)
             }).collect::<FxHashMap<_,_>>();
 
             let map_size = prev_cnums.iter()
-                                    .map(|&(cnum, ..)| cnum)
-                                    .max()
-                                    .unwrap_or(0) + 1;
+                                     .map(|&(cnum, ..)| cnum)
+                                     .max()
+                                     .unwrap_or(0) + 1;
             let mut map = IndexVec::new();
             map.resize(map_size as usize, None);
 
@@ -465,7 +460,6 @@ impl<'sess> OnDiskCache<'sess> {
         })
     }
 }
-
 
 //- DECODING -------------------------------------------------------------------
 
@@ -495,7 +489,7 @@ impl<'a, 'tcx, 'x> CacheDecoder<'a, 'tcx, 'x> {
         file_index_to_file.borrow_mut().entry(index).or_insert_with(|| {
             let stable_id = file_index_to_stable_id[&index];
             source_map.source_file_by_stable_id(stable_id)
-                   .expect("Failed to lookup SourceFile in new context.")
+                .expect("Failed to lookup SourceFile in new context.")
         }).clone()
     }
 }
@@ -566,7 +560,7 @@ impl<'a, 'tcx: 'a, 'x> ty_codec::TyDecoder<'a, 'tcx> for CacheDecoder<'a, 'tcx, 
         let tcx = self.tcx();
 
         let cache_key = ty::CReaderCacheKey {
-            cnum: RESERVED_FOR_INCR_COMP_CACHE,
+            cnum: CrateNum::ReservedForIncrCompCache,
             pos: shorthand,
         };
 
@@ -607,6 +601,7 @@ impl<'a, 'tcx, 'x> SpecializedDecoder<interpret::AllocId> for CacheDecoder<'a, '
         alloc_decoding_session.decode_alloc_id(self)
     }
 }
+
 impl<'a, 'tcx, 'x> SpecializedDecoder<Span> for CacheDecoder<'a, 'tcx, 'x> {
     fn specialized_decode(&mut self) -> Result<Span, Self::Error> {
         let tag: u8 = Decodable::decode(self)?;
@@ -761,7 +756,7 @@ for CacheDecoder<'a, 'tcx, 'x> {
 
 struct CacheEncoder<'enc, 'a, 'tcx, E>
     where E: 'enc + ty_codec::TyEncoder,
-          'tcx: 'a,
+             'tcx: 'a,
 {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     encoder: &'enc mut E,
@@ -839,9 +834,7 @@ impl<'enc, 'a, 'tcx, E> SpecializedEncoder<Span> for CacheEncoder<'enc, 'a, 'tcx
         let (file_lo, line_lo, col_lo) = match self.source_map
                                                    .byte_pos_to_line_and_col(span_data.lo) {
             Some(pos) => pos,
-            None => {
-                return TAG_INVALID_SPAN.encode(self);
-            }
+            None => return TAG_INVALID_SPAN.encode(self)
         };
 
         if !file_lo.contains(span_data.hi) {
@@ -1020,7 +1013,7 @@ impl<'enc, 'a, 'tcx, E> Encoder for CacheEncoder<'enc, 'a, 'tcx, E>
 {
     type Error = E::Error;
 
-    fn emit_nil(&mut self) -> Result<(), Self::Error> {
+    fn emit_unit(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 

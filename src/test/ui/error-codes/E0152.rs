@@ -10,7 +10,7 @@
 
 #![feature(lang_items)]
 
-#[lang = "panic_impl"]
+#[lang = "arc"]
 struct Foo; //~ ERROR E0152
 
 fn main() {

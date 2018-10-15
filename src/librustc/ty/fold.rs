@@ -667,12 +667,14 @@ pub fn shift_regions<'a, 'gcx, 'tcx, T>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
 /// we already use the term "free region". It refers to the regions that we use to represent bound
 /// regions on a fn definition while we are typechecking its body.
 ///
-/// To clarify, conceptually there is no particular difference between an "escaping" region and a
-/// "free" region. However, there is a big difference in practice. Basically, when "entering" a
-/// binding level, one is generally required to do some sort of processing to a bound region, such
-/// as replacing it with a fresh/skolemized region, or making an entry in the environment to
-/// represent the scope to which it is attached, etc. An escaping region represents a bound region
-/// for which this processing has not yet been done.
+/// To clarify, conceptually there is no particular difference between
+/// an "escaping" region and a "free" region. However, there is a big
+/// difference in practice. Basically, when "entering" a binding
+/// level, one is generally required to do some sort of processing to
+/// a bound region, such as replacing it with a fresh/placeholder
+/// region, or making an entry in the environment to represent the
+/// scope to which it is attached, etc. An escaping region represents
+/// a bound region for which this processing has not yet been done.
 struct HasEscapingRegionsVisitor {
     /// Anything bound by `outer_index` or "above" is escaping
     outer_index: ty::DebruijnIndex,
@@ -708,7 +710,7 @@ struct HasTypeFlagsVisitor {
 }
 
 impl<'tcx> TypeVisitor<'tcx> for HasTypeFlagsVisitor {
-    fn visit_ty(&mut self, t: Ty) -> bool {
+    fn visit_ty(&mut self, t: Ty<'_>) -> bool {
         debug!("HasTypeFlagsVisitor: t={:?} t.flags={:?} self.flags={:?}", t, t.flags, self.flags);
         t.flags.intersects(self.flags)
     }
@@ -780,11 +782,10 @@ impl<'tcx> TypeVisitor<'tcx> for LateBoundRegionsCollector {
     }
 
     fn visit_region(&mut self, r: ty::Region<'tcx>) -> bool {
-        match *r {
-            ty::ReLateBound(debruijn, br) if debruijn == self.current_index => {
+        if let ty::ReLateBound(debruijn, br) = *r {
+             if debruijn == self.current_index {
                 self.regions.insert(br);
             }
-            _ => { }
         }
         false
     }

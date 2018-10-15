@@ -29,10 +29,9 @@ use build_helper::{output, mtime, up_to_date};
 use filetime::FileTime;
 use serde_json;
 
-use util::{exe, libdir, is_dylib, CiEnv};
-use {Compiler, Mode};
+use util::{exe, libdir, is_dylib};
+use {Compiler, Mode, GitRepo};
 use native;
-use tool;
 
 use cache::{INTERNER, Interned};
 use builder::{Step, RunConfig, ShouldRun, Builder};
@@ -107,8 +106,6 @@ impl Step for Std {
             copy_musl_third_party_objects(builder, target, &libdir);
         }
 
-        let out_dir = builder.cargo_out(compiler, Mode::Std, target);
-        builder.clear_if_dirty(&out_dir, &builder.rustc(compiler));
         let mut cargo = builder.cargo(compiler, Mode::Std, target, "build");
         std_cargo(builder, &compiler, target, &mut cargo);
 
@@ -246,17 +243,13 @@ impl Step for StdLink {
             copy_apple_sanitizer_dylibs(builder, &builder.native_dir(target), "osx", &libdir);
         }
 
-        builder.ensure(tool::CleanTools {
-            compiler: target_compiler,
-            target,
-            cause: Mode::Std,
-        });
+        builder.cargo(target_compiler, Mode::ToolStd, target, "clean");
     }
 }
 
 fn copy_apple_sanitizer_dylibs(builder: &Builder, native_dir: &Path, platform: &str, into: &Path) {
     for &sanitizer in &["asan", "tsan"] {
-        let filename = format!("libclang_rt.{}_{}_dynamic.dylib", sanitizer, platform);
+        let filename = format!("lib__rustc__clang_rt.{}_{}_dynamic.dylib", sanitizer, platform);
         let mut src_path = native_dir.join(sanitizer);
         src_path.push("build");
         src_path.push("lib");
@@ -387,8 +380,6 @@ impl Step for Test {
             return;
         }
 
-        let out_dir = builder.cargo_out(compiler, Mode::Test, target);
-        builder.clear_if_dirty(&out_dir, &libstd_stamp(builder, compiler, target));
         let mut cargo = builder.cargo(compiler, Mode::Test, target, "build");
         test_cargo(builder, &compiler, target, &mut cargo);
 
@@ -448,11 +439,8 @@ impl Step for TestLink {
                 target));
         add_to_sysroot(builder, &builder.sysroot_libdir(target_compiler, target),
                     &libtest_stamp(builder, compiler, target));
-        builder.ensure(tool::CleanTools {
-            compiler: target_compiler,
-            target,
-            cause: Mode::Test,
-        });
+
+        builder.cargo(target_compiler, Mode::ToolTest, target, "clean");
     }
 }
 
@@ -519,9 +507,6 @@ impl Step for Rustc {
             compiler: builder.compiler(self.compiler.stage, builder.config.build),
             target: builder.config.build,
         });
-        let cargo_out = builder.cargo_out(compiler, Mode::Rustc, target);
-        builder.clear_if_dirty(&cargo_out, &libstd_stamp(builder, compiler, target));
-        builder.clear_if_dirty(&cargo_out, &libtest_stamp(builder, compiler, target));
 
         let mut cargo = builder.cargo(compiler, Mode::Rustc, target, "build");
         rustc_cargo(builder, &mut cargo);
@@ -613,11 +598,7 @@ impl Step for RustcLink {
                  target));
         add_to_sysroot(builder, &builder.sysroot_libdir(target_compiler, target),
                        &librustc_stamp(builder, compiler, target));
-        builder.ensure(tool::CleanTools {
-            compiler: target_compiler,
-            target,
-            cause: Mode::Rustc,
-        });
+        builder.cargo(target_compiler, Mode::ToolRustc, target, "clean");
     }
 }
 
@@ -674,7 +655,6 @@ impl Step for CodegenBackend {
         }
 
         let out_dir = builder.cargo_out(compiler, Mode::Codegen, target);
-        builder.clear_if_dirty(&out_dir, &librustc_stamp(builder, compiler, target));
 
         let mut cargo = builder.cargo(compiler, Mode::Codegen, target, "rustc");
         cargo.arg("--manifest-path")
@@ -895,7 +875,7 @@ pub fn compiler_file(builder: &Builder,
                  target: Interned<String>,
                  file: &str) -> PathBuf {
     let mut cmd = Command::new(compiler);
-    cmd.args(builder.cflags(target));
+    cmd.args(builder.cflags(target, GitRepo::Rustc));
     cmd.arg(format!("-print-file-name={}", file));
     let out = output(&mut cmd);
     PathBuf::from(out.trim())
@@ -1051,29 +1031,6 @@ pub fn add_to_sysroot(builder: &Builder, sysroot_dst: &Path, stamp: &Path) {
     t!(fs::create_dir_all(&sysroot_dst));
     for path in builder.read_stamp_file(stamp) {
         builder.copy(&path, &sysroot_dst.join(path.file_name().unwrap()));
-    }
-}
-
-// Avoiding a dependency on winapi to keep compile times down
-#[cfg(unix)]
-fn stderr_isatty() -> bool {
-    use libc;
-    unsafe { libc::isatty(libc::STDERR_FILENO) != 0 }
-}
-#[cfg(windows)]
-fn stderr_isatty() -> bool {
-    type DWORD = u32;
-    type BOOL = i32;
-    type HANDLE = *mut u8;
-    const STD_ERROR_HANDLE: DWORD = -12i32 as DWORD;
-    extern "system" {
-        fn GetStdHandle(which: DWORD) -> HANDLE;
-        fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *mut DWORD) -> BOOL;
-    }
-    unsafe {
-        let handle = GetStdHandle(STD_ERROR_HANDLE);
-        let mut out = 0;
-        GetConsoleMode(handle, &mut out) != 0
     }
 }
 
@@ -1237,15 +1194,6 @@ pub fn stream_cargo(
     // stderr as piped so we can get those pretty colors.
     cargo.arg("--message-format").arg("json")
          .stdout(Stdio::piped());
-
-    if stderr_isatty() && builder.ci_env == CiEnv::None &&
-        // if the terminal is reported as dumb, then we don't want to enable color for rustc
-        env::var_os("TERM").map(|t| t != *"dumb").unwrap_or(true) {
-        // since we pass message-format=json to cargo, we need to tell the rustc
-        // wrapper to give us colored output if necessary. This is because we
-        // only want Cargo's JSON output, not rustcs.
-        cargo.env("RUSTC_COLOR", "1");
-    }
 
     for arg in tail_args {
         cargo.arg(arg);

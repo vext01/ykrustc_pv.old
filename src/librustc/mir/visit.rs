@@ -144,11 +144,12 @@ macro_rules! make_mir_visitor {
                 self.super_operand(operand, location);
             }
 
-            fn visit_user_assert_ty(&mut self,
-                                    c_ty: & $($mutability)* CanonicalTy<'tcx>,
-                                    local: & $($mutability)* Local,
-                                    location: Location) {
-                self.super_user_assert_ty(c_ty, local, location);
+            fn visit_ascribe_user_ty(&mut self,
+                                     place: & $($mutability)* Place<'tcx>,
+                                     variance: & $($mutability)* ty::Variance,
+                                     c_ty: & $($mutability)* CanonicalTy<'tcx>,
+                                     location: Location) {
+                self.super_ascribe_user_ty(place, variance, c_ty, location);
             }
 
             fn visit_place(&mut self,
@@ -213,7 +214,7 @@ macro_rules! make_mir_visitor {
                 self.super_ty(ty);
             }
 
-            fn visit_canonical_ty(&mut self, ty: & $($mutability)* CanonicalTy<'tcx>) {
+            fn visit_user_ty(&mut self, ty: & $($mutability)* CanonicalTy<'tcx>) {
                 self.super_canonical_ty(ty);
             }
 
@@ -353,7 +354,7 @@ macro_rules! make_mir_visitor {
                                           ref $($mutability)* rvalue) => {
                         self.visit_assign(block, place, rvalue, location);
                     }
-                    StatementKind::ReadForMatch(ref $($mutability)* place) => {
+                    StatementKind::FakeRead(_, ref $($mutability)* place) => {
                         self.visit_place(place,
                                          PlaceContext::Inspect,
                                          location);
@@ -386,9 +387,12 @@ macro_rules! make_mir_visitor {
                             self.visit_operand(input, location);
                         }
                     }
-                    StatementKind::UserAssertTy(ref $($mutability)* c_ty,
-                                                ref $($mutability)* local) => {
-                        self.visit_user_assert_ty(c_ty, local, location);
+                    StatementKind::AscribeUserType(
+                        ref $($mutability)* place,
+                        ref $($mutability)* variance,
+                        ref $($mutability)* c_ty,
+                    ) => {
+                        self.visit_ascribe_user_ty(place, variance, c_ty, location);
                     }
                     StatementKind::Nop => {}
                 }
@@ -464,7 +468,8 @@ macro_rules! make_mir_visitor {
                     TerminatorKind::Call { ref $($mutability)* func,
                                            ref $($mutability)* args,
                                            ref $($mutability)* destination,
-                                           cleanup } => {
+                                           cleanup,
+                                           from_hir_call: _, } => {
                         self.visit_operand(func, source_location);
                         for arg in args {
                             self.visit_operand(arg, source_location);
@@ -629,12 +634,13 @@ macro_rules! make_mir_visitor {
                 }
             }
 
-            fn super_user_assert_ty(&mut self,
-                                    c_ty: & $($mutability)* CanonicalTy<'tcx>,
-                                    local: & $($mutability)* Local,
-                                    location: Location) {
-                self.visit_canonical_ty(c_ty);
-                self.visit_local(local, PlaceContext::Validate, location);
+            fn super_ascribe_user_ty(&mut self,
+                                     place: & $($mutability)* Place<'tcx>,
+                                     _variance: & $($mutability)* ty::Variance,
+                                     c_ty: & $($mutability)* CanonicalTy<'tcx>,
+                                     location: Location) {
+                self.visit_place(place, PlaceContext::Validate, location);
+                self.visit_user_ty(c_ty);
             }
 
             fn super_place(&mut self,
@@ -716,17 +722,22 @@ macro_rules! make_mir_visitor {
                 let LocalDecl {
                     mutability: _,
                     ref $($mutability)* ty,
+                    ref $($mutability)* user_ty,
                     name: _,
                     ref $($mutability)* source_info,
                     ref $($mutability)* visibility_scope,
                     internal: _,
                     is_user_variable: _,
+                    is_block_tail: _,
                 } = *local_decl;
 
                 self.visit_ty(ty, TyContext::LocalDecl {
                     local,
                     source_info: *source_info,
                 });
+                if let Some((user_ty, _)) = user_ty {
+                    self.visit_user_ty(user_ty);
+                }
                 self.visit_source_info(source_info);
                 self.visit_source_scope(visibility_scope);
             }
@@ -954,6 +965,7 @@ impl<'tcx> PlaceContext<'tcx> {
 
             PlaceContext::Inspect |
             PlaceContext::Borrow { kind: BorrowKind::Shared, .. } |
+            PlaceContext::Borrow { kind: BorrowKind::Shallow, .. } |
             PlaceContext::Borrow { kind: BorrowKind::Unique, .. } |
             PlaceContext::Projection(Mutability::Not) |
             PlaceContext::Copy | PlaceContext::Move |
@@ -965,7 +977,9 @@ impl<'tcx> PlaceContext<'tcx> {
     /// Returns true if this place context represents a use that does not change the value.
     pub fn is_nonmutating_use(&self) -> bool {
         match *self {
-            PlaceContext::Inspect | PlaceContext::Borrow { kind: BorrowKind::Shared, .. } |
+            PlaceContext::Inspect |
+            PlaceContext::Borrow { kind: BorrowKind::Shared, .. } |
+            PlaceContext::Borrow { kind: BorrowKind::Shallow, .. } |
             PlaceContext::Borrow { kind: BorrowKind::Unique, .. } |
             PlaceContext::Projection(Mutability::Not) |
             PlaceContext::Copy | PlaceContext::Move => true,

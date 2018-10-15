@@ -24,8 +24,7 @@ Core encoding and decoding interfaces.
 #![feature(core_intrinsics)]
 #![feature(specialization)]
 #![feature(never_type)]
-#![cfg_attr(not(stage0), feature(nll))]
-#![cfg_attr(not(stage0), feature(infer_outlives_requirements))]
+#![feature(nll)]
 #![cfg_attr(test, feature(test))]
 
 pub use self::serialize::{Decoder, Encoder, Decodable, Encodable};

@@ -18,8 +18,8 @@
 use build::Builder;
 use build::matches::{Candidate, MatchPair, Test, TestKind};
 use hair::*;
+use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::bitvec::BitArray;
 use rustc::ty::{self, Ty};
 use rustc::ty::util::IntTypeExt;
 use rustc::mir::*;
@@ -38,7 +38,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     span: match_pair.pattern.span,
                     kind: TestKind::Switch {
                         adt_def: adt_def.clone(),
-                        variants: BitArray::new(adt_def.variants.len()),
+                        variants: BitSet::new_empty(adt_def.variants.len()),
                     },
                 }
             }
@@ -70,13 +70,14 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 }
             }
 
-            PatternKind::Range { lo, hi, end } => {
+            PatternKind::Range { lo, hi, ty, end } => {
+                assert!(ty == match_pair.pattern.ty);
                 Test {
                     span: match_pair.pattern.span,
                     kind: TestKind::Range {
                         lo,
                         hi,
-                        ty: match_pair.pattern.ty.clone(),
+                        ty,
                         end,
                     },
                 }
@@ -96,6 +97,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 }
             }
 
+            PatternKind::AscribeUserType { .. } |
             PatternKind::Array { .. } |
             PatternKind::Slice { .. } |
             PatternKind::Wild |
@@ -138,6 +140,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             PatternKind::Array { .. } |
             PatternKind::Wild |
             PatternKind::Binding { .. } |
+            PatternKind::AscribeUserType { .. } |
             PatternKind::Leaf { .. } |
             PatternKind::Deref { .. } => {
                 // don't know how to add these patterns to a switch
@@ -149,7 +152,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     pub fn add_variants_to_switch<'pat>(&mut self,
                                         test_place: &Place<'tcx>,
                                         candidate: &Candidate<'pat, 'tcx>,
-                                        variants: &mut BitArray<usize>)
+                                        variants: &mut BitSet<usize>)
                                         -> bool
     {
         let match_pair = match candidate.match_pairs.iter().find(|mp| mp.place == *test_place) {
@@ -358,6 +361,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                         args: vec![val, expect],
                         destination: Some((eq_result.clone(), eq_block)),
                         cleanup: Some(cleanup),
+                        from_hir_call: false,
                     });
 
                     // check the result
@@ -638,6 +642,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             span: candidate.span,
             match_pairs: other_match_pairs,
             bindings: candidate.bindings.clone(),
+            ascriptions: candidate.ascriptions.clone(),
             guard: candidate.guard.clone(),
             arm_index: candidate.arm_index,
             pat_index: candidate.pat_index,
@@ -702,6 +707,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             span: candidate.span,
             match_pairs: all_match_pairs,
             bindings: candidate.bindings.clone(),
+            ascriptions: candidate.ascriptions.clone(),
             guard: candidate.guard.clone(),
             arm_index: candidate.arm_index,
             pat_index: candidate.pat_index,

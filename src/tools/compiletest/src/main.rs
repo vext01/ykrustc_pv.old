@@ -22,7 +22,6 @@ extern crate libc;
 extern crate log;
 extern crate regex;
 #[macro_use]
-#[cfg(windows)]
 extern crate lazy_static;
 #[macro_use]
 extern crate serde_derive;
@@ -279,7 +278,11 @@ pub fn parse_config(args: Vec<String>) -> Config {
         }
     }
 
-    let (gdb, gdb_version, gdb_native_rust) = analyze_gdb(matches.opt_str("gdb"));
+    let target = opt_str2(matches.opt_str("target"));
+    let android_cross_path = opt_path(matches, "android-cross-path");
+    let (gdb, gdb_version, gdb_native_rust) = analyze_gdb(matches.opt_str("gdb"), &target,
+                                                          &android_cross_path);
+    let (lldb_version, lldb_native_rust) = extract_lldb_version(matches.opt_str("lldb-version"));
 
     let color = match matches.opt_str("color").as_ref().map(|x| &**x) {
         Some("auto") | None => ColorConfig::AutoColor,
@@ -319,15 +322,16 @@ pub fn parse_config(args: Vec<String>) -> Config {
         runtool: matches.opt_str("runtool"),
         host_rustcflags: matches.opt_str("host-rustcflags"),
         target_rustcflags: matches.opt_str("target-rustcflags"),
-        target: opt_str2(matches.opt_str("target")),
+        target: target,
         host: opt_str2(matches.opt_str("host")),
         gdb,
         gdb_version,
         gdb_native_rust,
-        lldb_version: extract_lldb_version(matches.opt_str("lldb-version")),
+        lldb_version,
+        lldb_native_rust,
         llvm_version: matches.opt_str("llvm-version"),
         system_llvm: matches.opt_present("system-llvm"),
-        android_cross_path: opt_path(matches, "android-cross-path"),
+        android_cross_path: android_cross_path,
         adb_path: opt_str2(matches.opt_str("adb-path")),
         adb_test_dir: opt_str2(matches.opt_str("adb-test-dir")),
         adb_device_status: opt_str2(matches.opt_str("target")).contains("android")
@@ -781,8 +785,18 @@ fn make_test_closure(
     }))
 }
 
+/// Returns true if the given target is an Android target for the
+/// purposes of GDB testing.
+fn is_android_gdb_target(target: &String) -> bool {
+    match &target[..] {
+        "arm-linux-androideabi" | "armv7-linux-androideabi" | "aarch64-linux-android" => true,
+        _ => false,
+    }
+}
+
 /// Returns (Path to GDB, GDB Version, GDB has Rust Support)
-fn analyze_gdb(gdb: Option<String>) -> (Option<String>, Option<u32>, bool) {
+fn analyze_gdb(gdb: Option<String>, target: &String, android_cross_path: &PathBuf)
+               -> (Option<String>, Option<u32>, bool) {
     #[cfg(not(windows))]
     const GDB_FALLBACK: &str = "gdb";
     #[cfg(windows)]
@@ -790,14 +804,27 @@ fn analyze_gdb(gdb: Option<String>) -> (Option<String>, Option<u32>, bool) {
 
     const MIN_GDB_WITH_RUST: u32 = 7011010;
 
+    let fallback_gdb = || {
+        if is_android_gdb_target(target) {
+            let mut gdb_path = match android_cross_path.to_str() {
+                Some(x) => x.to_owned(),
+                None => panic!("cannot find android cross path"),
+            };
+            gdb_path.push_str("/bin/gdb");
+            gdb_path
+        } else {
+            GDB_FALLBACK.to_owned()
+        }
+    };
+
     let gdb = match gdb {
-        None => GDB_FALLBACK,
-        Some(ref s) if s.is_empty() => GDB_FALLBACK, // may be empty if configure found no gdb
-        Some(ref s) => s,
+        None => fallback_gdb(),
+        Some(ref s) if s.is_empty() => fallback_gdb(), // may be empty if configure found no gdb
+        Some(ref s) => s.to_owned(),
     };
 
     let mut version_line = None;
-    if let Ok(output) = Command::new(gdb).arg("--version").output() {
+    if let Ok(output) = Command::new(&gdb).arg("--version").output() {
         if let Some(first_line) = String::from_utf8_lossy(&output.stdout).lines().next() {
             version_line = Some(first_line.to_string());
         }
@@ -810,7 +837,7 @@ fn analyze_gdb(gdb: Option<String>) -> (Option<String>, Option<u32>, bool) {
 
     let gdb_native_rust = version.map_or(false, |v| v >= MIN_GDB_WITH_RUST);
 
-    (Some(gdb.to_owned()), version, gdb_native_rust)
+    (Some(gdb), version, gdb_native_rust)
 }
 
 fn extract_gdb_version(full_version_line: &str) -> Option<u32> {
@@ -881,17 +908,27 @@ fn extract_gdb_version(full_version_line: &str) -> Option<u32> {
     None
 }
 
-fn extract_lldb_version(full_version_line: Option<String>) -> Option<String> {
+/// Returns (LLDB version, LLDB is rust-enabled)
+fn extract_lldb_version(full_version_line: Option<String>) -> (Option<String>, bool) {
     // Extract the major LLDB version from the given version string.
     // LLDB version strings are different for Apple and non-Apple platforms.
-    // At the moment, this function only supports the Apple variant, which looks
-    // like this:
+    // The Apple variant looks like this:
     //
     // LLDB-179.5 (older versions)
     // lldb-300.2.51 (new versions)
     //
     // We are only interested in the major version number, so this function
     // will return `Some("179")` and `Some("300")` respectively.
+    //
+    // Upstream versions look like:
+    // lldb version 6.0.1
+    //
+    // There doesn't seem to be a way to correlate the Apple version
+    // with the upstream version, and since the tests were originally
+    // written against Apple versions, we make a fake Apple version by
+    // multiplying the first number by 100.  This is a hack, but
+    // normally fine because the only non-Apple version we test is
+    // rust-enabled.
 
     if let Some(ref full_version_line) = full_version_line {
         if !full_version_line.trim().is_empty() {
@@ -926,12 +963,22 @@ fn extract_lldb_version(full_version_line: Option<String>) -> Option<String> {
                     .take_while(|c| c.is_digit(10))
                     .collect::<String>();
                 if !vers.is_empty() {
-                    return Some(vers);
+                    return (Some(vers), full_version_line.contains("rust-enabled"));
+                }
+            }
+
+            if full_version_line.starts_with("lldb version ") {
+                let vers = full_version_line[13..]
+                    .chars()
+                    .take_while(|c| c.is_digit(10))
+                    .collect::<String>();
+                if !vers.is_empty() {
+                    return (Some(vers + "00"), full_version_line.contains("rust-enabled"));
                 }
             }
         }
     }
-    None
+    (None, false)
 }
 
 fn is_blacklisted_lldb_version(version: &str) -> bool {

@@ -12,7 +12,7 @@
 //! locations.
 
 use rustc::mir::{BasicBlock, Location};
-use rustc_data_structures::indexed_set::{HybridIdxSet, IdxSet, Iter};
+use rustc_data_structures::bit_set::{BitIter, BitSet, HybridBitSet};
 
 use dataflow::{BitDenotation, BlockSets, DataflowResults};
 use dataflow::move_paths::{HasMoveData, MovePathIndex};
@@ -75,9 +75,9 @@ where
     BD: BitDenotation,
 {
     base_results: DataflowResults<BD>,
-    curr_state: IdxSet<BD::Idx>,
-    stmt_gen: HybridIdxSet<BD::Idx>,
-    stmt_kill: HybridIdxSet<BD::Idx>,
+    curr_state: BitSet<BD::Idx>,
+    stmt_gen: HybridBitSet<BD::Idx>,
+    stmt_kill: HybridBitSet<BD::Idx>,
 }
 
 impl<BD> FlowAtLocation<BD>
@@ -104,9 +104,9 @@ where
 
     pub fn new(results: DataflowResults<BD>) -> Self {
         let bits_per_block = results.sets().bits_per_block();
-        let curr_state = IdxSet::new_empty(bits_per_block);
-        let stmt_gen = HybridIdxSet::new_empty(bits_per_block);
-        let stmt_kill = HybridIdxSet::new_empty(bits_per_block);
+        let curr_state = BitSet::new_empty(bits_per_block);
+        let stmt_gen = HybridBitSet::new_empty(bits_per_block);
+        let stmt_kill = HybridBitSet::new_empty(bits_per_block);
         FlowAtLocation {
             base_results: results,
             curr_state: curr_state,
@@ -120,12 +120,12 @@ where
         self.base_results.operator()
     }
 
-    pub fn contains(&self, x: &BD::Idx) -> bool {
+    pub fn contains(&self, x: BD::Idx) -> bool {
         self.curr_state.contains(x)
     }
 
     /// Returns an iterator over the elements present in the current state.
-    pub fn iter_incoming(&self) -> iter::Peekable<Iter<BD::Idx>> {
+    pub fn iter_incoming(&self) -> iter::Peekable<BitIter<BD::Idx>> {
         self.curr_state.iter().peekable()
     }
 
@@ -134,7 +134,7 @@ where
     /// Invokes `f` with an iterator over the resulting state.
     pub fn with_iter_outgoing<F>(&self, f: F)
     where
-        F: FnOnce(Iter<BD::Idx>),
+        F: FnOnce(BitIter<BD::Idx>),
     {
         let mut curr_state = self.curr_state.clone();
         curr_state.union(&self.stmt_gen);
@@ -223,7 +223,7 @@ where
         //   siblings);
         // - ~99% of the time the loop isn't reached, and this code is hot, so
         //   we don't want to allocate `todo` unnecessarily.
-        if self.contains(&mpi) {
+        if self.contains(mpi) {
             return Some(mpi);
         }
         let move_data = self.operator().move_data();
@@ -235,7 +235,7 @@ where
         };
 
         while let Some(mpi) = todo.pop() {
-            if self.contains(&mpi) {
+            if self.contains(mpi) {
                 return Some(mpi);
             }
             let move_path = &move_data.move_paths[mpi];

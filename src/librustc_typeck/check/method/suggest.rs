@@ -16,6 +16,7 @@ use rustc::hir::map as hir_map;
 use hir::Node;
 use rustc_data_structures::sync::Lrc;
 use rustc::ty::{self, Ty, TyCtxt, ToPolyTraitRef, ToPredicate, TypeFoldable};
+use rustc::ty::item_path::with_crate_prefix;
 use hir::def::Def;
 use hir::def_id::{CRATE_DEF_INDEX, DefId};
 use middle::lang_items::FnOnceTraitLangItem;
@@ -88,7 +89,6 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         }
 
         let report_candidates = |err: &mut DiagnosticBuilder, mut sources: Vec<CandidateSource>| {
-
             sources.sort();
             sources.dedup();
             // Dynamic limit to avoid hiding just one candidate, which is silly.
@@ -225,9 +225,9 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     // ({integer}/{float}).
                     let mut candidates = all_traits(self.tcx)
                         .into_iter()
-                        .filter(|info| {
-                            self.associated_item(info.def_id, item_name, Namespace::Value).is_some()
-                        });
+                        .filter_map(|info|
+                            self.associated_item(info.def_id, item_name, Namespace::Value)
+                        );
                     if let (true, false, Some(expr), Some(_)) = (actual.is_numeric(),
                                                                  actual.has_concrete_skeleton(),
                                                                  rcvr_expr,
@@ -247,17 +247,20 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                             "f32"
                         };
                         match expr.node {
-                            hir::ExprKind::Lit(ref lit) => {  // numeric literal
+                            hir::ExprKind::Lit(ref lit) => { // numeric literal
                                 let snippet = tcx.sess.source_map().span_to_snippet(lit.span)
-                                    .unwrap_or("<numeric literal>".to_string());
+                                    .unwrap_or("<numeric literal>".to_owned());
 
-                                err.span_suggestion(lit.span,
+                                err.span_suggestion_with_applicability(
+                                                    lit.span,
                                                     &format!("you must specify a concrete type for \
                                                               this numeric value, like `{}`",
                                                              concrete_type),
                                                     format!("{}_{}",
                                                             snippet,
-                                                            concrete_type));
+                                                            concrete_type),
+                                                    Applicability::MaybeIncorrect,
+                                );
                             }
                             hir::ExprKind::Path(ref qpath) => {  // local binding
                                 if let &hir::QPath::Resolved(_, ref path) = &qpath {
@@ -281,13 +284,14 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                                 ty,
                                                 ..
                                             })) => {
-                                                err.span_suggestion(
+                                                err.span_suggestion_with_applicability(
                                                     // account for `let x: _ = 42;`
                                                     //                  ^^^^
                                                     span.to(ty.as_ref().map(|ty| ty.span)
                                                         .unwrap_or(span)),
                                                     &msg,
                                                     format!("{}: {}", snippet, concrete_type),
+                                                    Applicability::MaybeIncorrect,
                                                 );
                                             }
                                             _ => {
@@ -338,8 +342,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 // give a helping note that it has to be called as (x.f)(...).
                 if let Some(expr) = rcvr_expr {
                     for (ty, _) in self.autoderef(span, rcvr_ty) {
-                        match ty.sty {
-                            ty::Adt(def, substs) if !def.is_enum() => {
+                        if let ty::Adt(def, substs) = ty.sty {
+                            if !def.is_enum() {
                                 let variant = &def.non_enum_variant();
                                 if let Some(index) = self.tcx.find_field_index(item_name, variant) {
                                     let field = &variant.fields[index];
@@ -373,7 +377,6 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                     break;
                                 }
                             }
-                            _ => {}
                         }
                     }
                 } else {
@@ -513,20 +516,37 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 } else {
                     "\n"
                 };
-                format!("use {};\n{}", self.tcx.item_path_str(*did), additional_newline)
+                format!(
+                    "use {};\n{}",
+                    with_crate_prefix(|| self.tcx.item_path_str(*did)),
+                    additional_newline
+                )
             }).collect();
 
-            err.span_suggestions(span, &msg, path_strings);
+            err.span_suggestions_with_applicability(
+                                                    span,
+                                                    &msg,
+                                                    path_strings,
+                                                    Applicability::MaybeIncorrect,
+            );
         } else {
             let limit = if candidates.len() == 5 { 5 } else { 4 };
             for (i, trait_did) in candidates.iter().take(limit).enumerate() {
                 if candidates.len() > 1 {
-                    msg.push_str(&format!("\ncandidate #{}: `use {};`",
-                                            i + 1,
-                                            self.tcx.item_path_str(*trait_did)));
+                    msg.push_str(
+                        &format!(
+                            "\ncandidate #{}: `use {};`",
+                            i + 1,
+                            with_crate_prefix(|| self.tcx.item_path_str(*trait_did))
+                        )
+                    );
                 } else {
-                    msg.push_str(&format!("\n`use {};`",
-                                            self.tcx.item_path_str(*trait_did)));
+                    msg.push_str(
+                        &format!(
+                            "\n`use {};`",
+                            with_crate_prefix(|| self.tcx.item_path_str(*trait_did))
+                        )
+                    );
                 }
             }
             if candidates.len() > limit {
@@ -643,8 +663,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 ty::Adt(def, _) => def.did.is_local(),
                 ty::Foreign(did) => did.is_local(),
 
-                ty::Dynamic(ref tr, ..) => tr.principal()
-                    .map_or(false, |p| p.def_id().is_local()),
+                ty::Dynamic(ref tr, ..) => tr.principal().def_id().is_local(),
 
                 ty::Param(_) => true,
 
@@ -713,12 +732,9 @@ fn compute_all_traits<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Vec<DefId>
         }
         impl<'v, 'a, 'tcx> itemlikevisit::ItemLikeVisitor<'v> for Visitor<'a, 'tcx> {
             fn visit_item(&mut self, i: &'v hir::Item) {
-                match i.node {
-                    hir::ItemKind::Trait(..) => {
-                        let def_id = self.map.local_def_id(i.id);
-                        self.traits.push(def_id);
-                    }
-                    _ => {}
+                if let hir::ItemKind::Trait(..) = i.node {
+                    let def_id = self.map.local_def_id(i.id);
+                    self.traits.push(def_id);
                 }
             }
 

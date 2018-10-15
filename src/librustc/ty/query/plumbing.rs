@@ -449,14 +449,14 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             let prev_dep_node_index =
                 self.dep_graph.prev_dep_node_index_of(dep_node);
             let result = Q::try_load_from_disk(self.global_tcx(),
-                                                    prev_dep_node_index);
+                                               prev_dep_node_index);
 
             // We always expect to find a cached result for things that
             // can be forced from DepNode.
             debug_assert!(!dep_node.kind.can_reconstruct_query_key() ||
-                            result.is_some(),
-                            "Missing on-disk cache entry for {:?}",
-                            dep_node);
+                          result.is_some(),
+                          "Missing on-disk cache entry for {:?}",
+                          dep_node);
             result
         } else {
             // Some things are never cached on disk.
@@ -491,7 +491,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             assert!(Some(self.dep_graph.fingerprint_of(dep_node_index)) ==
                     self.dep_graph.prev_fingerprint_of(dep_node),
                     "Fingerprint for green query instance not loaded \
-                        from cache: {:?}", dep_node);
+                     from cache: {:?}", dep_node);
 
             debug!("BEGIN verify_ich({:?})", dep_node);
             let mut hcx = self.create_stable_hashing_context();
@@ -530,8 +530,8 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         //    (see for example #48923)
         assert!(!self.dep_graph.dep_node_exists(&dep_node),
                 "Forcing query with already existing DepNode.\n\
-                    - query-key: {:?}\n\
-                    - dep-node: {:?}",
+                 - query-key: {:?}\n\
+                 - dep-node: {:?}",
                 key, dep_node);
 
         profq_msg!(self, ProfileQueriesMsg::ProviderBegin);
@@ -692,10 +692,12 @@ macro_rules! define_queries_inner {
         impl<$tcx> Queries<$tcx> {
             pub fn new(
                 providers: IndexVec<CrateNum, Providers<$tcx>>,
+                fallback_extern_providers: Providers<$tcx>,
                 on_disk_cache: OnDiskCache<'tcx>,
             ) -> Self {
                 Queries {
                     providers,
+                    fallback_extern_providers: Box::new(fallback_extern_providers),
                     on_disk_cache,
                     $($name: Lock::new(QueryCache::new())),*
                 }
@@ -707,14 +709,19 @@ macro_rules! define_queries_inner {
 
                 // We use try_lock here since we are only called from the
                 // deadlock handler, and this shouldn't be locked
-                $(for v in self.$name.try_lock().unwrap().active.values() {
-                    match *v {
-                        QueryResult::Started(ref job) => jobs.push(job.clone()),
-                        _ => (),
-                    }
-                })*
+                $(
+                    jobs.extend(
+                        self.$name.try_lock().unwrap().active.values().filter_map(|v|
+                            if let QueryResult::Started(ref job) = *v {
+                                Some(job.clone())
+                            } else {
+                                None
+                            }
+                        )
+                    );
+                )*
 
-                return jobs;
+                jobs
             }
         }
 
@@ -731,14 +738,14 @@ macro_rules! define_queries_inner {
                 }
             }
 
-            pub fn describe(&self, tcx: TyCtxt) -> String {
+            pub fn describe(&self, tcx: TyCtxt<'_, '_, '_>) -> Cow<'static, str> {
                 let (r, name) = match *self {
                     $(Query::$name(key) => {
                         (queries::$name::describe(tcx, key), stringify!($name))
                     })*
                 };
                 if tcx.sess.verbose() {
-                    format!("{} [{}]", r, name)
+                    format!("{} [{}]", r, name).into()
                 } else {
                     r
                 }
@@ -751,9 +758,8 @@ macro_rules! define_queries_inner {
                 }
                 // The def_span query is used to calculate default_span,
                 // so exit to avoid infinite recursion
-                match *self {
-                    Query::def_span(..) => return span,
-                    _ => ()
+                if let Query::def_span(..) = *self {
+                    return span
                 }
                 match *self {
                     $(Query::$name(key) => key.default_span(tcx),)*
@@ -818,7 +824,13 @@ macro_rules! define_queries_inner {
             #[inline]
             fn compute(tcx: TyCtxt<'_, 'tcx, '_>, key: Self::Key) -> Self::Value {
                 __query_compute::$name(move || {
-                    let provider = tcx.queries.providers[key.query_crate()].$name;
+                    let provider = tcx.queries.providers.get(key.query_crate())
+                        // HACK(eddyb) it's possible crates may be loaded after
+                        // the query engine is created, and because crate loading
+                        // is not yet integrated with the query engine, such crates
+                        // would be be missing appropriate entries in `providers`.
+                        .unwrap_or(&tcx.queries.fallback_extern_providers)
+                        .$name;
                     provider(tcx.global_tcx(), key)
                 })
             }
@@ -837,7 +849,7 @@ macro_rules! define_queries_inner {
             ///
             /// Note: The optimization is only available during incr. comp.
             pub fn ensure(tcx: TyCtxt<'a, $tcx, 'lcx>, key: $K) -> () {
-                tcx.ensure_query::<queries::$name>(key);
+                tcx.ensure_query::<queries::$name<'_>>(key);
             }
         })*
 
@@ -873,7 +885,7 @@ macro_rules! define_queries_inner {
         impl<'a, $tcx, 'lcx> TyCtxtAt<'a, $tcx, 'lcx> {
             $($(#[$attr])*
             pub fn $name(self, key: $K) -> $V {
-                self.tcx.get_query::<queries::$name>(self.span, key)
+                self.tcx.get_query::<queries::$name<'_>>(self.span, key)
             })*
         }
 
@@ -899,6 +911,7 @@ macro_rules! define_queries_struct {
             pub(crate) on_disk_cache: OnDiskCache<'tcx>,
 
             providers: IndexVec<CrateNum, Providers<$tcx>>,
+            fallback_extern_providers: Box<Providers<$tcx>>,
 
             $($(#[$attr])*  $name: Lock<QueryCache<$tcx, queries::$name<$tcx>>>,)*
         }
@@ -1019,11 +1032,10 @@ pub fn force_from_dep_node<'a, 'gcx, 'lcx>(tcx: TyCtxt<'a, 'gcx, 'lcx>,
                     )
                 );
 
-                match tcx.force_query::<::ty::query::queries::$query>($key, DUMMY_SP, *dep_node) {
-                    Ok(_) => {},
-                    Err(e) => {
-                        tcx.report_cycle(e).emit();
-                    }
+                if let Err(e) = tcx.force_query::<::ty::query::queries::$query<'_>>(
+                    $key, DUMMY_SP, *dep_node
+                ) {
+                    tcx.report_cycle(e).emit();
                 }
             }
         }
@@ -1125,7 +1137,8 @@ pub fn force_from_dep_node<'a, 'gcx, 'lcx>(tcx: TyCtxt<'a, 'gcx, 'lcx>,
         DepKind::FnSignature => { force!(fn_sig, def_id!()); }
         DepKind::CoerceUnsizedInfo => { force!(coerce_unsized_info, def_id!()); }
         DepKind::ItemVariances => { force!(variances_of, def_id!()); }
-        DepKind::IsConstFn => { force!(is_const_fn, def_id!()); }
+        DepKind::IsConstFn => { force!(is_const_fn_raw, def_id!()); }
+        DepKind::IsPromotableConstFn => { force!(is_promotable_const_fn, def_id!()); }
         DepKind::IsForeignItem => { force!(is_foreign_item, def_id!()); }
         DepKind::SizedConstraint => { force!(adt_sized_constraint, def_id!()); }
         DepKind::DtorckConstraint => { force!(adt_dtorck_constraint, def_id!()); }
@@ -1272,7 +1285,7 @@ macro_rules! impl_load_from_cache {
         impl DepNode {
             // Check whether the query invocation corresponding to the given
             // DepNode is eligible for on-disk-caching.
-            pub fn cache_on_disk(&self, tcx: TyCtxt) -> bool {
+            pub fn cache_on_disk(&self, tcx: TyCtxt<'_, '_, '_>) -> bool {
                 use ty::query::queries;
                 use ty::query::QueryDescription;
 
@@ -1290,7 +1303,7 @@ macro_rules! impl_load_from_cache {
             // above `cache_on_disk` methods returns true.
             // Also, as a sanity check, it expects that the corresponding query
             // invocation has been marked as green already.
-            pub fn load_from_on_disk_cache(&self, tcx: TyCtxt) {
+            pub fn load_from_on_disk_cache(&self, tcx: TyCtxt<'_, '_, '_>) {
                 match self.kind {
                     $(DepKind::$dep_kind => {
                         debug_assert!(tcx.dep_graph

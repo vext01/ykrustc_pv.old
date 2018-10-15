@@ -435,12 +435,7 @@ fn trait_pointer_metadata(
     // But it does not describe the trait's methods.
 
     let containing_scope = match trait_type.sty {
-        ty::Dynamic(ref data, ..) => if let Some(principal) = data.principal() {
-            let def_id = principal.def_id();
-            Some(get_namespace_for_item(cx, def_id))
-        } else {
-            NO_SCOPE_METADATA
-        },
+        ty::Dynamic(ref data, ..) => Some(get_namespace_for_item(cx, data.principal().def_id())),
         _ => {
             bug!("debuginfo: Unexpected trait-object type in \
                   trait_pointer_metadata(): {:?}",
@@ -1803,13 +1798,7 @@ pub fn create_vtable_metadata(
         llvm::LLVMRustDIBuilderCreateStaticVariable(DIB(cx),
                                                     NO_SCOPE_METADATA,
                                                     name.as_ptr(),
-                                                    // LLVM 3.9
-                                                    // doesn't accept
-                                                    // null here, so
-                                                    // pass the name
-                                                    // as the linkage
-                                                    // name.
-                                                    name.as_ptr(),
+                                                    ptr::null(),
                                                     unknown_file_metadata(cx),
                                                     UNKNOWN_LINE_NUMBER,
                                                     vtable_type,

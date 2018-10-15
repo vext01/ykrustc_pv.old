@@ -102,9 +102,9 @@ impl<'a> DefCollector<'a> {
             visit::walk_fn_decl(this, decl);
 
             let closure_def = this.create_def(closure_id,
-                                  DefPathData::ClosureExpr,
-                                  REGULAR_SPACE,
-                                  span);
+                                              DefPathData::ClosureExpr,
+                                              REGULAR_SPACE,
+                                              span);
             this.with_parent(closure_def, |this| {
                 visit::walk_block(this, body);
             })
@@ -348,13 +348,10 @@ impl<'a> visit::Visitor<'a> for DefCollector<'a> {
 
     fn visit_token(&mut self, t: Token) {
         if let Token::Interpolated(nt) = t {
-            match nt.0 {
-                token::NtExpr(ref expr) => {
-                    if let ExprKind::Mac(..) = expr.node {
-                        self.visit_macro_invoc(expr.id);
-                    }
+            if let token::NtExpr(ref expr) = nt.0 {
+                if let ExprKind::Mac(..) = expr.node {
+                    self.visit_macro_invoc(expr.id);
                 }
-                _ => {}
             }
         }
     }

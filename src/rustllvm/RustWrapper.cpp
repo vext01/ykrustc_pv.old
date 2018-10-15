@@ -179,6 +179,8 @@ static Attribute::AttrKind fromRust(LLVMRustAttribute Kind) {
     return Attribute::SanitizeAddress;
   case SanitizeMemory:
     return Attribute::SanitizeMemory;
+  case NonLazyBind:
+    return Attribute::NonLazyBind;
   }
   report_fatal_error("bad AttributeKind");
 }
@@ -425,6 +427,11 @@ extern "C" LLVMValueRef LLVMRustInlineAsm(LLVMTypeRef Ty, char *AsmString,
                                           LLVMRustAsmDialect Dialect) {
   return wrap(InlineAsm::get(unwrap<FunctionType>(Ty), AsmString, Constraints,
                              HasSideEffects, IsAlignStack, fromRust(Dialect)));
+}
+
+extern "C" bool LLVMRustInlineAsmVerify(LLVMTypeRef Ty,
+                                          char *Constraints) {
+  return InlineAsm::Verify(unwrap<FunctionType>(Ty), Constraints);
 }
 
 extern "C" void LLVMRustAppendModuleInlineAsm(LLVMModuleRef M, const char *Asm) {

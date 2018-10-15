@@ -142,7 +142,7 @@ impl<'a, 'gcx, 'tcx> Children {
                 possible_sibling,
             );
 
-            let overlap_error = |overlap: traits::coherence::OverlapResult| {
+            let overlap_error = |overlap: traits::coherence::OverlapResult<'_>| {
                 // overlap, but no specialization; error out
                 let trait_ref = overlap.impl_header.trait_ref.unwrap();
                 let self_ty = trait_ref.self_ty();
@@ -390,11 +390,12 @@ impl Iterator for Ancestors {
         let cur = self.current_source.take();
         if let Some(Node::Impl(cur_impl)) = cur {
             let parent = self.specialization_graph.parent(cur_impl);
-            if parent == self.trait_def_id {
-                self.current_source = Some(Node::Trait(parent));
+
+            self.current_source = if parent == self.trait_def_id {
+                Some(Node::Trait(parent))
             } else {
-                self.current_source = Some(Node::Impl(parent));
-            }
+                Some(Node::Impl(parent))
+            };
         }
         cur
     }
@@ -446,7 +447,7 @@ impl<'a, 'gcx, 'tcx> Ancestors {
 
 /// Walk up the specialization ancestors of a given impl, starting with that
 /// impl itself.
-pub fn ancestors(tcx: TyCtxt,
+pub fn ancestors(tcx: TyCtxt<'_, '_, '_>,
                  trait_def_id: DefId,
                  start_from_impl: DefId)
                  -> Ancestors {

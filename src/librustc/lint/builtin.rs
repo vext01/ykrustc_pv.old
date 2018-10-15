@@ -338,6 +338,12 @@ declare_lint! {
      cannot be referred to by absolute paths"
 }
 
+declare_lint! {
+    pub EXPLICIT_OUTLIVES_REQUIREMENTS,
+    Allow,
+    "outlives requirements can be inferred"
+}
+
 /// Some lints that are buffered from `libsyntax`. See `syntax::early_buffered_lints`.
 pub mod parser {
     declare_lint! {
@@ -422,10 +428,11 @@ pub enum BuiltinLintDiagnostics {
     ProcMacroDeriveResolutionFallback(Span),
     MacroExpandedMacroExportsAccessedByAbsolutePaths(Span),
     ElidedLifetimesInPaths(usize, Span, bool, Span, String),
+    UnknownCrateTypes(Span, String, String),
 }
 
 impl BuiltinLintDiagnostics {
-    pub fn run(self, sess: &Session, db: &mut DiagnosticBuilder) {
+    pub fn run(self, sess: &Session, db: &mut DiagnosticBuilder<'_>) {
         match self {
             BuiltinLintDiagnostics::Normal => (),
             BuiltinLintDiagnostics::BareTraitObject(span, is_global) => {
@@ -498,6 +505,14 @@ impl BuiltinLintDiagnostics {
                     &format!("indicate the anonymous lifetime{}", if n >= 2 { "s" } else { "" }),
                     suggestion,
                     Applicability::MachineApplicable
+                );
+            }
+            BuiltinLintDiagnostics::UnknownCrateTypes(span, note, sugg) => {
+                db.span_suggestion_with_applicability(
+                    span,
+                    &note,
+                    sugg,
+                    Applicability::MaybeIncorrect
                 );
             }
         }

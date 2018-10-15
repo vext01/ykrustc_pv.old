@@ -79,8 +79,8 @@ impl BoundRegion {
     }
 }
 
-/// NB: If you change this, you'll probably want to change the corresponding
-/// AST structure in libsyntax/ast.rs as well.
+/// N.B., If you change this, you'll probably want to change the corresponding
+/// AST structure in `libsyntax/ast.rs` as well.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, RustcEncodable, RustcDecodable)]
 pub enum TyKind<'tcx> {
     /// The primitive boolean type. Written as `bool`.
@@ -126,10 +126,25 @@ pub enum TyKind<'tcx> {
     Ref(Region<'tcx>, Ty<'tcx>, hir::Mutability),
 
     /// The anonymous type of a function declaration/definition. Each
-    /// function has a unique type.
+    /// function has a unique type, which is output (for a function
+    /// named `foo` returning an `i32`) as `fn() -> i32 {foo}`.
+    ///
+    /// For example the type of `bar` here:
+    ///
+    /// ```rust
+    /// fn foo() -> i32 { 1 }
+    /// let bar = foo; // bar: fn() -> i32 {foo}
+    /// ```
     FnDef(DefId, &'tcx Substs<'tcx>),
 
     /// A pointer to a function.  Written as `fn() -> i32`.
+    ///
+    /// For example the type of `bar` here:
+    ///
+    /// ```rust
+    /// fn foo() -> i32 { 1 }
+    /// let bar: fn() -> i32 = foo;
+    /// ```
     FnPtr(PolyFnSig<'tcx>),
 
     /// A trait, defined with `trait`.
@@ -157,8 +172,13 @@ pub enum TyKind<'tcx> {
     /// `<T as Trait<..>>::N`.
     Projection(ProjectionTy<'tcx>),
 
+    /// A placeholder type used when we do not have enough information
+    /// to normalize the projection of an associated type to an
+    /// existing concrete type. Currently only used with chalk-engine.
+    UnnormalizedProjection(ProjectionTy<'tcx>),
+
     /// Opaque (`impl Trait`) type found in a return type.
-    /// The DefId comes either from
+    /// The `DefId` comes either from
     /// * the `impl Trait` ast::Ty node,
     /// * or the `existential type` declaration
     /// The substitutions are for the generics of the function in question.
@@ -168,7 +188,7 @@ pub enum TyKind<'tcx> {
     /// A type parameter; for example, `T` in `fn f<T>(x: T) {}
     Param(ParamTy),
 
-    /// A type variable used during type-checking.
+    /// A type variable used during type checking.
     Infer(InferTy),
 
     /// A placeholder for a type which could not be computed; this is
@@ -539,10 +559,10 @@ impl<'a, 'gcx, 'tcx> Binder<ExistentialPredicate<'tcx>> {
 impl<'tcx> serialize::UseSpecializedDecodable for &'tcx List<ExistentialPredicate<'tcx>> {}
 
 impl<'tcx> List<ExistentialPredicate<'tcx>> {
-    pub fn principal(&self) -> Option<ExistentialTraitRef<'tcx>> {
-        match self.get(0) {
-            Some(&ExistentialPredicate::Trait(tr)) => Some(tr),
-            _ => None,
+    pub fn principal(&self) -> ExistentialTraitRef<'tcx> {
+        match self[0] {
+            ExistentialPredicate::Trait(tr) => tr,
+            other => bug!("first predicate is {:?}", other),
         }
     }
 
@@ -569,8 +589,8 @@ impl<'tcx> List<ExistentialPredicate<'tcx>> {
 }
 
 impl<'tcx> Binder<&'tcx List<ExistentialPredicate<'tcx>>> {
-    pub fn principal(&self) -> Option<PolyExistentialTraitRef<'tcx>> {
-        self.skip_binder().principal().map(Binder::bind)
+    pub fn principal(&self) -> PolyExistentialTraitRef<'tcx> {
+        Binder::bind(self.skip_binder().principal())
     }
 
     #[inline]
@@ -704,11 +724,11 @@ impl<'a, 'gcx, 'tcx> ExistentialTraitRef<'tcx> {
     /// Object types don't have a self-type specified. Therefore, when
     /// we convert the principal trait-ref into a normal trait-ref,
     /// you must give *some* self-type. A common choice is `mk_err()`
-    /// or some skolemized type.
+    /// or some placeholder type.
     pub fn with_self_ty(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>, self_ty: Ty<'tcx>)
         -> ty::TraitRef<'tcx>  {
         // otherwise the escaping regions would be captured by the binder
-        debug_assert!(!self_ty.has_escaping_regions());
+        // debug_assert!(!self_ty.has_escaping_regions());
 
         ty::TraitRef {
             def_id: self.def_id,
@@ -727,7 +747,7 @@ impl<'tcx> PolyExistentialTraitRef<'tcx> {
     /// Object types don't have a self-type specified. Therefore, when
     /// we convert the principal trait-ref into a normal trait-ref,
     /// you must give *some* self-type. A common choice is `mk_err()`
-    /// or some skolemized type.
+    /// or some placeholder type.
     pub fn with_self_ty(&self, tcx: TyCtxt<'_, '_, 'tcx>,
                         self_ty: Ty<'tcx>)
                         -> ty::PolyTraitRef<'tcx>  {
@@ -738,7 +758,7 @@ impl<'tcx> PolyExistentialTraitRef<'tcx> {
 /// Binder is a binder for higher-ranked lifetimes. It is part of the
 /// compiler's representation for things like `for<'a> Fn(&'a isize)`
 /// (which would be represented by the type `PolyTraitRef ==
-/// Binder<TraitRef>`). Note that when we skolemize, instantiate,
+/// Binder<TraitRef>`). Note that when we instantiate,
 /// erase, or otherwise "discharge" these bound regions, we change the
 /// type from `Binder<T>` to just `T` (see
 /// e.g. `liberate_late_bound_regions`).
@@ -864,7 +884,7 @@ impl<'a, 'tcx> ProjectionTy<'tcx> {
     /// Construct a ProjectionTy by searching the trait from trait_ref for the
     /// associated item named item_name.
     pub fn from_ref_and_name(
-        tcx: TyCtxt, trait_ref: ty::TraitRef<'tcx>, item_name: Ident
+        tcx: TyCtxt<'_, '_, '_>, trait_ref: ty::TraitRef<'tcx>, item_name: Ident
     ) -> ProjectionTy<'tcx> {
         let item_def_id = tcx.associated_items(trait_ref.def_id).find(|item| {
             item.kind == ty::AssociatedKind::Type &&
@@ -880,7 +900,7 @@ impl<'a, 'tcx> ProjectionTy<'tcx> {
     /// Extracts the underlying trait reference from this projection.
     /// For example, if this is a projection of `<T as Iterator>::Item`,
     /// then this function would return a `T: Iterator` trait reference.
-    pub fn trait_ref(&self, tcx: TyCtxt) -> ty::TraitRef<'tcx> {
+    pub fn trait_ref(&self, tcx: TyCtxt<'_, '_, '_>) -> ty::TraitRef<'tcx> {
         let def_id = tcx.associated_item(self.item_def_id).container.id();
         ty::TraitRef {
             def_id,
@@ -987,11 +1007,7 @@ impl<'a, 'gcx, 'tcx> ParamTy {
         // FIXME(#50125): Ignoring `Self` with `idx != 0` might lead to weird behavior elsewhere,
         // but this should only be possible when using `-Z continue-parse-after-error` like
         // `compile-fail/issue-36638.rs`.
-        if self.name == keywords::SelfType.name().as_str() && self.idx == 0 {
-            true
-        } else {
-            false
-        }
+        self.name == keywords::SelfType.name().as_str() && self.idx == 0
     }
 }
 
@@ -1061,10 +1077,10 @@ pub type Region<'tcx> = &'tcx RegionKind;
 ///
 /// Unlike Param-s, bound regions are not supposed to exist "in the wild"
 /// outside their binder, e.g. in types passed to type inference, and
-/// should first be substituted (by skolemized regions, free regions,
+/// should first be substituted (by placeholder regions, free regions,
 /// or region variables).
 ///
-/// ## Skolemized and Free Regions
+/// ## Placeholder and Free Regions
 ///
 /// One often wants to work with bound regions without knowing their precise
 /// identity. For example, when checking a function, the lifetime of a borrow
@@ -1072,12 +1088,11 @@ pub type Region<'tcx> = &'tcx RegionKind;
 /// it must be ensured that bounds on the region can't be accidentally
 /// assumed without being checked.
 ///
-/// The process of doing that is called "skolemization". The bound regions
-/// are replaced by skolemized markers, which don't satisfy any relation
-/// not explicitly provided.
+/// To do this, we replace the bound regions with placeholder markers,
+/// which don't satisfy any relation not explicitly provided.
 ///
-/// There are 2 kinds of skolemized regions in rustc: `ReFree` and
-/// `ReSkolemized`. When checking an item's body, `ReFree` is supposed
+/// There are 2 kinds of placeholder regions in rustc: `ReFree` and
+/// `RePlaceholder`. When checking an item's body, `ReFree` is supposed
 /// to be used. These also support explicit bounds: both the internally-stored
 /// *scope*, which the region is assumed to outlive, as well as other
 /// relations stored in the `FreeRegionMap`. Note that these relations
@@ -1086,14 +1101,14 @@ pub type Region<'tcx> = &'tcx RegionKind;
 ///
 /// When working with higher-ranked types, some region relations aren't
 /// yet known, so you can't just call `resolve_regions_and_report_errors`.
-/// `ReSkolemized` is designed for this purpose. In these contexts,
+/// `RePlaceholder` is designed for this purpose. In these contexts,
 /// there's also the risk that some inference variable laying around will
-/// get unified with your skolemized region: if you want to check whether
+/// get unified with your placeholder region: if you want to check whether
 /// `for<'a> Foo<'_>: 'a`, and you substitute your bound region `'a`
-/// with a skolemized region `'%a`, the variable `'_` would just be
-/// instantiated to the skolemized region `'%a`, which is wrong because
+/// with a placeholder region `'%a`, the variable `'_` would just be
+/// instantiated to the placeholder region `'%a`, which is wrong because
 /// the inference variable is supposed to satisfy the relation
-/// *for every value of the skolemized region*. To ensure that doesn't
+/// *for every value of the placeholder region*. To ensure that doesn't
 /// happen, you can use `leak_check`. This is more clearly explained
 /// by the [rustc guide].
 ///
@@ -1127,9 +1142,9 @@ pub enum RegionKind {
     /// A region variable.  Should not exist after typeck.
     ReVar(RegionVid),
 
-    /// A skolemized region - basically the higher-ranked version of ReFree.
+    /// A placeholder region - basically the higher-ranked version of ReFree.
     /// Should not exist after typeck.
-    ReSkolemized(ty::UniverseIndex, BoundRegion),
+    RePlaceholder(ty::Placeholder),
 
     /// Empty lifetime is for data that is never accessed.
     /// Bottom in the region lattice. We treat ReEmpty somewhat
@@ -1225,7 +1240,7 @@ impl<'a, 'tcx, 'gcx> ExistentialProjection<'tcx> {
     /// For example, if this is a projection of `exists T. <T as Iterator>::Item == X`,
     /// then this function would return a `exists T. T: Iterator` existential trait
     /// reference.
-    pub fn trait_ref(&self, tcx: TyCtxt) -> ty::ExistentialTraitRef<'tcx> {
+    pub fn trait_ref(&self, tcx: TyCtxt<'_, '_, '_>) -> ty::ExistentialTraitRef<'tcx> {
         let def_id = tcx.associated_item(self.item_def_id).container.id();
         ty::ExistentialTraitRef{
             def_id,
@@ -1324,6 +1339,23 @@ impl_stable_hash_for!(struct DebruijnIndex { private });
 
 /// Region utilities
 impl RegionKind {
+    /// Is this region named by the user?
+    pub fn has_name(&self) -> bool {
+        match *self {
+            RegionKind::ReEarlyBound(ebr) => ebr.has_name(),
+            RegionKind::ReLateBound(_, br) => br.is_named(),
+            RegionKind::ReFree(fr) => fr.bound_region.is_named(),
+            RegionKind::ReScope(..) => false,
+            RegionKind::ReStatic => true,
+            RegionKind::ReVar(..) => false,
+            RegionKind::RePlaceholder(placeholder) => placeholder.name.is_named(),
+            RegionKind::ReEmpty => false,
+            RegionKind::ReErased => false,
+            RegionKind::ReClosureBound(..) => false,
+            RegionKind::ReCanonical(..) => false,
+        }
+    }
+
     pub fn is_late_bound(&self) -> bool {
         match *self {
             ty::ReLateBound(..) => true,
@@ -1388,7 +1420,7 @@ impl RegionKind {
                 flags = flags | TypeFlags::HAS_FREE_REGIONS;
                 flags = flags | TypeFlags::HAS_RE_INFER;
             }
-            ty::ReSkolemized(..) => {
+            ty::RePlaceholder(..) => {
                 flags = flags | TypeFlags::HAS_FREE_REGIONS;
                 flags = flags | TypeFlags::HAS_RE_SKOL;
             }
@@ -1458,7 +1490,7 @@ impl RegionKind {
 
 /// Type utilities
 impl<'a, 'gcx, 'tcx> TyS<'tcx> {
-    pub fn is_nil(&self) -> bool {
+    pub fn is_unit(&self) -> bool {
         match self.sty {
             Tuple(ref tys) => tys.is_empty(),
             _ => false,
@@ -1552,7 +1584,7 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
         }
     }
 
-    pub fn simd_size(&self, _cx: TyCtxt) -> usize {
+    pub fn simd_size(&self, _cx: TyCtxt<'_, '_, '_>) -> usize {
         match self.sty {
             Adt(def, _) => def.non_enum_variant().fields.len(),
             _ => bug!("simd_size called on invalid type")
@@ -1578,6 +1610,22 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
         match self.sty {
             RawPtr(_) => return true,
             _ => return false,
+        }
+    }
+
+    /// Returns `true` if this type is an `Arc<T>`.
+    pub fn is_arc(&self) -> bool {
+        match self.sty {
+            Adt(def, _) => def.is_arc(),
+            _ => false,
+        }
+    }
+
+    /// Returns `true` if this type is an `Rc<T>`.
+    pub fn is_rc(&self) -> bool {
+        match self.sty {
+            Adt(def, _) => def.is_rc(),
+            _ => false,
         }
     }
 
@@ -1777,9 +1825,7 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
             }
             Dynamic(ref obj, region) => {
                 let mut v = vec![region];
-                if let Some(p) = obj.principal() {
-                    v.extend(p.skip_binder().substs.regions());
-                }
+                v.extend(obj.principal().skip_binder().substs.regions());
                 v
             }
             Adt(_, substs) | Opaque(_, substs) => {
@@ -1789,7 +1835,7 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
             Generator(_, GeneratorSubsts { ref substs }, _) => {
                 substs.regions().collect()
             }
-            Projection(ref data) => {
+            Projection(ref data) | UnnormalizedProjection(ref data) => {
                 data.substs.regions().collect()
             }
             FnDef(..) |
@@ -1868,6 +1914,8 @@ impl<'a, 'gcx, 'tcx> TyS<'tcx> {
                 def.sized_constraint(tcx).is_empty(),
 
             ty::Projection(_) | ty::Param(_) | ty::Opaque(..) => false,
+
+            ty::UnnormalizedProjection(..) => bug!("only used with chalk-engine"),
 
             ty::Infer(ty::TyVar(_)) => false,
 
@@ -2004,18 +2052,14 @@ impl<'tcx> Const<'tcx> {
         tcx: TyCtxt<'_, '_, '_>,
         ty: ParamEnvAnd<'tcx, Ty<'tcx>>,
     ) -> u128 {
-        match self.assert_bits(tcx, ty) {
-            Some(val) => val,
-            None => bug!("expected bits of {}, got {:#?}", ty.value, self),
-        }
+        self.assert_bits(tcx, ty).unwrap_or_else(||
+            bug!("expected bits of {}, got {:#?}", ty.value, self))
     }
 
     #[inline]
     pub fn unwrap_usize(&self, tcx: TyCtxt<'_, '_, '_>) -> u64 {
-        match self.assert_usize(tcx) {
-            Some(val) => val,
-            None => bug!("expected constant usize, got {:#?}", self),
-        }
+        self.assert_usize(tcx).unwrap_or_else(||
+            bug!("expected constant usize, got {:#?}", self))
     }
 }
 

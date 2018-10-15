@@ -108,13 +108,13 @@ impl<'a, 'tcx> Visitor<'tcx> for UnsafetyChecker<'a, 'tcx> {
         self.source_info = statement.source_info;
         match statement.kind {
             StatementKind::Assign(..) |
-            StatementKind::ReadForMatch(..) |
+            StatementKind::FakeRead(..) |
             StatementKind::SetDiscriminant { .. } |
             StatementKind::StorageLive(..) |
             StatementKind::StorageDead(..) |
             StatementKind::EndRegion(..) |
             StatementKind::Validate(..) |
-            StatementKind::UserAssertTy(..) |
+            StatementKind::AscribeUserType(..) |
             StatementKind::Nop => {
                 // safe (at least as emitted during MIR construction)
             }

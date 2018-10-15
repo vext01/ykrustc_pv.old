@@ -8,16 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// FIXME: Rename 'DIGlobalVariable' to 'DIGlobalVariableExpression'
-// once support for LLVM 3.9 is dropped.
-//
-// This method was changed in this LLVM patch:
-// https://reviews.llvm.org/D26769
-
 use super::debuginfo::{
     DIBuilder, DIDescriptor, DIFile, DILexicalBlock, DISubprogram, DIType,
     DIBasicType, DIDerivedType, DICompositeType, DIScope, DIVariable,
-    DIGlobalVariable, DIArray, DISubrange, DITemplateTypeParameter, DIEnumerator,
+    DIGlobalVariableExpression, DIArray, DISubrange, DITemplateTypeParameter, DIEnumerator,
     DINameSpace, DIFlags,
 };
 
@@ -128,6 +122,7 @@ pub enum Attribute {
     SanitizeThread  = 20,
     SanitizeAddress = 21,
     SanitizeMemory  = 22,
+    NonLazyBind     = 23,
 }
 
 /// LLVMIntPredicate
@@ -447,7 +442,7 @@ pub mod debuginfo {
     pub type DIDerivedType = DIType;
     pub type DICompositeType = DIDerivedType;
     pub type DIVariable = DIDescriptor;
-    pub type DIGlobalVariable = DIDescriptor;
+    pub type DIGlobalVariableExpression = DIDescriptor;
     pub type DIArray = DIDescriptor;
     pub type DISubrange = DIDescriptor;
     pub type DIEnumerator = DIDescriptor;
@@ -1216,6 +1211,9 @@ extern "C" {
                              AlignStack: Bool,
                              Dialect: AsmDialect)
                              -> &Value;
+    pub fn LLVMRustInlineAsmVerify(Ty: &Type,
+                             Constraints: *const c_char)
+                             -> Bool;
 
     pub fn LLVMRustDebugMetadataVersion() -> u32;
     pub fn LLVMRustVersionMajor() -> u32;
@@ -1332,7 +1330,7 @@ extern "C" {
                                                  Val: &'a Value,
                                                  Decl: Option<&'a DIDescriptor>,
                                                  AlignInBits: u32)
-                                                 -> &'a DIGlobalVariable;
+                                                 -> &'a DIGlobalVariableExpression;
 
     pub fn LLVMRustDIBuilderCreateVariable(Builder: &DIBuilder<'a>,
                                            Tag: c_uint,
@@ -1475,7 +1473,8 @@ extern "C" {
                                        DataSections: bool,
                                        TrapUnreachable: bool,
                                        Singlethread: bool,
-                                       AsmComments: bool)
+                                       AsmComments: bool,
+                                       EmitStackSizeSection: bool)
                                        -> Option<&'static mut TargetMachine>;
     pub fn LLVMRustDisposeTargetMachine(T: &'static mut TargetMachine);
     pub fn LLVMRustAddAnalysisPasses(T: &'a TargetMachine, PM: &PassManager<'a>, M: &'a Module);

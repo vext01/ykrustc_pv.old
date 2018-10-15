@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(plugin_as_library)]
+#![allow(dead_code)]
 // aux-build:macro_crate_test.rs
 // ignore-stage1
 
@@ -17,8 +19,8 @@
 #[macro_use] #[no_link]
 extern crate macro_crate_test;
 
-#[derive(PartialEq, Clone, Debug)]
 #[rustc_into_multi_foo]
+#[derive(PartialEq, Clone, Debug)]
 fn foo() -> AnotherFakeTypeThatHadBetterGoAway {}
 
 // Check that the `#[into_multi_foo]`-generated `foo2` is configured away

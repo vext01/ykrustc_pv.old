@@ -75,7 +75,7 @@ impl<'a, 'tcx> CheckVisitor<'a, 'tcx> {
         let msg = if let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(span) {
             format!("unused import: `{}`", snippet)
         } else {
-            "unused import".to_string()
+            "unused import".to_owned()
         };
         self.tcx.lint_node(lint::builtin::UNUSED_IMPORTS, id, span, &msg);
     }
@@ -130,19 +130,23 @@ fn unused_crates_lint<'tcx>(tcx: TyCtxt<'_, 'tcx, 'tcx>) {
     });
 
     for extern_crate in &crates_to_lint {
-        assert!(extern_crate.def_id.is_local());
+        let id = tcx.hir.as_local_node_id(extern_crate.def_id).unwrap();
+        let item = tcx.hir.expect_item(id);
 
         // If the crate is fully unused, we suggest removing it altogether.
         // We do this in any edition.
         if extern_crate.warn_if_unused {
             if let Some(&span) = unused_extern_crates.get(&extern_crate.def_id) {
-                assert_eq!(extern_crate.def_id.krate, LOCAL_CRATE);
-                let hir_id = tcx.hir.definitions().def_index_to_hir_id(extern_crate.def_id.index);
-                let id = tcx.hir.hir_to_node_id(hir_id);
                 let msg = "unused extern crate";
+
+                // Removal suggestion span needs to include attributes (Issue #54400)
+                let span_with_attrs = tcx.get_attrs(extern_crate.def_id).iter()
+                    .map(|attr| attr.span)
+                    .fold(span, |acc, attr_span| acc.to(attr_span));
+
                 tcx.struct_span_lint_node(lint, id, span, msg)
                     .span_suggestion_short_with_applicability(
-                        span,
+                        span_with_attrs,
                         "remove it",
                         String::new(),
                         Applicability::MachineApplicable)
@@ -157,6 +161,13 @@ fn unused_crates_lint<'tcx>(tcx: TyCtxt<'_, 'tcx, 'tcx>) {
             continue;
         }
 
+        // If the extern crate isn't in the extern prelude,
+        // there is no way it can be written as an `use`.
+        let orig_name = extern_crate.orig_name.unwrap_or(item.name);
+        if !tcx.sess.extern_prelude.contains(&orig_name) {
+            continue;
+        }
+
         // If the extern crate has any attributes, they may have funky
         // semantics we can't faithfully represent using `use` (most
         // notably `#[macro_use]`). Ignore it.
@@ -165,9 +176,6 @@ fn unused_crates_lint<'tcx>(tcx: TyCtxt<'_, 'tcx, 'tcx>) {
         }
 
         // Otherwise, we can convert it into a `use` of some kind.
-        let hir_id = tcx.hir.definitions().def_index_to_hir_id(extern_crate.def_id.index);
-        let id = tcx.hir.hir_to_node_id(hir_id);
-        let item = tcx.hir.expect_item(id);
         let msg = "`extern crate` is not idiomatic in the new edition";
         let help = format!(
             "convert it to a `{}`",

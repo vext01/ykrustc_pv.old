@@ -163,7 +163,7 @@ fn calculate_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 let src = tcx.used_crate_source(cnum);
                 if src.rlib.is_some() { continue }
                 sess.err(&format!("crate `{}` required to be available in rlib format, \
-                                  but was not found in this form",
+                                   but was not found in this form",
                                   tcx.crate_name(cnum)));
             }
             return Vec::new();
@@ -247,16 +247,16 @@ fn calculate_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                     _ => "dylib",
                 };
                 sess.err(&format!("crate `{}` required to be available in {} format, \
-                                  but was not found in this form",
+                                   but was not found in this form",
                                   tcx.crate_name(cnum), kind));
             }
         }
     }
 
-    return ret;
+    ret
 }
 
-fn add_library(tcx: TyCtxt,
+fn add_library(tcx: TyCtxt<'_, '_, '_>,
                cnum: CrateNum,
                link: LinkagePreference,
                m: &mut FxHashMap<CrateNum, LinkagePreference>) {

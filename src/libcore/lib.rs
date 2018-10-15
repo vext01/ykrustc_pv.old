@@ -87,12 +87,12 @@
 #![feature(doc_spotlight)]
 #![feature(extern_types)]
 #![feature(fundamental)]
+#![feature(impl_header_lifetime_elision)]
 #![feature(intrinsics)]
 #![feature(lang_items)]
 #![feature(link_llvm_intrinsics)]
 #![feature(never_type)]
-#![cfg_attr(not(stage0), feature(nll))]
-#![cfg_attr(not(stage0), feature(infer_outlives_requirements))]
+#![feature(nll)]
 #![feature(exhaustive_patterns)]
 #![feature(macro_at_most_once_rep)]
 #![feature(no_core)]
@@ -117,6 +117,7 @@
 #![feature(powerpc_target_feature)]
 #![feature(mips_target_feature)]
 #![feature(aarch64_target_feature)]
+#![feature(wasm_target_feature)]
 #![feature(const_slice_len)]
 #![feature(const_str_as_bytes)]
 #![feature(const_str_len)]
@@ -203,6 +204,7 @@ pub mod iter;
 pub mod option;
 pub mod raw;
 pub mod result;
+pub mod ffi;
 
 pub mod slice;
 pub mod str;

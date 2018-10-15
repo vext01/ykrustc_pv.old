@@ -10,11 +10,9 @@
 
 use abi::{FnType, FnTypeExt};
 use common::*;
-use llvm;
 use rustc::hir;
 use rustc::ty::{self, Ty, TypeFoldable};
 use rustc::ty::layout::{self, Align, LayoutOf, Size, TyLayout};
-use rustc_target::spec::PanicStrategy;
 use rustc_target::abi::FloatTy;
 use rustc_mir::monomorphize::item::DefPathBasedNames;
 use type_::Type;
@@ -67,13 +65,12 @@ fn uncached_llvm_type<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
             let mut name = String::with_capacity(32);
             let printer = DefPathBasedNames::new(cx.tcx, true, true);
             printer.push_type_name(layout.ty, &mut name);
-            match (&layout.ty.sty, &layout.variants) {
-                (&ty::Adt(def, _), &layout::Variants::Single { index }) => {
-                    if def.is_enum() && !def.variants.is_empty() {
-                        write!(&mut name, "::{}", def.variants[index].name).unwrap();
-                    }
+            if let (&ty::Adt(def, _), &layout::Variants::Single { index })
+                 = (&layout.ty.sty, &layout.variants)
+            {
+                if def.is_enum() && !def.variants.is_empty() {
+                    write!(&mut name, "::{}", def.variants[index].name).unwrap();
                 }
-                _ => {}
             }
             Some(name)
         }
@@ -134,7 +131,7 @@ fn struct_llfields<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
 
         debug!("struct_llfields: {}: {:?} offset: {:?} target_offset: {:?} \
                 effective_field_align: {}",
-            i, field, offset, target_offset, effective_field_align.abi());
+               i, field, offset, target_offset, effective_field_align.abi());
         assert!(target_offset >= offset);
         let padding = target_offset - offset;
         let padding_align = prev_effective_align.min(effective_field_align);
@@ -157,7 +154,7 @@ fn struct_llfields<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
         debug!("struct_llfields: pad_bytes: {:?} offset: {:?} stride: {:?}",
                padding, offset, layout.size);
         result.push(Type::padding_filler(cx, padding, padding_align));
-        assert!(result.len() == 1 + field_count * 2);
+        assert_eq!(result.len(), 1 + field_count * 2);
     } else {
         debug!("struct_llfields: offset: {:?} stride: {:?}",
                offset, layout.size);
@@ -433,12 +430,19 @@ impl<'tcx> LayoutLlvmExt<'tcx> for TyLayout<'tcx> {
                         PointerKind::Shared
                     },
                     hir::MutMutable => {
-                        // Only emit noalias annotations for LLVM >= 6 or in panic=abort
-                        // mode, as prior versions had many bugs in conjunction with
-                        // unwinding. See also issue #31681.
+                        // Previously we would only emit noalias annotations for LLVM >= 6 or in
+                        // panic=abort mode. That was deemed right, as prior versions had many bugs
+                        // in conjunction with unwinding, but later versions didn’t seem to have
+                        // said issues. See issue #31681.
+                        //
+                        // Alas, later on we encountered a case where noalias would generate wrong
+                        // code altogether even with recent versions of LLVM in *safe* code with no
+                        // unwinding involved. See #54462.
+                        //
+                        // For now, do not enable mutable_noalias by default at all, while the
+                        // issue is being figured out.
                         let mutable_noalias = cx.tcx.sess.opts.debugging_opts.mutable_noalias
-                            .unwrap_or(unsafe { llvm::LLVMRustVersionMajor() >= 6 }
-                                || cx.tcx.sess.panic_strategy() == PanicStrategy::Abort);
+                            .unwrap_or(false);
                         if mutable_noalias {
                             PointerKind::UniqueBorrowed
                         } else {

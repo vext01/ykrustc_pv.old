@@ -34,7 +34,9 @@ use sys_common::{AsInner, IntoInner, FromInner};
 ///
 /// `OsString` and [`OsStr`] bridge this gap by simultaneously representing Rust
 /// and platform-native string values, and in particular allowing a Rust string
-/// to be converted into an "OS" string with no cost if possible.
+/// to be converted into an "OS" string with no cost if possible.  A consequence
+/// of this is that `OsString` instances are *not* `NUL` terminated; in order
+/// to pass to e.g. Unix system call, you should create a [`CStr`].
 ///
 /// `OsString` is to [`&OsStr`] as [`String`] is to [`&str`]: the former
 /// in each pair are owned strings; the latter are borrowed
@@ -65,6 +67,7 @@ use sys_common::{AsInner, IntoInner, FromInner};
 ///
 /// [`OsStr`]: struct.OsStr.html
 /// [`&OsStr`]: struct.OsStr.html
+/// [`CStr`]: struct.CStr.html
 /// [`From`]: ../convert/trait.From.html
 /// [`String`]: ../string/struct.String.html
 /// [`&str`]: ../primitive.str.html
@@ -420,14 +423,14 @@ impl PartialEq<OsString> for str {
     }
 }
 
-#[stable(feature = "os_str_str_ref_eq", since = "1.28.0")]
+#[stable(feature = "os_str_str_ref_eq", since = "1.29.0")]
 impl<'a> PartialEq<&'a str> for OsString {
     fn eq(&self, other: &&'a str) -> bool {
         **self == **other
     }
 }
 
-#[stable(feature = "os_str_str_ref_eq", since = "1.28.0")]
+#[stable(feature = "os_str_str_ref_eq", since = "1.29.0")]
 impl<'a> PartialEq<OsString> for &'a str {
     fn eq(&self, other: &OsString) -> bool {
         **other == **self

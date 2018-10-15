@@ -16,13 +16,13 @@ use any::Any;
 use cell::UnsafeCell;
 use fmt;
 use future::Future;
-use pin::PinMut;
+use pin::Pin;
 use ops::{Deref, DerefMut};
 use panicking;
 use ptr::{Unique, NonNull};
 use rc::Rc;
 use sync::{Arc, Mutex, RwLock, atomic};
-use task::{self, Poll};
+use task::{LocalWaker, Poll};
 use thread::Result;
 
 #[stable(feature = "panic_hooks", since = "1.10.0")]
@@ -79,7 +79,7 @@ pub use core::panic::{PanicInfo, Location};
 ///
 /// Simply put, a type `T` implements `UnwindSafe` if it cannot easily allow
 /// witnessing a broken invariant through the use of `catch_unwind` (catching a
-/// panic). This trait is a marker trait, so it is automatically implemented for
+/// panic). This trait is an auto trait, so it is automatically implemented for
 /// many types, and it is also structurally composed (e.g. a struct is unwind
 /// safe if all of its components are unwind safe).
 ///
@@ -327,9 +327,9 @@ impl<T: fmt::Debug> fmt::Debug for AssertUnwindSafe<T> {
 impl<'a, F: Future> Future for AssertUnwindSafe<F> {
     type Output = F::Output;
 
-    fn poll(self: PinMut<Self>, cx: &mut task::Context) -> Poll<Self::Output> {
-        let pinned_field = unsafe { PinMut::map_unchecked(self, |x| &mut x.0) };
-        pinned_field.poll(cx)
+    fn poll(self: Pin<&mut Self>, lw: &LocalWaker) -> Poll<Self::Output> {
+        let pinned_field = unsafe { Pin::map_unchecked_mut(self, |x| &mut x.0) };
+        F::poll(pinned_field, lw)
     }
 }
 

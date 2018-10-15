@@ -21,12 +21,11 @@
 #![feature(const_fn)]
 #![feature(crate_visibility_modifier)]
 #![feature(custom_attribute)]
-#![cfg_attr(not(stage0), feature(nll))]
-#![cfg_attr(not(stage0), feature(infer_outlives_requirements))]
+#![feature(nll)]
 #![feature(non_exhaustive)]
 #![feature(optin_builtin_traits)]
 #![feature(specialization)]
-#![feature(stdsimd)]
+#![cfg_attr(not(stage0), feature(stdsimd))]
 
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -88,7 +87,7 @@ scoped_thread_local!(pub static GLOBALS: Globals);
 #[derive(Debug, Eq, PartialEq, Clone, Ord, PartialOrd, Hash, RustcDecodable, RustcEncodable)]
 pub enum FileName {
     Real(PathBuf),
-    /// e.g. "std" macros
+    /// A macro.  This includes the full name of the macro, so that there are no clashes.
     Macros(String),
     /// call to `quote!`
     QuoteExpansion,

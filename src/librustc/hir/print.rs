@@ -48,13 +48,13 @@ pub enum Nested {
 }
 
 pub trait PpAnn {
-    fn nested(&self, _state: &mut State, _nested: Nested) -> io::Result<()> {
+    fn nested(&self, _state: &mut State<'_>, _nested: Nested) -> io::Result<()> {
         Ok(())
     }
-    fn pre(&self, _state: &mut State, _node: AnnNode) -> io::Result<()> {
+    fn pre(&self, _state: &mut State<'_>, _node: AnnNode<'_>) -> io::Result<()> {
         Ok(())
     }
-    fn post(&self, _state: &mut State, _node: AnnNode) -> io::Result<()> {
+    fn post(&self, _state: &mut State<'_>, _node: AnnNode<'_>) -> io::Result<()> {
         Ok(())
     }
     fn try_fetch_item(&self, _: ast::NodeId) -> Option<&hir::Item> {
@@ -70,7 +70,7 @@ impl PpAnn for hir::Crate {
     fn try_fetch_item(&self, item: ast::NodeId) -> Option<&hir::Item> {
         Some(self.item(item))
     }
-    fn nested(&self, state: &mut State, nested: Nested) -> io::Result<()> {
+    fn nested(&self, state: &mut State<'_>, nested: Nested) -> io::Result<()> {
         match nested {
             Nested::Item(id) => state.print_item(self.item(id.id)),
             Nested::TraitItem(id) => state.print_trait_item(self.trait_item(id)),
@@ -190,7 +190,7 @@ impl<'a> State<'a> {
 }
 
 pub fn to_string<F>(ann: &dyn PpAnn, f: F) -> String
-    where F: FnOnce(&mut State) -> io::Result<()>
+    where F: FnOnce(&mut State<'_>) -> io::Result<()>
 {
     let mut wr = Vec::new();
     {
@@ -251,6 +251,7 @@ impl<'a> State<'a> {
     pub fn bclose_(&mut self, span: syntax_pos::Span, indented: usize) -> io::Result<()> {
         self.bclose_maybe_open(span, indented, true)
     }
+
     pub fn bclose_maybe_open(&mut self,
                              span: syntax_pos::Span,
                              indented: usize,
@@ -264,6 +265,7 @@ impl<'a> State<'a> {
         }
         Ok(())
     }
+
     pub fn bclose(&mut self, span: syntax_pos::Span) -> io::Result<()> {
         self.bclose_(span, indent_unit)
     }
@@ -274,12 +276,14 @@ impl<'a> State<'a> {
             None => false,
         }
     }
+
     pub fn space_if_not_bol(&mut self) -> io::Result<()> {
         if !self.is_bol() {
             self.s.space()?;
         }
         Ok(())
     }
+
     pub fn break_offset_if_not_bol(&mut self, n: usize, off: isize) -> io::Result<()> {
         if !self.is_bol() {
             self.s.break_offset(n, off)
@@ -304,14 +308,13 @@ impl<'a> State<'a> {
         self.s.word("*/")
     }
 
-
     pub fn commasep_cmnt<T, F, G>(&mut self,
                                   b: Breaks,
                                   elts: &[T],
                                   mut op: F,
                                   mut get_span: G)
                                   -> io::Result<()>
-        where F: FnMut(&mut State, &T) -> io::Result<()>,
+        where F: FnMut(&mut State<'_>, &T) -> io::Result<()>,
               G: FnMut(&T) -> syntax_pos::Span
     {
         self.rbox(0, b)?;
@@ -398,6 +401,7 @@ impl<'a> State<'a> {
                 self.print_ty_fn(f.abi, f.unsafety, &f.decl, None, &f.generic_params,
                                  &f.arg_names[..])?;
             }
+            hir::TyKind::Def(..) => {},
             hir::TyKind::Path(ref qpath) => {
                 self.print_qpath(qpath, false)?
             }
@@ -689,20 +693,14 @@ impl<'a> State<'a> {
                     self.s.space()?;
                 }
 
-                match polarity {
-                    hir::ImplPolarity::Negative => {
-                        self.s.word("!")?;
-                    }
-                    _ => {}
+                if let hir::ImplPolarity::Negative = polarity {
+                    self.s.word("!")?;
                 }
 
-                match opt_trait {
-                    &Some(ref t) => {
-                        self.print_trait_ref(t)?;
-                        self.s.space()?;
-                        self.word_space("for")?;
-                    }
-                    &None => {}
+                if let Some(ref t) = opt_trait {
+                    self.print_trait_ref(t)?;
+                    self.s.space()?;
+                    self.word_space("for")?;
                 }
 
                 self.print_type(&ty)?;
@@ -1061,13 +1059,10 @@ impl<'a> State<'a> {
         for st in &blk.stmts {
             self.print_stmt(st)?;
         }
-        match blk.expr {
-            Some(ref expr) => {
-                self.space_if_not_bol()?;
-                self.print_expr(&expr)?;
-                self.maybe_print_trailing_comment(expr.span, Some(blk.span.hi()))?;
-            }
-            _ => (),
+        if let Some(ref expr) = blk.expr {
+            self.space_if_not_bol()?;
+            self.print_expr(&expr)?;
+            self.maybe_print_trailing_comment(expr.span, Some(blk.span.hi()))?;
         }
         self.bclose_maybe_open(blk.span, indented, close_box)?;
         self.ann.post(self, AnnNode::Block(blk))
@@ -1479,12 +1474,9 @@ impl<'a> State<'a> {
             }
             hir::ExprKind::Ret(ref result) => {
                 self.s.word("return")?;
-                match *result {
-                    Some(ref expr) => {
-                        self.s.word(" ")?;
-                        self.print_expr_maybe_paren(&expr, parser::PREC_JUMP)?;
-                    }
-                    _ => (),
+                if let Some(ref expr) = *result {
+                    self.s.word(" ")?;
+                    self.print_expr_maybe_paren(&expr, parser::PREC_JUMP)?;
                 }
             }
             hir::ExprKind::InlineAsm(ref a, ref outputs, ref inputs) => {

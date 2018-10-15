@@ -186,6 +186,7 @@ pub enum EvalErrorKind<'tcx, O> {
 
     FunctionAbiMismatch(Abi, Abi),
     FunctionArgMismatch(Ty<'tcx>, Ty<'tcx>),
+    FunctionRetMismatch(Ty<'tcx>, Ty<'tcx>),
     FunctionArgCountMismatch,
     NoMirFor(String),
     UnterminatedCString(Pointer),
@@ -294,7 +295,8 @@ impl<'tcx, O> EvalErrorKind<'tcx, O> {
         use self::EvalErrorKind::*;
         match *self {
             MachineError(ref inner) => inner,
-            FunctionAbiMismatch(..) | FunctionArgMismatch(..) | FunctionArgCountMismatch =>
+            FunctionAbiMismatch(..) | FunctionArgMismatch(..) | FunctionRetMismatch(..)
+            | FunctionArgCountMismatch =>
                 "tried to call a function through a function pointer of incompatible type",
             InvalidMemoryAccess =>
                 "tried to access memory through an invalid pointer",
@@ -429,13 +431,13 @@ impl<'tcx, O> EvalErrorKind<'tcx, O> {
 }
 
 impl<'tcx> fmt::Display for EvalError<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.kind)
     }
 }
 
 impl<'tcx, O: fmt::Debug> fmt::Debug for EvalErrorKind<'tcx, O> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use self::EvalErrorKind::*;
         match *self {
             PointerOutOfBounds { ptr, access, allocation_size } => {
@@ -469,6 +471,10 @@ impl<'tcx, O: fmt::Debug> fmt::Debug for EvalErrorKind<'tcx, O> {
             FunctionArgMismatch(caller_ty, callee_ty) =>
                 write!(f, "tried to call a function with argument of type {:?} \
                            passing data of type {:?}",
+                    callee_ty, caller_ty),
+            FunctionRetMismatch(caller_ty, callee_ty) =>
+                write!(f, "tried to call a function with return type {:?} \
+                           passing return place of type {:?}",
                     callee_ty, caller_ty),
             FunctionArgCountMismatch =>
                 write!(f, "tried to call a function with incorrect number of arguments"),

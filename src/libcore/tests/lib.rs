@@ -19,6 +19,7 @@
 #![feature(flt2dec)]
 #![feature(fmt_internals)]
 #![feature(hashmap_internals)]
+#![feature(impl_header_lifetime_elision)]
 #![feature(pattern)]
 #![feature(range_is_empty)]
 #![feature(raw)]
@@ -33,13 +34,13 @@
 #![feature(trusted_len)]
 #![feature(try_from)]
 #![feature(try_trait)]
-#![feature(exact_chunks)]
-#![feature(slice_align_to)]
+#![feature(chunks_exact)]
 #![feature(align_offset)]
 #![feature(reverse_bits)]
 #![feature(inner_deref)]
 #![feature(slice_internals)]
-#![feature(option_replace)]
+#![feature(slice_partition_dedup)]
+#![feature(copy_within)]
 
 extern crate core;
 extern crate test;

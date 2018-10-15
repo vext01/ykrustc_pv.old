@@ -17,10 +17,10 @@ use rustc_target::spec::abi::Abi;
 
 use rustc::mir::interpret::{EvalResult, PointerArithmetic, EvalErrorKind, Scalar};
 use super::{
-    EvalContext, Machine, Value, OpTy, Place, PlaceTy, Operand, StackPopCleanup
+    EvalContext, Machine, Value, OpTy, PlaceTy, MPlaceTy, Operand, StackPopCleanup
 };
 
-impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
+impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
     #[inline]
     pub fn goto_block(&mut self, target: Option<mir::BasicBlock>) -> EvalResult<'tcx> {
         if let Some(target) = target {
@@ -39,7 +39,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
         use rustc::mir::TerminatorKind::*;
         match terminator.kind {
             Return => {
-                self.dump_place(self.frame().return_place);
+                self.frame().return_place.map(|r| self.dump_place(*r));
                 self.pop_stack_frame()?
             }
 
@@ -205,8 +205,8 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
     fn pass_argument(
         &mut self,
         skip_zst: bool,
-        caller_arg: &mut impl Iterator<Item=OpTy<'tcx>>,
-        callee_arg: PlaceTy<'tcx>,
+        caller_arg: &mut impl Iterator<Item=OpTy<'tcx, M::PointerTag>>,
+        callee_arg: PlaceTy<'tcx, M::PointerTag>,
     ) -> EvalResult<'tcx> {
         if skip_zst && callee_arg.layout.is_zst() {
             // Nothing to do.
@@ -222,7 +222,8 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
         if !Self::check_argument_compat(caller_arg.layout, callee_arg.layout) {
             return err!(FunctionArgMismatch(caller_arg.layout.ty, callee_arg.layout.ty));
         }
-        self.copy_op(caller_arg, callee_arg)
+        // We allow some transmutes here
+        self.copy_op_transmute(caller_arg, callee_arg)
     }
 
     /// Call this function -- pushing the stack frame and initializing the arguments.
@@ -231,8 +232,8 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
         instance: ty::Instance<'tcx>,
         span: Span,
         caller_abi: Abi,
-        args: &[OpTy<'tcx>],
-        dest: Option<PlaceTy<'tcx>>,
+        args: &[OpTy<'tcx, M::PointerTag>],
+        dest: Option<PlaceTy<'tcx, M::PointerTag>>,
         ret: Option<mir::BasicBlock>,
     ) -> EvalResult<'tcx> {
         trace!("eval_fn_call: {:#?}", instance);
@@ -285,15 +286,11 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
                     None => return Ok(()),
                 };
 
-                let return_place = match dest {
-                    Some(place) => *place,
-                    None => Place::null(&self),
-                };
                 self.push_stack_frame(
                     instance,
                     span,
                     mir,
-                    return_place,
+                    dest,
                     StackPopCleanup::Goto(ret),
                 )?;
 
@@ -330,7 +327,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
                     // last incoming argument.  These two iterators do not have the same type,
                     // so to keep the code paths uniform we accept an allocation
                     // (for RustCall ABI only).
-                    let caller_args : Cow<[OpTy<'tcx>]> =
+                    let caller_args : Cow<[OpTy<'tcx, M::PointerTag>]> =
                         if caller_abi == Abi::RustCall && !args.is_empty() {
                             // Untuple
                             let (&untuple_arg, args) = args.split_last().unwrap();
@@ -339,7 +336,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
                                 .chain((0..untuple_arg.layout.fields.count()).into_iter()
                                     .map(|i| self.operand_field(untuple_arg, i as u64))
                                 )
-                                .collect::<EvalResult<Vec<OpTy<'tcx>>>>()?)
+                                .collect::<EvalResult<Vec<OpTy<'tcx, M::PointerTag>>>>()?)
                         } else {
                             // Plain arg passing
                             Cow::from(args)
@@ -372,6 +369,23 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
                     if caller_iter.next().is_some() {
                         trace!("Caller has too many args over");
                         return err!(FunctionArgCountMismatch);
+                    }
+                    // Don't forget to check the return type!
+                    if let Some(caller_ret) = dest {
+                        let callee_ret = self.eval_place(&mir::Place::Local(mir::RETURN_PLACE))?;
+                        if !Self::check_argument_compat(caller_ret.layout, callee_ret.layout) {
+                            return err!(FunctionRetMismatch(
+                                caller_ret.layout.ty, callee_ret.layout.ty
+                            ));
+                        }
+                    } else {
+                        let callee_layout =
+                            self.layout_of_local(self.cur_frame(), mir::RETURN_PLACE)?;
+                        if !callee_layout.abi.is_uninhabited() {
+                            return err!(FunctionRetMismatch(
+                                self.tcx.types.never, callee_layout.ty
+                            ));
+                        }
                     }
                     Ok(())
                 })();
@@ -412,7 +426,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
 
     fn drop_in_place(
         &mut self,
-        place: PlaceTy<'tcx>,
+        place: PlaceTy<'tcx, M::PointerTag>,
         instance: ty::Instance<'tcx>,
         span: Span,
         target: mir::BasicBlock,
@@ -436,15 +450,15 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
             layout: self.layout_of(self.tcx.mk_mut_ptr(place.layout.ty))?,
         };
 
-        let ty = self.tcx.mk_nil(); // return type is ()
-        let dest = PlaceTy::null(&self, self.layout_of(ty)?);
+        let ty = self.tcx.mk_unit(); // return type is ()
+        let dest = MPlaceTy::dangling(self.layout_of(ty)?, &self);
 
         self.eval_fn_call(
             instance,
             span,
             Abi::Rust,
             &[arg],
-            Some(dest),
+            Some(dest.into()),
             Some(target),
         )
     }

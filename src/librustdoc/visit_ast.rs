@@ -15,6 +15,7 @@ use std::mem;
 
 use syntax::ast;
 use syntax::attr;
+use syntax::ext::base::MacroKind;
 use syntax::source_map::Spanned;
 use syntax_pos::{self, Span};
 
@@ -168,24 +169,75 @@ impl<'a, 'tcx, 'rcx, 'cstore> RustdocVisitor<'a, 'tcx, 'rcx, 'cstore> {
         }
     }
 
-    pub fn visit_fn(&mut self, item: &hir::Item,
+    pub fn visit_fn(&mut self, om: &mut Module, item: &hir::Item,
                     name: ast::Name, fd: &hir::FnDecl,
                     header: hir::FnHeader,
                     gen: &hir::Generics,
-                    body: hir::BodyId) -> Function {
+                    body: hir::BodyId) {
         debug!("Visiting fn");
-        Function {
-            id: item.id,
-            vis: item.vis.clone(),
-            stab: self.stability(item.id),
-            depr: self.deprecation(item.id),
-            attrs: item.attrs.clone(),
-            decl: fd.clone(),
-            name,
-            whence: item.span,
-            generics: gen.clone(),
-            header,
-            body,
+        let macro_kind = item.attrs.iter().filter_map(|a| {
+            if a.check_name("proc_macro") {
+                Some(MacroKind::Bang)
+            } else if a.check_name("proc_macro_derive") {
+                Some(MacroKind::Derive)
+            } else if a.check_name("proc_macro_attribute") {
+                Some(MacroKind::Attr)
+            } else {
+                None
+            }
+        }).next();
+        match macro_kind {
+            Some(kind) => {
+                let name = if kind == MacroKind::Derive {
+                    item.attrs.lists("proc_macro_derive")
+                              .filter_map(|mi| mi.name())
+                              .next()
+                              .expect("proc-macro derives require a name")
+                } else {
+                    name
+                };
+
+                let mut helpers = Vec::new();
+                for mi in item.attrs.lists("proc_macro_derive") {
+                    if !mi.check_name("attributes") {
+                        continue;
+                    }
+
+                    if let Some(list) = mi.meta_item_list() {
+                        for inner_mi in list {
+                            if let Some(name) = inner_mi.name() {
+                                helpers.push(name);
+                            }
+                        }
+                    }
+                }
+
+                om.proc_macros.push(ProcMacro {
+                    name,
+                    id: item.id,
+                    kind,
+                    helpers,
+                    attrs: item.attrs.clone(),
+                    whence: item.span,
+                    stab: self.stability(item.id),
+                    depr: self.deprecation(item.id),
+                });
+            }
+            None => {
+                om.fns.push(Function {
+                    id: item.id,
+                    vis: item.vis.clone(),
+                    stab: self.stability(item.id),
+                    depr: self.deprecation(item.id),
+                    attrs: item.attrs.clone(),
+                    decl: fd.clone(),
+                    name,
+                    whence: item.span,
+                    generics: gen.clone(),
+                    header,
+                    body,
+                });
+            }
         }
     }
 
@@ -269,7 +321,10 @@ impl<'a, 'tcx, 'rcx, 'cstore> RustdocVisitor<'a, 'tcx, 'rcx, 'cstore> {
                 Def::Enum(did) |
                 Def::ForeignTy(did) |
                 Def::TyAlias(did) if !self_is_hidden => {
-                    self.cx.access_levels.borrow_mut().map.insert(did, AccessLevel::Public);
+                    self.cx.renderinfo
+                        .borrow_mut()
+                        .access_levels.map
+                        .insert(did, AccessLevel::Public);
                 },
                 Def::Mod(did) => if !self_is_hidden {
                     ::visit_lib::LibEmbargoVisitor::new(self.cx).visit_mod(did);
@@ -284,7 +339,7 @@ impl<'a, 'tcx, 'rcx, 'cstore> RustdocVisitor<'a, 'tcx, 'rcx, 'cstore> {
             Some(n) => n, None => return false
         };
 
-        let is_private = !self.cx.access_levels.borrow().is_public(def_did);
+        let is_private = !self.cx.renderinfo.borrow().access_levels.is_public(def_did);
         let is_hidden = inherits_doc_hidden(self.cx, def_node_id);
 
         // Only inline if requested or if the item would otherwise be stripped
@@ -371,7 +426,7 @@ impl<'a, 'tcx, 'rcx, 'cstore> RustdocVisitor<'a, 'tcx, 'rcx, 'cstore> {
                 // struct and variant constructors always show up alongside their definitions, we've
                 // already processed them so just discard these.
                 match path.def {
-                    Def::StructCtor(..) | Def::VariantCtor(..) => return,
+                    Def::StructCtor(..) | Def::VariantCtor(..) | Def::SelfCtor(..) => return,
                     _ => {}
                 }
 
@@ -422,7 +477,7 @@ impl<'a, 'tcx, 'rcx, 'cstore> RustdocVisitor<'a, 'tcx, 'rcx, 'cstore> {
             hir::ItemKind::Union(ref sd, ref gen) =>
                 om.unions.push(self.visit_union_data(item, name, sd, gen)),
             hir::ItemKind::Fn(ref fd, header, ref gen, body) =>
-                om.fns.push(self.visit_fn(item, name, &**fd, header, gen, body)),
+                self.visit_fn(om, item, name, &**fd, header, gen, body),
             hir::ItemKind::Ty(ref ty, ref gen) => {
                 let t = Typedef {
                     ty: ty.clone(),
@@ -510,9 +565,9 @@ impl<'a, 'tcx, 'rcx, 'cstore> RustdocVisitor<'a, 'tcx, 'rcx, 'cstore> {
                           ref tr,
                           ref ty,
                           ref item_ids) => {
-                // Don't duplicate impls when inlining, we'll pick them up
-                // regardless of where they're located.
-                if !self.inlining {
+                // Don't duplicate impls when inlining or if it's implementing a trait, we'll pick
+                // them up regardless of where they're located.
+                if !self.inlining && tr.is_none() {
                     let items = item_ids.iter()
                                         .map(|ii| self.cx.tcx.hir.impl_item(ii.id).clone())
                                         .collect();

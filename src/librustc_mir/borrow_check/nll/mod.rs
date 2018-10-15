@@ -107,6 +107,7 @@ pub(in borrow_check) fn compute_regions<'cx, 'gcx, 'tcx>(
     // Run the MIR type-checker.
     let MirTypeckResults {
         constraints,
+        placeholder_indices,
         universal_region_relations,
     } = type_check::type_check(
         infcx,
@@ -122,6 +123,8 @@ pub(in borrow_check) fn compute_regions<'cx, 'gcx, 'tcx>(
         elements,
     );
 
+    let placeholder_indices = Rc::new(placeholder_indices);
+
     if let Some(all_facts) = &mut all_facts {
         all_facts
             .universal_region
@@ -135,6 +138,7 @@ pub(in borrow_check) fn compute_regions<'cx, 'gcx, 'tcx>(
     let MirTypeckRegionConstraints {
         mut liveness_constraints,
         outlives_constraints,
+        closure_bounds_mapping,
         type_tests,
     } = constraints;
 
@@ -150,9 +154,11 @@ pub(in borrow_check) fn compute_regions<'cx, 'gcx, 'tcx>(
     let mut regioncx = RegionInferenceContext::new(
         var_origins,
         universal_regions,
+        placeholder_indices,
         universal_region_relations,
         mir,
         outlives_constraints,
+        closure_bounds_mapping,
         type_tests,
         liveness_constraints,
         elements,
@@ -160,11 +166,10 @@ pub(in borrow_check) fn compute_regions<'cx, 'gcx, 'tcx>(
 
     // Generate various additional constraints.
     invalidation::generate_invalidates(
-        infcx,
+        infcx.tcx,
         &mut all_facts,
         location_table,
         &mir,
-        def_id,
         borrow_set,
     );
 

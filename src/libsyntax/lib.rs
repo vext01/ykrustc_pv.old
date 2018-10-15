@@ -21,8 +21,7 @@
 
 #![feature(crate_visibility_modifier)]
 #![feature(macro_at_most_once_rep)]
-#![cfg_attr(not(stage0), feature(nll))]
-#![cfg_attr(not(stage0), feature(infer_outlives_requirements))]
+#![feature(nll)]
 #![feature(rustc_attrs)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(slice_sort_by_cached_key)]
@@ -47,8 +46,7 @@ extern crate smallvec;
 extern crate serialize as rustc_serialize; // used by deriving
 
 use rustc_data_structures::sync::Lock;
-use rustc_data_structures::bitvec::BitVector;
-pub use rustc_data_structures::small_vec::OneVector;
+use rustc_data_structures::bit_set::GrowableBitSet;
 pub use rustc_data_structures::thin_vec::ThinVec;
 use ast::AttrId;
 
@@ -83,8 +81,8 @@ macro_rules! unwrap_or {
 }
 
 pub struct Globals {
-    used_attrs: Lock<BitVector<AttrId>>,
-    known_attrs: Lock<BitVector<AttrId>>,
+    used_attrs: Lock<GrowableBitSet<AttrId>>,
+    known_attrs: Lock<GrowableBitSet<AttrId>>,
     syntax_pos_globals: syntax_pos::Globals,
 }
 
@@ -93,8 +91,8 @@ impl Globals {
         Globals {
             // We have no idea how many attributes their will be, so just
             // initiate the vectors with 0 bits. We'll grow them as necessary.
-            used_attrs: Lock::new(BitVector::new()),
-            known_attrs: Lock::new(BitVector::new()),
+            used_attrs: Lock::new(GrowableBitSet::new_empty()),
+            known_attrs: Lock::new(GrowableBitSet::new_empty()),
             syntax_pos_globals: syntax_pos::Globals::new(),
         }
     }

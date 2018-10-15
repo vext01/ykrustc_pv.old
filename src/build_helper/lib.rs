@@ -91,13 +91,13 @@ pub fn try_run_suppressed(cmd: &mut Command) -> bool {
     output.status.success()
 }
 
-pub fn gnu_target(target: &str) -> String {
+pub fn gnu_target(target: &str) -> &str {
     match target {
-        "i686-pc-windows-msvc" => "i686-pc-win32".to_string(),
-        "x86_64-pc-windows-msvc" => "x86_64-pc-win32".to_string(),
-        "i686-pc-windows-gnu" => "i686-w64-mingw32".to_string(),
-        "x86_64-pc-windows-gnu" => "x86_64-w64-mingw32".to_string(),
-        s => s.to_string(),
+        "i686-pc-windows-msvc" => "i686-pc-win32",
+        "x86_64-pc-windows-msvc" => "x86_64-pc-win32",
+        "i686-pc-windows-gnu" => "i686-w64-mingw32",
+        "x86_64-pc-windows-gnu" => "x86_64-w64-mingw32",
+        s => s,
     }
 }
 
@@ -178,6 +178,37 @@ pub struct NativeLibBoilerplate {
     pub out_dir: PathBuf,
 }
 
+impl NativeLibBoilerplate {
+    /// On OSX we don't want to ship the exact filename that compiler-rt builds.
+    /// This conflicts with the system and ours is likely a wildly different
+    /// version, so they can't be substituted.
+    ///
+    /// As a result, we rename it here but we need to also use
+    /// `install_name_tool` on OSX to rename the commands listed inside of it to
+    /// ensure it's linked against correctly.
+    pub fn fixup_sanitizer_lib_name(&self, sanitizer_name: &str) {
+        if env::var("TARGET").unwrap() != "x86_64-apple-darwin" {
+            return
+        }
+
+        let dir = self.out_dir.join("build/lib/darwin");
+        let name = format!("clang_rt.{}_osx_dynamic", sanitizer_name);
+        let src = dir.join(&format!("lib{}.dylib", name));
+        let new_name = format!("lib__rustc__{}.dylib", name);
+        let dst = dir.join(&new_name);
+
+        println!("{} => {}", src.display(), dst.display());
+        fs::rename(&src, &dst).unwrap();
+        let status = Command::new("install_name_tool")
+            .arg("-id")
+            .arg(format!("@rpath/{}", new_name))
+            .arg(&dst)
+            .status()
+            .expect("failed to execute `install_name_tool`");
+        assert!(status.success());
+    }
+}
+
 impl Drop for NativeLibBoilerplate {
     fn drop(&mut self) {
         if !thread::panicking() {
@@ -229,7 +260,7 @@ pub fn native_lib_boilerplate(
 pub fn sanitizer_lib_boilerplate(sanitizer_name: &str)
     -> Result<(NativeLibBoilerplate, String), ()>
 {
-    let (link_name, search_path, dynamic) = match &*env::var("TARGET").unwrap() {
+    let (link_name, search_path, apple) = match &*env::var("TARGET").unwrap() {
         "x86_64-unknown-linux-gnu" => (
             format!("clang_rt.{}-x86_64", sanitizer_name),
             "build/lib/linux",
@@ -242,8 +273,8 @@ pub fn sanitizer_lib_boilerplate(sanitizer_name: &str)
         ),
         _ => return Err(()),
     };
-    let to_link = if dynamic {
-        format!("dylib={}", link_name)
+    let to_link = if apple {
+        format!("dylib=__rustc__{}", link_name)
     } else {
         format!("static={}", link_name)
     };

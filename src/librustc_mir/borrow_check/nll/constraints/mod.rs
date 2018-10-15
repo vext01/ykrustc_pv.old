@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use rustc::mir::ConstraintCategory;
 use rustc::ty::RegionVid;
 use rustc_data_structures::graph::scc::Sccs;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
@@ -87,6 +88,9 @@ pub struct OutlivesConstraint {
 
     /// Where did this constraint arise?
     pub locations: Locations,
+
+    /// What caused this constraint?
+    pub category: ConstraintCategory,
 }
 
 impl fmt::Debug for OutlivesConstraint {

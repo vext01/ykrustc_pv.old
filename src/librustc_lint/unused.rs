@@ -59,16 +59,17 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedResults {
         }
 
         let t = cx.tables.expr_ty(&expr);
-        let ty_warned = match t.sty {
-            ty::Tuple(ref tys) if tys.is_empty() => return,
-            ty::Never => return,
+        // FIXME(varkor): replace with `t.is_unit() || t.conservative_is_uninhabited()`.
+        let type_permits_no_use = match t.sty {
+            ty::Tuple(ref tys) if tys.is_empty() => true,
+            ty::Never => true,
             ty::Adt(def, _) => {
                 if def.variants.is_empty() {
-                    return;
+                    true
                 } else {
                     check_must_use(cx, def.did, s.span, "")
                 }
-            },
+            }
             _ => false,
         };
 
@@ -79,10 +80,11 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedResults {
                 match callee.node {
                     hir::ExprKind::Path(ref qpath) => {
                         let def = cx.tables.qpath_def(qpath, callee.hir_id);
-                        if let Def::Fn(_) = def {
-                            Some(def)
-                        } else {  // `Def::Local` if it was a closure, for which we
-                            None  // do not currently support must-use linting
+                        match def {
+                            Def::Fn(_) | Def::Method(_) => Some(def),
+                            // `Def::Local` if it was a closure, for which we
+                            // do not currently support must-use linting
+                            _ => None
                         }
                     },
                     _ => None
@@ -96,7 +98,12 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedResults {
         if let Some(def) = maybe_def {
             let def_id = def.def_id();
             fn_warned = check_must_use(cx, def_id, s.span, "return value of ");
+        } else if type_permits_no_use {
+            // We don't warn about unused unit or uninhabited types.
+            // (See https://github.com/rust-lang/rust/issues/43806 for details.)
+            return;
         }
+
         let must_use_op = match expr.node {
             // Hardcoding operators here seemed more expedient than the
             // refactoring that would be needed to look up the `#[must_use]`
@@ -140,7 +147,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedResults {
             op_warned = true;
         }
 
-        if !(ty_warned || fn_warned || op_warned) {
+        if !(type_permits_no_use || fn_warned || op_warned) {
             cx.span_lint(UNUSED_RESULTS, s.span, "unused result");
         }
 
@@ -234,7 +241,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for UnusedAttributes {
                 .find(|&&(builtin, ty, _)| name == builtin && ty == AttributeType::CrateLevel)
                 .is_some();
 
-            // Has a plugin registered this attribute as one which must be used at
+            // Has a plugin registered this attribute as one that must be used at
             // the crate level?
             let plugin_crate = plugin_attributes.iter()
                 .find(|&&(ref x, t)| name == &**x && AttributeType::CrateLevel == t)
@@ -337,21 +344,13 @@ impl EarlyLintPass for UnusedParens {
             AssignOp(.., ref value) => (value, "assigned value", false),
             // either function/method call, or something this lint doesn't care about
             ref call_or_other => {
-                let args_to_check;
-                let call_kind;
-                match *call_or_other {
-                    Call(_, ref args) => {
-                        call_kind = "function";
-                        args_to_check = &args[..];
-                    },
-                    MethodCall(_, ref args) => {
-                        call_kind = "method";
-                        // first "argument" is self (which sometimes needs parens)
-                        args_to_check = &args[1..];
-                    }
+                let (args_to_check, call_kind) = match *call_or_other {
+                    Call(_, ref args) => (&args[..], "function"),
+                    // first "argument" is self (which sometimes needs parens)
+                    MethodCall(_, ref args) => (&args[1..], "method"),
                     // actual catch-all arm
                     _ => { return; }
-                }
+                };
                 // Don't lint if this is a nested macro expansion: otherwise, the lint could
                 // trigger in situations that macro authors shouldn't have to care about, e.g.,
                 // when a parenthesized token tree matched in one macro expansion is matched as
@@ -372,16 +371,11 @@ impl EarlyLintPass for UnusedParens {
     }
 
     fn check_stmt(&mut self, cx: &EarlyContext, s: &ast::Stmt) {
-        let (value, msg) = match s.node {
-            ast::StmtKind::Local(ref local) => {
-                match local.init {
-                    Some(ref value) => (value, "assigned value"),
-                    None => return,
-                }
+        if let ast::StmtKind::Local(ref local) = s.node {
+            if let Some(ref value) = local.init {
+                self.check_unused_parens_core(cx, &value, "assigned value", false);
             }
-            _ => return,
-        };
-        self.check_unused_parens_core(cx, &value, msg, false);
+        }
     }
 }
 
@@ -414,9 +408,8 @@ impl UnusedImportBraces {
                     let orig_ident = items[0].0.prefix.segments.last().unwrap().ident;
                     if orig_ident.name == keywords::SelfValue.name() {
                         return;
-                    } else {
-                        node_ident = rename.unwrap_or(orig_ident);
                     }
+                    node_ident = rename.unwrap_or(orig_ident);
                 }
                 ast::UseTreeKind::Glob => {
                     node_ident = ast::Ident::from_str("*");

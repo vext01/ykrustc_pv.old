@@ -223,8 +223,8 @@ impl<'a, 'gcx, 'tcx> WfPredicates<'a, 'gcx, 'tcx> {
             let predicate = ty::Predicate::ConstEvaluatable(def_id, substs);
             let cause = self.cause(traits::MiscObligation);
             self.out.push(traits::Obligation::new(cause,
-                                                    self.param_env,
-                                                    predicate));
+                                                  self.param_env,
+                                                  predicate));
         }
     }
 
@@ -288,6 +288,8 @@ impl<'a, 'gcx, 'tcx> WfPredicates<'a, 'gcx, 'tcx> {
                     subtys.skip_current_subtree(); // subtree handled by compute_projection
                     self.compute_projection(data);
                 }
+
+                ty::UnnormalizedProjection(..) => bug!("only used with chalk-engine"),
 
                 ty::Adt(def, substs) => {
                     // WfNominalType
@@ -385,7 +387,7 @@ impl<'a, 'gcx, 'tcx> WfPredicates<'a, 'gcx, 'tcx> {
 
                     let cause = self.cause(traits::MiscObligation);
                     let component_traits =
-                        data.auto_traits().chain(data.principal().map(|p| p.def_id()));
+                        data.auto_traits().chain(once(data.principal().def_id()));
                     self.out.extend(
                         component_traits.map(|did| traits::Obligation::new(
                             cause.clone(),
@@ -493,6 +495,7 @@ impl<'a, 'gcx, 'tcx> WfPredicates<'a, 'gcx, 'tcx> {
 
             let explicit_bound = region;
 
+            self.out.reserve(implicit_bounds.len());
             for implicit_bound in implicit_bounds {
                 let cause = self.cause(traits::ObjectTypeBound(ty, explicit_bound));
                 let outlives = ty::Binder::dummy(
@@ -518,7 +521,7 @@ pub fn object_region_bounds<'a, 'gcx, 'tcx>(
 {
     // Since we don't actually *know* the self type for an object,
     // this "open(err)" serves as a kind of dummy standin -- basically
-    // a skolemized type.
+    // a placeholder type.
     let open_ty = tcx.mk_infer(ty::FreshTy(0));
 
     let predicates = existential_predicates.iter().filter_map(|predicate| {

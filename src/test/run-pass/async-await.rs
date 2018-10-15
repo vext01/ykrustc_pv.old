@@ -12,17 +12,14 @@
 
 #![feature(arbitrary_self_types, async_await, await_macro, futures_api, pin)]
 
-use std::pin::PinBox;
-use std::pin::PinMut;
+use std::pin::Pin;
 use std::future::Future;
 use std::sync::{
     Arc,
     atomic::{self, AtomicUsize},
 };
-use std::future::FutureObj;
 use std::task::{
-    Context, Poll, Wake,
-    Spawn, SpawnObjError,
+    LocalWaker, Poll, Wake,
     local_waker_from_nonlocal,
 };
 
@@ -36,24 +33,17 @@ impl Wake for Counter {
     }
 }
 
-struct NoopSpawner;
-impl Spawn for NoopSpawner {
-    fn spawn_obj(&mut self, _: FutureObj<'static, ()>) -> Result<(), SpawnObjError> {
-        Ok(())
-    }
-}
-
 struct WakeOnceThenComplete(bool);
 
 fn wake_and_yield_once() -> WakeOnceThenComplete { WakeOnceThenComplete(false) }
 
 impl Future for WakeOnceThenComplete {
     type Output = ();
-    fn poll(mut self: PinMut<Self>, cx: &mut Context) -> Poll<()> {
+    fn poll(mut self: Pin<&mut Self>, lw: &LocalWaker) -> Poll<()> {
         if self.0 {
             Poll::Ready(())
         } else {
-            cx.waker().wake();
+            lw.wake();
             self.0 = true;
             Poll::Pending
         }
@@ -148,16 +138,13 @@ where
     F: FnOnce(u8) -> Fut,
     Fut: Future<Output = u8>,
 {
-    let mut fut = PinBox::new(f(9));
+    let mut fut = Box::pinned(f(9));
     let counter = Arc::new(Counter { wakes: AtomicUsize::new(0) });
     let waker = local_waker_from_nonlocal(counter.clone());
-    let spawner = &mut NoopSpawner;
-    let cx = &mut Context::new(&waker, spawner);
-
     assert_eq!(0, counter.wakes.load(atomic::Ordering::SeqCst));
-    assert_eq!(Poll::Pending, fut.as_pin_mut().poll(cx));
+    assert_eq!(Poll::Pending, fut.as_mut().poll(&waker));
     assert_eq!(1, counter.wakes.load(atomic::Ordering::SeqCst));
-    assert_eq!(Poll::Ready(9), fut.as_pin_mut().poll(cx));
+    assert_eq!(Poll::Ready(9), fut.as_mut().poll(&waker));
 }
 
 fn main() {
@@ -183,6 +170,7 @@ fn main() {
         async_closure,
         async_fn,
         async_fn_with_internal_borrow,
+        Foo::async_method,
         |x| {
             async move {
                 unsafe { await!(unsafe_async_fn(x)) }

@@ -12,44 +12,57 @@
 
 use std::fmt;
 use std::error::Error;
+use std::borrow::{Borrow, Cow};
+use std::hash::Hash;
+use std::collections::hash_map::Entry;
 
 use rustc::hir::{self, def_id::DefId};
 use rustc::mir::interpret::ConstEvalErr;
 use rustc::mir;
 use rustc::ty::{self, TyCtxt, Instance, query::TyCtxtAt};
-use rustc::ty::layout::{LayoutOf, TyLayout};
+use rustc::ty::layout::{self, LayoutOf, TyLayout};
 use rustc::ty::subst::Subst;
 use rustc_data_structures::indexed_vec::IndexVec;
+use rustc_data_structures::fx::FxHashMap;
 
 use syntax::ast::Mutability;
-use syntax::source_map::Span;
+use syntax::source_map::{Span, DUMMY_SP};
 
 use rustc::mir::interpret::{
     EvalResult, EvalError, EvalErrorKind, GlobalId,
-    Scalar, Allocation, ConstValue,
+    Scalar, Allocation, AllocId, ConstValue,
 };
 use interpret::{self,
-    Place, PlaceTy, MemPlace, OpTy, Operand, Value,
+    PlaceTy, MemPlace, OpTy, Operand, Value,
     EvalContext, StackPopCleanup, MemoryKind,
+    snapshot,
 };
+
+/// Number of steps until the detector even starts doing anything.
+/// Also, a warning is shown to the user when this number is reached.
+const STEPS_UNTIL_DETECTOR_ENABLED: isize = 1_000_000;
+/// The number of steps between loop detector snapshots.
+/// Should be a power of two for performance reasons.
+const DETECTOR_SNAPSHOT_PERIOD: isize = 256;
 
 pub fn mk_borrowck_eval_cx<'a, 'mir, 'tcx>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     instance: Instance<'tcx>,
     mir: &'mir mir::Mir<'tcx>,
     span: Span,
-) -> EvalResult<'tcx, EvalContext<'a, 'mir, 'tcx, CompileTimeEvaluator>> {
+) -> EvalResult<'tcx, CompileTimeEvalContext<'a, 'mir, 'tcx>> {
     debug!("mk_borrowck_eval_cx: {:?}", instance);
     let param_env = tcx.param_env(instance.def_id());
-    let mut ecx = EvalContext::new(tcx.at(span), param_env, CompileTimeEvaluator, ());
+    let mut ecx = EvalContext::new(tcx.at(span), param_env, CompileTimeInterpreter::new(), ());
     // insert a stack frame so any queries have the correct substs
+    // cannot use `push_stack_frame`; if we do `const_prop` explodes
     ecx.stack.push(interpret::Frame {
         block: mir::START_BLOCK,
         locals: IndexVec::new(),
         instance,
         span,
         mir,
-        return_place: Place::null(tcx),
+        return_place: None,
         return_to_block: StackPopCleanup::Goto(None), // never pop
         stmt: 0,
     });
@@ -60,38 +73,47 @@ pub fn mk_eval_cx<'a, 'tcx>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     instance: Instance<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
-) -> EvalResult<'tcx, EvalContext<'a, 'tcx, 'tcx, CompileTimeEvaluator>> {
+) -> EvalResult<'tcx, CompileTimeEvalContext<'a, 'tcx, 'tcx>> {
     debug!("mk_eval_cx: {:?}, {:?}", instance, param_env);
     let span = tcx.def_span(instance.def_id());
-    let mut ecx = EvalContext::new(tcx.at(span), param_env, CompileTimeEvaluator, ());
+    let mut ecx = EvalContext::new(tcx.at(span), param_env, CompileTimeInterpreter::new(), ());
     let mir = ecx.load_mir(instance.def)?;
     // insert a stack frame so any queries have the correct substs
     ecx.push_stack_frame(
         instance,
         mir.span,
         mir,
-        Place::null(tcx),
+        None,
         StackPopCleanup::Goto(None), // never pop
     )?;
     Ok(ecx)
 }
 
-pub fn eval_promoted<'a, 'mir, 'tcx>(
-    ecx: &mut EvalContext<'a, 'mir, 'tcx, CompileTimeEvaluator>,
+pub(crate) fn eval_promoted<'a, 'mir, 'tcx>(
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
     cid: GlobalId<'tcx>,
     mir: &'mir mir::Mir<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
 ) -> EvalResult<'tcx, OpTy<'tcx>> {
-    ecx.with_fresh_body(|ecx| {
-        eval_body_using_ecx(ecx, cid, Some(mir), param_env)
-    })
+    let mut ecx = mk_borrowck_eval_cx(tcx, cid.instance, mir, DUMMY_SP).unwrap();
+    eval_body_using_ecx(&mut ecx, cid, Some(mir), param_env)
 }
 
 pub fn op_to_const<'tcx>(
-    ecx: &EvalContext<'_, '_, 'tcx, CompileTimeEvaluator>,
+    ecx: &CompileTimeEvalContext<'_, '_, 'tcx>,
     op: OpTy<'tcx>,
-    normalize: bool,
+    may_normalize: bool,
 ) -> EvalResult<'tcx, &'tcx ty::Const<'tcx>> {
+    // We do not normalize just any data.  Only scalar layout and fat pointers.
+    let normalize = may_normalize
+        && match op.layout.abi {
+            layout::Abi::Scalar(..) => true,
+            layout::Abi::ScalarPair(..) => {
+                // Must be a fat pointer
+                op.layout.ty.builtin_deref(true).is_some()
+            },
+            _ => false,
+        };
     let normalized_op = if normalize {
         ecx.try_read_value(op)?
     } else {
@@ -101,9 +123,9 @@ pub fn op_to_const<'tcx>(
         }
     };
     let val = match normalized_op {
-        Err(MemPlace { ptr, align, extra }) => {
+        Err(MemPlace { ptr, align, meta }) => {
             // extract alloc-offset pair
-            assert!(extra.is_none());
+            assert!(meta.is_none());
             let ptr = ptr.to_ptr()?;
             let alloc = ecx.memory.get(ptr.alloc_id)?;
             assert!(alloc.align.abi() >= align.abi());
@@ -118,7 +140,7 @@ pub fn op_to_const<'tcx>(
         Ok(Value::Scalar(x)) =>
             ConstValue::Scalar(x.not_undef()?),
         Ok(Value::ScalarPair(a, b)) =>
-            ConstValue::ScalarPair(a.not_undef()?, b),
+            ConstValue::ScalarPair(a.not_undef()?, b.not_undef()?),
     };
     Ok(ty::Const::from_const_value(ecx.tcx.tcx, val, op.layout.ty))
 }
@@ -128,19 +150,19 @@ fn eval_body_and_ecx<'a, 'mir, 'tcx>(
     cid: GlobalId<'tcx>,
     mir: Option<&'mir mir::Mir<'tcx>>,
     param_env: ty::ParamEnv<'tcx>,
-) -> (EvalResult<'tcx, OpTy<'tcx>>, EvalContext<'a, 'mir, 'tcx, CompileTimeEvaluator>) {
+) -> (EvalResult<'tcx, OpTy<'tcx>>, CompileTimeEvalContext<'a, 'mir, 'tcx>) {
     // we start out with the best span we have
     // and try improving it down the road when more information is available
     let span = tcx.def_span(cid.instance.def_id());
     let span = mir.map(|mir| mir.span).unwrap_or(span);
-    let mut ecx = EvalContext::new(tcx.at(span), param_env, CompileTimeEvaluator, ());
+    let mut ecx = EvalContext::new(tcx.at(span), param_env, CompileTimeInterpreter::new(), ());
     let r = eval_body_using_ecx(&mut ecx, cid, mir, param_env);
     (r, ecx)
 }
 
 // Returns a pointer to where the result lives
-fn eval_body_using_ecx<'a, 'mir, 'tcx>(
-    ecx: &mut EvalContext<'a, 'mir, 'tcx, CompileTimeEvaluator>,
+fn eval_body_using_ecx<'mir, 'tcx>(
+    ecx: &mut CompileTimeEvalContext<'_, 'mir, 'tcx>,
     cid: GlobalId<'tcx>,
     mir: Option<&'mir mir::Mir<'tcx>>,
     param_env: ty::ParamEnv<'tcx>,
@@ -166,7 +188,7 @@ fn eval_body_using_ecx<'a, 'mir, 'tcx>(
         cid.instance,
         mir.span,
         mir,
-        Place::Ptr(*ret),
+        Some(ret.into()),
         StackPopCleanup::None { cleanup: false },
     )?;
 
@@ -187,21 +209,15 @@ fn eval_body_using_ecx<'a, 'mir, 'tcx>(
     Ok(ret.into())
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub struct CompileTimeEvaluator;
-
 impl<'tcx> Into<EvalError<'tcx>> for ConstEvalError {
     fn into(self) -> EvalError<'tcx> {
         EvalErrorKind::MachineError(self.to_string()).into()
     }
 }
 
-impl_stable_hash_for!(struct CompileTimeEvaluator {});
-
 #[derive(Clone, Debug)]
 enum ConstEvalError {
     NeedsRfc(String),
-    NotConst(String),
 }
 
 impl fmt::Display for ConstEvalError {
@@ -215,7 +231,6 @@ impl fmt::Display for ConstEvalError {
                     msg
                 )
             }
-            NotConst(ref msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -225,7 +240,6 @@ impl Error for ConstEvalError {
         use self::ConstEvalError::*;
         match *self {
             NeedsRfc(_) => "this feature needs an rfc before being allowed inside constants",
-            NotConst(_) => "this feature is not compatible with constant evaluation",
         }
     }
 
@@ -234,13 +248,108 @@ impl Error for ConstEvalError {
     }
 }
 
-impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeEvaluator {
+// Extra machine state for CTFE, and the Machine instance
+pub struct CompileTimeInterpreter<'a, 'mir, 'tcx: 'a+'mir> {
+    /// When this value is negative, it indicates the number of interpreter
+    /// steps *until* the loop detector is enabled. When it is positive, it is
+    /// the number of steps after the detector has been enabled modulo the loop
+    /// detector period.
+    pub(super) steps_since_detector_enabled: isize,
+
+    /// Extra state to detect loops.
+    pub(super) loop_detector: snapshot::InfiniteLoopDetector<'a, 'mir, 'tcx>,
+}
+
+impl<'a, 'mir, 'tcx> CompileTimeInterpreter<'a, 'mir, 'tcx> {
+    fn new() -> Self {
+        CompileTimeInterpreter {
+            loop_detector: Default::default(),
+            steps_since_detector_enabled: -STEPS_UNTIL_DETECTOR_ENABLED,
+        }
+    }
+}
+
+impl<K: Hash + Eq, V> interpret::AllocMap<K, V> for FxHashMap<K, V> {
+    #[inline(always)]
+    fn contains_key<Q: ?Sized + Hash + Eq>(&mut self, k: &Q) -> bool
+        where K: Borrow<Q>
+    {
+        FxHashMap::contains_key(self, k)
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, k: K, v: V) -> Option<V>
+    {
+        FxHashMap::insert(self, k, v)
+    }
+
+    #[inline(always)]
+    fn remove<Q: ?Sized + Hash + Eq>(&mut self, k: &Q) -> Option<V>
+        where K: Borrow<Q>
+    {
+        FxHashMap::remove(self, k)
+    }
+
+    #[inline(always)]
+    fn filter_map_collect<T>(&self, mut f: impl FnMut(&K, &V) -> Option<T>) -> Vec<T> {
+        self.iter()
+            .filter_map(move |(k, v)| f(k, &*v))
+            .collect()
+    }
+
+    #[inline(always)]
+    fn get_or<E>(
+        &self,
+        k: K,
+        vacant: impl FnOnce() -> Result<V, E>
+    ) -> Result<&V, E>
+    {
+        match self.get(&k) {
+            Some(v) => Ok(v),
+            None => {
+                vacant()?;
+                bug!("The CTFE machine shouldn't ever need to extend the alloc_map when reading")
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn get_mut_or<E>(
+        &mut self,
+        k: K,
+        vacant: impl FnOnce() -> Result<V, E>
+    ) -> Result<&mut V, E>
+    {
+        match self.entry(k) {
+            Entry::Occupied(e) => Ok(e.into_mut()),
+            Entry::Vacant(e) => {
+                let v = vacant()?;
+                Ok(e.insert(v))
+            }
+        }
+    }
+}
+
+type CompileTimeEvalContext<'a, 'mir, 'tcx> =
+    EvalContext<'a, 'mir, 'tcx, CompileTimeInterpreter<'a, 'mir, 'tcx>>;
+
+impl<'a, 'mir, 'tcx> interpret::Machine<'a, 'mir, 'tcx>
+    for CompileTimeInterpreter<'a, 'mir, 'tcx>
+{
     type MemoryData = ();
     type MemoryKinds = !;
+    type PointerTag = ();
 
-    const MUT_STATIC_KIND: Option<!> = None; // no mutating of statics allowed
+    type MemoryMap = FxHashMap<AllocId, (MemoryKind<!>, Allocation<()>)>;
 
-    fn find_fn<'a>(
+    const STATIC_KIND: Option<!> = None; // no copying of statics allowed
+
+    #[inline(always)]
+    fn enforce_validity(_ecx: &EvalContext<'a, 'mir, 'tcx, Self>) -> bool {
+        false // for now, we don't enforce validity
+    }
+
+    fn find_fn(
         ecx: &mut EvalContext<'a, 'mir, 'tcx, Self>,
         instance: ty::Instance<'tcx>,
         args: &[OpTy<'tcx>],
@@ -255,9 +364,6 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeEvaluator {
                 ecx.goto_block(ret)?; // fully evaluated and done
                 return Ok(None);
             }
-            return Err(
-                ConstEvalError::NotConst(format!("calling non-const fn `{}`", instance)).into(),
-            );
         }
         // This is a const fn. Call it.
         Ok(Some(match ecx.load_mir(instance.def) {
@@ -274,7 +380,7 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeEvaluator {
         }))
     }
 
-    fn call_intrinsic<'a>(
+    fn call_intrinsic(
         ecx: &mut EvalContext<'a, 'mir, 'tcx, Self>,
         instance: ty::Instance<'tcx>,
         args: &[OpTy<'tcx>],
@@ -290,7 +396,7 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeEvaluator {
         )
     }
 
-    fn ptr_op<'a>(
+    fn ptr_op(
         _ecx: &EvalContext<'a, 'mir, 'tcx, Self>,
         _bin_op: mir::BinOp,
         _left: Scalar,
@@ -303,19 +409,51 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeEvaluator {
         )
     }
 
-    fn find_foreign_static<'a>(
+    fn find_foreign_static(
         _tcx: TyCtxtAt<'a, 'tcx, 'tcx>,
         _def_id: DefId,
-    ) -> EvalResult<'tcx, &'tcx Allocation> {
+    ) -> EvalResult<'tcx, Cow<'tcx, Allocation<Self::PointerTag>>> {
         err!(ReadForeignStatic)
     }
 
-    fn box_alloc<'a>(
+    #[inline(always)]
+    fn static_with_default_tag(
+        alloc: &'_ Allocation
+    ) -> Cow<'_, Allocation<Self::PointerTag>> {
+        // We do not use a tag so we can just cheaply forward the reference
+        Cow::Borrowed(alloc)
+    }
+
+    fn box_alloc(
         _ecx: &mut EvalContext<'a, 'mir, 'tcx, Self>,
         _dest: PlaceTy<'tcx>,
     ) -> EvalResult<'tcx> {
         Err(
             ConstEvalError::NeedsRfc("heap allocations via `box` keyword".to_string()).into(),
+        )
+    }
+
+    fn before_terminator(ecx: &mut EvalContext<'a, 'mir, 'tcx, Self>) -> EvalResult<'tcx> {
+        {
+            let steps = &mut ecx.machine.steps_since_detector_enabled;
+
+            *steps += 1;
+            if *steps < 0 {
+                return Ok(());
+            }
+
+            *steps %= DETECTOR_SNAPSHOT_PERIOD;
+            if *steps != 0 {
+                return Ok(());
+            }
+        }
+
+        let span = ecx.frame().span;
+        ecx.machine.loop_detector.observe_and_analyze(
+            &ecx.tcx,
+            span,
+            &ecx.memory,
+            &ecx.stack[..],
         )
     }
 }

@@ -69,6 +69,7 @@ o("profiler", "build.profiler", "build the profiler runtime")
 o("emscripten", None, "compile the emscripten backend as well as LLVM")
 o("full-tools", None, "enable all tools")
 o("lldb", "rust.lldb", "build lldb")
+o("missing-tools", "dist.missing-tools", "allow failures when building tools")
 
 # Optimization and debugging options. These may be overridden by the release
 # channel, etc.
@@ -95,6 +96,8 @@ v("docdir", "install.docdir", "install documentation in PATH")
 v("bindir", "install.bindir", "install binaries")
 
 v("llvm-root", None, "set LLVM root")
+v("llvm-config", None, "set path to llvm-config")
+v("llvm-filecheck", None, "set path to LLVM's FileCheck utility")
 v("python", "build.python", "set path to python")
 v("jemalloc-root", None, "set directory where libjemalloc_pic.a is located")
 v("android-cross-path", "target.arm-linux-androideabi.android-ndk",
@@ -323,6 +326,10 @@ for key in known_args:
         set('build.cargo', value + '/bin/cargo')
     elif option.name == 'llvm-root':
         set('target.{}.llvm-config'.format(build()), value + '/bin/llvm-config')
+    elif option.name == 'llvm-config':
+        set('target.{}.llvm-config'.format(build()), value)
+    elif option.name == 'llvm-filecheck':
+        set('target.{}.llvm-filecheck'.format(build()), value)
     elif option.name == 'jemalloc-root':
         set('target.{}.jemalloc'.format(build()), value + '/libjemalloc_pic.a')
     elif option.name == 'tools':

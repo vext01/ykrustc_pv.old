@@ -42,23 +42,21 @@
 
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![cfg_attr(stage0, feature(const_fn))]
-#![cfg_attr(not(stage0), feature(min_const_fn))]
+#![cfg_attr(stage0, feature(min_const_fn))]
 #![feature(core_intrinsics)]
 #![feature(drain_filter)]
 #![cfg_attr(windows, feature(libc))]
-#![cfg_attr(stage0, feature(macro_vis_matcher))]
 #![feature(never_type)]
 #![feature(exhaustive_patterns)]
 #![feature(extern_types)]
-#![cfg_attr(not(stage0), feature(nll))]
-#![cfg_attr(not(stage0), feature(infer_outlives_requirements))]
+#![feature(nll)]
 #![feature(non_exhaustive)]
 #![feature(proc_macro_internals)]
 #![feature(quote)]
 #![feature(optin_builtin_traits)]
 #![feature(refcell_replace_swap)]
 #![feature(rustc_diagnostic_macros)]
+#![feature(rustc_attrs)]
 #![feature(slice_patterns)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(specialization)]
@@ -69,13 +67,14 @@
 #![feature(step_trait)]
 #![feature(integer_atomics)]
 #![feature(test)]
-#![cfg_attr(not(stage0), feature(impl_header_lifetime_elision))]
+#![feature(impl_header_lifetime_elision)]
 #![feature(in_band_lifetimes)]
 #![feature(macro_at_most_once_rep)]
-#![feature(crate_in_paths)]
 #![feature(crate_visibility_modifier)]
 
 #![recursion_limit="512"]
+
+#![warn(elided_lifetimes_in_paths)]
 
 extern crate arena;
 #[macro_use] extern crate bitflags;

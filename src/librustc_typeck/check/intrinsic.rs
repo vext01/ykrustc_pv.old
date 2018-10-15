@@ -57,7 +57,7 @@ fn equate_intrinsic_type<'a, 'tcx>(
 
         struct_span_err!(tcx.sess, span, E0094,
                         "intrinsic has wrong number of type \
-                        parameters: found {}, expected {}",
+                         parameters: found {}, expected {}",
                         i_n_tps, n_tps)
             .span_label(span, format!("expected {} type parameter", n_tps))
             .emit();
@@ -83,7 +83,7 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let name = it.name.as_str();
     let (n_tps, inputs, output, unsafety) = if name.starts_with("atomic_") {
         let split : Vec<&str> = name.split('_').collect();
-        assert!(split.len() >= 2, "Atomic intrinsic not correct format");
+        assert!(split.len() >= 2, "Atomic intrinsic in an incorrect format");
 
         //We only care about the operation here
         let (n_tps, inputs, output) = match split[1] {
@@ -94,7 +94,7 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             "load" => (1, vec![tcx.mk_imm_ptr(param(0))],
                        param(0)),
             "store" => (1, vec![tcx.mk_mut_ptr(param(0)), param(0)],
-                        tcx.mk_nil()),
+                        tcx.mk_unit()),
 
             "xchg" | "xadd" | "xsub" | "and"  | "nand" | "or" | "xor" | "max" |
             "min"  | "umax" | "umin" => {
@@ -102,7 +102,7 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                  param(0))
             }
             "fence" | "singlethreadfence" => {
-                (0, Vec::new(), tcx.mk_nil())
+                (0, Vec::new(), tcx.mk_unit())
             }
             op => {
                 struct_span_err!(tcx.sess, it.span, E0092,
@@ -117,18 +117,18 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         (0, Vec::new(), tcx.types.never, hir::Unsafety::Unsafe)
     } else {
         let unsafety = match &name[..] {
-            "size_of" | "min_align_of" => hir::Unsafety::Normal,
+            "size_of" | "min_align_of" | "needs_drop" => hir::Unsafety::Normal,
             _ => hir::Unsafety::Unsafe,
         };
         let (n_tps, inputs, output) = match &name[..] {
-            "breakpoint" => (0, Vec::new(), tcx.mk_nil()),
+            "breakpoint" => (0, Vec::new(), tcx.mk_unit()),
             "size_of" |
             "pref_align_of" | "min_align_of" => (1, Vec::new(), tcx.types.usize),
             "size_of_val" |  "min_align_of_val" => {
                 (1, vec![
                     tcx.mk_imm_ref(tcx.mk_region(ty::ReLateBound(ty::INNERMOST,
-                                                                  ty::BrAnon(0))),
-                                    param(0))
+                                                                 ty::BrAnon(0))),
+                                   param(0))
                  ], tcx.types.usize)
             }
             "rustc_peek" => (1, vec![param(0)], param(0)),
@@ -141,7 +141,7 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                     tcx.mk_mut_ptr(param(0)),
                     param(0)
                   ],
-               tcx.mk_nil())
+               tcx.mk_unit())
             }
             "prefetch_read_data" | "prefetch_write_data" |
             "prefetch_read_instruction" | "prefetch_write_instruction" => {
@@ -149,10 +149,10 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                           ty: param(0),
                           mutbl: hir::MutImmutable
                          }), tcx.types.i32],
-                    tcx.mk_nil())
+                    tcx.mk_unit())
             }
             "drop_in_place" => {
-                (1, vec![tcx.mk_mut_ptr(param(0))], tcx.mk_nil())
+                (1, vec![tcx.mk_mut_ptr(param(0))], tcx.mk_unit())
             }
             "needs_drop" => (1, Vec::new(), tcx.types.bool),
 
@@ -185,7 +185,7 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                   }),
                   tcx.types.usize,
                ],
-               tcx.mk_nil())
+               tcx.mk_unit())
             }
             "volatile_copy_memory" | "volatile_copy_nonoverlapping_memory" => {
               (1,
@@ -200,7 +200,7 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                   }),
                   tcx.types.usize,
                ],
-               tcx.mk_nil())
+               tcx.mk_unit())
             }
             "write_bytes" | "volatile_set_memory" => {
               (1,
@@ -212,7 +212,7 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                   tcx.types.u8,
                   tcx.types.usize,
                ],
-               tcx.mk_nil())
+               tcx.mk_unit())
             }
             "sqrtf32" => (0, vec![ tcx.types.f32 ], tcx.types.f32),
             "sqrtf64" => (0, vec![ tcx.types.f64 ], tcx.types.f64),
@@ -280,7 +280,7 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             "volatile_load" | "unaligned_volatile_load" =>
                 (1, vec![ tcx.mk_imm_ptr(param(0)) ], param(0)),
             "volatile_store" | "unaligned_volatile_store" =>
-                (1, vec![ tcx.mk_mut_ptr(param(0)), param(0) ], tcx.mk_nil()),
+                (1, vec![ tcx.mk_mut_ptr(param(0)), param(0) ], tcx.mk_unit()),
 
             "ctpop" | "ctlz" | "ctlz_nonzero" | "cttz" | "cttz_nonzero" |
             "bswap" | "bitreverse" =>
@@ -300,20 +300,20 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             "fadd_fast" | "fsub_fast" | "fmul_fast" | "fdiv_fast" | "frem_fast" =>
                 (1, vec![param(0), param(0)], param(0)),
 
-            "assume" => (0, vec![tcx.types.bool], tcx.mk_nil()),
+            "assume" => (0, vec![tcx.types.bool], tcx.mk_unit()),
             "likely" => (0, vec![tcx.types.bool], tcx.types.bool),
             "unlikely" => (0, vec![tcx.types.bool], tcx.types.bool),
 
             "discriminant_value" => (1, vec![
                     tcx.mk_imm_ref(tcx.mk_region(ty::ReLateBound(ty::INNERMOST,
-                                                                  ty::BrAnon(0))),
+                                                                 ty::BrAnon(0))),
                                    param(0))], tcx.types.u64),
 
             "try" => {
                 let mut_u8 = tcx.mk_mut_ptr(tcx.types.u8);
                 let fn_ty = ty::Binder::bind(tcx.mk_fn_sig(
                     iter::once(mut_u8),
-                    tcx.mk_nil(),
+                    tcx.mk_unit(),
                     false,
                     hir::Unsafety::Normal,
                     Abi::Rust,
@@ -322,15 +322,15 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             }
 
             "nontemporal_store" => {
-                (1, vec![ tcx.mk_mut_ptr(param(0)), param(0) ], tcx.mk_nil())
+                (1, vec![ tcx.mk_mut_ptr(param(0)), param(0) ], tcx.mk_unit())
             }
 
             ref other => {
                 struct_span_err!(tcx.sess, it.span, E0093,
-                                "unrecognized intrinsic function: `{}`",
-                                *other)
-                                .span_label(it.span, "unrecognized intrinsic")
-                                .emit();
+                                 "unrecognized intrinsic function: `{}`",
+                                 *other)
+                                 .span_label(it.span, "unrecognized intrinsic")
+                                 .emit();
                 return;
             }
         };
@@ -376,7 +376,7 @@ pub fn check_platform_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             (3, vec![param(0), param(1), param(2)], param(0))
         }
         "simd_scatter" => {
-            (3, vec![param(0), param(1), param(2)], tcx.mk_nil())
+            (3, vec![param(0), param(1), param(2)], tcx.mk_unit())
         }
         "simd_insert" => (2, vec![param(0), tcx.types.u32, param(1)], param(0)),
         "simd_extract" => (2, vec![param(0), tcx.types.u32], param(1)),

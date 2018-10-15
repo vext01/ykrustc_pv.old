@@ -8,45 +8,48 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use borrow_check::nll::constraints::OutlivesConstraint;
+use borrow_check::nll::constraints::{OutlivesConstraint};
 use borrow_check::nll::region_infer::RegionInferenceContext;
+use borrow_check::nll::region_infer::error_reporting::region_name::RegionNameSource;
 use borrow_check::nll::type_check::Locations;
+use borrow_check::nll::universal_regions::DefiningTy;
 use rustc::hir::def_id::DefId;
 use rustc::infer::error_reporting::nice_region_error::NiceRegionError;
 use rustc::infer::InferCtxt;
-use rustc::mir::{self, Location, Mir, Place, Rvalue, StatementKind, TerminatorKind};
-use rustc::ty::{TyCtxt, RegionVid};
+use rustc::mir::{ConstraintCategory, Location, Mir};
+use rustc::ty::{self, RegionVid};
 use rustc_data_structures::indexed_vec::IndexVec;
-use rustc_errors::Diagnostic;
+use rustc_errors::{Diagnostic, DiagnosticBuilder};
 use std::collections::VecDeque;
-use std::fmt;
+use syntax::symbol::keywords;
 use syntax_pos::Span;
+use syntax::errors::Applicability;
 
 mod region_name;
 mod var_name;
 
-/// Constraints that are considered interesting can be categorized to
-/// determine why they are interesting. Order of variants indicates
-/// sort order of the category, thereby influencing diagnostic output.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-enum ConstraintCategory {
-    Cast,
-    Assignment,
-    Return,
-    CallArgument,
-    Other,
-    Boring,
+use self::region_name::RegionName;
+
+trait ConstraintDescription {
+    fn description(&self) -> &'static str;
 }
 
-impl fmt::Display for ConstraintCategory {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl ConstraintDescription for ConstraintCategory {
+    fn description(&self) -> &'static str {
         // Must end with a space. Allows for empty names to be provided.
         match self {
-            ConstraintCategory::Assignment => write!(f, "assignment "),
-            ConstraintCategory::Return => write!(f, "returning this value "),
-            ConstraintCategory::Cast => write!(f, "cast "),
-            ConstraintCategory::CallArgument => write!(f, "argument "),
-            _ => write!(f, ""),
+            ConstraintCategory::Assignment => "assignment ",
+            ConstraintCategory::Return => "returning this value ",
+            ConstraintCategory::Cast => "cast ",
+            ConstraintCategory::CallArgument => "argument ",
+            ConstraintCategory::TypeAnnotation => "type annotation ",
+            ConstraintCategory::ClosureBounds => "closure body ",
+            ConstraintCategory::SizedBound => "proving this value is `Sized` ",
+            ConstraintCategory::CopyBound => "copying this value ",
+            ConstraintCategory::OpaqueType => "opaque type ",
+            ConstraintCategory::Boring
+            | ConstraintCategory::BoringNoLocation
+            | ConstraintCategory::Internal => "",
         }
     }
 }
@@ -68,7 +71,6 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     fn best_blame_constraint(
         &self,
         mir: &Mir<'tcx>,
-        tcx: TyCtxt<'_, '_, 'tcx>,
         from_region: RegionVid,
         target_test: impl Fn(RegionVid) -> bool,
     ) -> (ConstraintCategory, Span, RegionVid) {
@@ -93,7 +95,13 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         // Classify each of the constraints along the path.
         let mut categorized_path: Vec<(ConstraintCategory, Span)> = path
             .iter()
-            .map(|&index| self.classify_constraint(index, mir, tcx))
+            .map(|constraint| {
+                if constraint.category == ConstraintCategory::ClosureBounds {
+                    self.retrieve_closure_constraint_info(mir, &constraint)
+                } else {
+                    (constraint.category, constraint.locations.span(mir))
+                }
+            })
             .collect();
         debug!(
             "best_blame_constraint: categorized_path={:#?}",
@@ -126,12 +134,10 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             let constraint_sup_scc = self.constraint_sccs.scc(constraint.sup);
 
             match categorized_path[i].0 {
-                ConstraintCategory::Boring => false,
-                ConstraintCategory::Other => {
-                    // other isn't interesting when the two lifetimes
-                    // are unified.
-                    constraint_sup_scc != self.constraint_sccs.scc(constraint.sub)
-                }
+                ConstraintCategory::OpaqueType
+                | ConstraintCategory::Boring
+                | ConstraintCategory::BoringNoLocation
+                | ConstraintCategory::Internal => false,
                 _ => constraint_sup_scc != target_scc,
             }
         });
@@ -217,106 +223,6 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         None
     }
 
-    /// This function will return true if a constraint is interesting and false if a constraint
-    /// is not. It is useful in filtering constraint paths to only interesting points.
-    fn constraint_is_interesting(&self, constraint: OutlivesConstraint) -> bool {
-        debug!(
-            "constraint_is_interesting: locations={:?} constraint={:?}",
-            constraint.locations, constraint
-        );
-
-        match constraint.locations {
-            Locations::Interesting(_) | Locations::All => true,
-            _ => false,
-        }
-    }
-
-    /// This function classifies a constraint from a location.
-    fn classify_constraint(
-        &self,
-        constraint: OutlivesConstraint,
-        mir: &Mir<'tcx>,
-        tcx: TyCtxt<'_, '_, 'tcx>,
-    ) -> (ConstraintCategory, Span) {
-        debug!("classify_constraint: constraint={:?}", constraint);
-        let span = constraint.locations.span(mir);
-        let location = constraint
-            .locations
-            .from_location()
-            .unwrap_or(Location::START);
-
-        if !self.constraint_is_interesting(constraint) {
-            return (ConstraintCategory::Boring, span);
-        }
-
-        let data = &mir[location.block];
-        debug!(
-            "classify_constraint: location={:?} data={:?}",
-            location, data
-        );
-        let category = if location.statement_index == data.statements.len() {
-            if let Some(ref terminator) = data.terminator {
-                debug!("classify_constraint: terminator.kind={:?}", terminator.kind);
-                match terminator.kind {
-                    TerminatorKind::DropAndReplace { .. } => ConstraintCategory::Assignment,
-                    // Classify calls differently depending on whether or not
-                    // the sub region appears in the destination type (so the
-                    // sup region is in the return type). If the return type
-                    // contains the sub-region, then this is either an
-                    // assignment or a return, depending on whether we are
-                    // writing to the RETURN_PLACE or not.
-                    //
-                    // The idea here is that the region is being propagated
-                    // from an input into the output place, so it's a kind of
-                    // assignment. Otherwise, if the sub-region only appears in
-                    // the argument types, then use the CallArgument
-                    // classification.
-                    TerminatorKind::Call { destination: Some((ref place, _)), .. } => {
-                        if tcx.any_free_region_meets(
-                            &place.ty(mir, tcx).to_ty(tcx),
-                            |region| self.to_region_vid(region) == constraint.sub,
-                        ) {
-                            match place {
-                                Place::Local(mir::RETURN_PLACE) => ConstraintCategory::Return,
-                                _ => ConstraintCategory::Assignment,
-                            }
-                        } else {
-                            ConstraintCategory::CallArgument
-                        }
-                    }
-                    TerminatorKind::Call { destination: None, .. } => {
-                        ConstraintCategory::CallArgument
-                    }
-                    _ => ConstraintCategory::Other,
-                }
-            } else {
-                ConstraintCategory::Other
-            }
-        } else {
-            let statement = &data.statements[location.statement_index];
-            debug!("classify_constraint: statement.kind={:?}", statement.kind);
-            match statement.kind {
-                StatementKind::Assign(ref place, ref rvalue) => {
-                    debug!("classify_constraint: place={:?} rvalue={:?}", place, rvalue);
-                    if *place == Place::Local(mir::RETURN_PLACE) {
-                        ConstraintCategory::Return
-                    } else {
-                        match rvalue {
-                            Rvalue::Cast(..) => ConstraintCategory::Cast,
-                            Rvalue::Use(..) | Rvalue::Aggregate(..) => {
-                                ConstraintCategory::Assignment
-                            }
-                            _ => ConstraintCategory::Other,
-                        }
-                    }
-                }
-                _ => ConstraintCategory::Other,
-            }
-        };
-
-        (category, span)
-    }
-
     /// Report an error because the universal region `fr` was required to outlive
     /// `outlived_fr` but it is not known to do so. For example:
     ///
@@ -338,7 +244,6 @@ impl<'tcx> RegionInferenceContext<'tcx> {
 
         let (category, span, _) = self.best_blame_constraint(
             mir,
-            infcx.tcx,
             fr,
             |r| r == outlived_fr
         );
@@ -356,10 +261,13 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             self.universal_regions.is_local_free_region(fr),
             self.universal_regions.is_local_free_region(outlived_fr),
         );
+
         debug!("report_error: fr_is_local={:?} outlived_fr_is_local={:?} category={:?}",
                fr_is_local, outlived_fr_is_local, category);
-
         match (category, fr_is_local, outlived_fr_is_local) {
+            (ConstraintCategory::Return, true, false) if self.is_closure_fn_mut(infcx, fr) =>
+                self.report_fnmut_error(mir, infcx, mir_def_id, fr, outlived_fr, span,
+                                        errors_buffer),
             (ConstraintCategory::Assignment, true, false) |
             (ConstraintCategory::CallArgument, true, false) =>
                 self.report_escaping_data_error(mir, infcx, mir_def_id, fr, outlived_fr,
@@ -371,6 +279,85 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         };
     }
 
+    /// Report a specialized error when `FnMut` closures return a reference to a captured variable.
+    /// This function expects `fr` to be local and `outlived_fr` to not be local.
+    ///
+    /// ```text
+    /// error: captured variable cannot escape `FnMut` closure body
+    ///   --> $DIR/issue-53040.rs:15:8
+    ///    |
+    /// LL |     || &mut v;
+    ///    |     -- ^^^^^^ creates a reference to a captured variable which escapes the closure body
+    ///    |     |
+    ///    |     inferred to be a `FnMut` closure
+    ///    |
+    ///    = note: `FnMut` closures only have access to their captured variables while they are
+    ///            executing...
+    ///    = note: ...therefore, returned references to captured variables will escape the closure
+    /// ```
+    fn report_fnmut_error(
+        &self,
+        mir: &Mir<'tcx>,
+        infcx: &InferCtxt<'_, '_, 'tcx>,
+        mir_def_id: DefId,
+        _fr: RegionVid,
+        outlived_fr: RegionVid,
+        span: Span,
+        errors_buffer: &mut Vec<Diagnostic>,
+    ) {
+        let mut diag = infcx.tcx.sess.struct_span_err(
+            span,
+            "captured variable cannot escape `FnMut` closure body",
+        );
+
+        // We should check if the return type of this closure is in fact a closure - in that
+        // case, we can special case the error further.
+        let return_type_is_closure = self.universal_regions.unnormalized_output_ty.is_closure();
+        let message = if return_type_is_closure {
+            "returns a closure that contains a reference to a captured variable, which then \
+             escapes the closure body"
+        } else {
+            "returns a reference to a captured variable which escapes the closure body"
+        };
+
+        diag.span_label(
+            span,
+            message,
+        );
+
+        match self.give_region_a_name(infcx, mir, mir_def_id, outlived_fr, &mut 1).source {
+            RegionNameSource::NamedEarlyBoundRegion(fr_span) |
+            RegionNameSource::NamedFreeRegion(fr_span) |
+            RegionNameSource::SynthesizedFreeEnvRegion(fr_span, _) |
+            RegionNameSource::CannotMatchHirTy(fr_span, _) |
+            RegionNameSource::MatchedHirTy(fr_span) |
+            RegionNameSource::MatchedAdtAndSegment(fr_span) |
+            RegionNameSource::AnonRegionFromUpvar(fr_span, _) |
+            RegionNameSource::AnonRegionFromOutput(fr_span, _, _) => {
+                diag.span_label(fr_span, "inferred to be a `FnMut` closure");
+            },
+            _ => {},
+        }
+
+        diag.note("`FnMut` closures only have access to their captured variables while they are \
+                   executing...");
+        diag.note("...therefore, they cannot allow references to captured variables to escape");
+
+        diag.buffer(errors_buffer);
+    }
+
+    /// Reports a error specifically for when data is escaping a closure.
+    ///
+    /// ```text
+    /// error: borrowed data escapes outside of function
+    ///   --> $DIR/lifetime-bound-will-change-warning.rs:44:5
+    ///    |
+    /// LL | fn test2<'a>(x: &'a Box<Fn()+'a>) {
+    ///    |              - `x` is a reference that is only valid in the function body
+    /// LL |     // but ref_obj will not, so warn.
+    /// LL |     ref_obj(x)
+    ///    |     ^^^^^^^^^^ `x` escapes the function body here
+    /// ```
     fn report_escaping_data_error(
         &self,
         mir: &Mir<'tcx>,
@@ -388,7 +375,11 @@ impl<'tcx> RegionInferenceContext<'tcx> {
 
         let escapes_from = if infcx.tcx.is_closure(mir_def_id) { "closure" } else { "function" };
 
-        if fr_name_and_span.is_none() && outlived_fr_name_and_span.is_none() {
+        // Revert to the normal error in these cases.
+        // Assignments aren't "escapes" in function items.
+        if (fr_name_and_span.is_none() && outlived_fr_name_and_span.is_none())
+            || (category == ConstraintCategory::Assignment && escapes_from == "function")
+        {
             return self.report_general_error(mir, infcx, mir_def_id,
                                              fr, true, outlived_fr, false,
                                              category, span, errors_buffer);
@@ -398,31 +389,46 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             span, &format!("borrowed data escapes outside of {}", escapes_from),
         );
 
-        if let Some((outlived_fr_name, outlived_fr_span)) = outlived_fr_name_and_span {
-            if let Some(name) = outlived_fr_name {
-                diag.span_label(
-                    outlived_fr_span,
-                    format!("`{}` is declared here, outside of the {} body", name, escapes_from),
-                );
-            }
+        if let Some((Some(outlived_fr_name), outlived_fr_span)) = outlived_fr_name_and_span {
+            diag.span_label(
+                outlived_fr_span,
+                format!(
+                    "`{}` is declared here, outside of the {} body",
+                    outlived_fr_name, escapes_from
+                ),
+            );
         }
 
-        if let Some((fr_name, fr_span)) = fr_name_and_span {
-            if let Some(name) = fr_name {
-                diag.span_label(
-                    fr_span,
-                    format!("`{}` is a reference that is only valid in the {} body",
-                            name, escapes_from),
-                );
+        if let Some((Some(fr_name), fr_span)) = fr_name_and_span {
+            diag.span_label(
+                fr_span,
+                format!(
+                    "`{}` is a reference that is only valid in the {} body",
+                    fr_name, escapes_from
+                ),
+            );
 
-                diag.span_label(span, format!("`{}` escapes the {} body here",
-                                               name, escapes_from));
-            }
+            diag.span_label(span, format!("`{}` escapes the {} body here", fr_name, escapes_from));
         }
 
         diag.buffer(errors_buffer);
     }
 
+    /// Reports a region inference error for the general case with named/synthesized lifetimes to
+    /// explain what is happening.
+    ///
+    /// ```text
+    /// error: unsatisfied lifetime constraints
+    ///   --> $DIR/regions-creating-enums3.rs:17:5
+    ///    |
+    /// LL | fn mk_add_bad1<'a,'b>(x: &'a ast<'a>, y: &'b ast<'b>) -> ast<'a> {
+    ///    |                -- -- lifetime `'b` defined here
+    ///    |                |
+    ///    |                lifetime `'a` defined here
+    /// LL |     ast::add(x, y)
+    ///    |     ^^^^^^^^^^^^^^ function was supposed to return data with lifetime `'a` but it
+    ///    |                    is returning data with lifetime `'b`
+    /// ```
     fn report_general_error(
         &self,
         mir: &Mir<'tcx>,
@@ -442,10 +448,11 @@ impl<'tcx> RegionInferenceContext<'tcx> {
         );
 
         let counter = &mut 1;
-        let fr_name = self.give_region_a_name(
-            infcx, mir, mir_def_id, fr, counter, &mut diag);
+        let fr_name = self.give_region_a_name(infcx, mir, mir_def_id, fr, counter);
+        fr_name.highlight_region_name(&mut diag);
         let outlived_fr_name = self.give_region_a_name(
-            infcx, mir, mir_def_id, outlived_fr, counter, &mut diag);
+            infcx, mir, mir_def_id, outlived_fr, counter);
+        outlived_fr_name.highlight_region_name(&mut diag);
 
         let mir_def_name = if infcx.tcx.is_closure(mir_def_id) { "closure" } else { "function" };
 
@@ -460,12 +467,108 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             _ => {
                 diag.span_label(span, format!(
                     "{}requires that `{}` must outlive `{}`",
-                    category, fr_name, outlived_fr_name,
+                    category.description(), fr_name, outlived_fr_name,
                 ));
             },
         }
 
+        self.add_static_impl_trait_suggestion(
+            infcx, &mut diag, fr, fr_name, outlived_fr,
+        );
+
         diag.buffer(errors_buffer);
+    }
+
+    /// Adds a suggestion to errors where a `impl Trait` is returned.
+    ///
+    /// ```text
+    /// help: to allow this impl Trait to capture borrowed data with lifetime `'1`, add `'_` as
+    ///       a constraint
+    ///    |
+    /// LL |     fn iter_values_anon(&self) -> impl Iterator<Item=u32> + 'a {
+    ///    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    /// ```
+    fn add_static_impl_trait_suggestion(
+        &self,
+        infcx: &InferCtxt<'_, '_, 'tcx>,
+        diag: &mut DiagnosticBuilder<'_>,
+        fr: RegionVid,
+        // We need to pass `fr_name` - computing it again will label it twice.
+        fr_name: RegionName,
+        outlived_fr: RegionVid,
+    ) {
+        if let (
+            Some(f),
+            Some(ty::RegionKind::ReStatic)
+        ) = (self.to_error_region(fr), self.to_error_region(outlived_fr)) {
+            if let Some(ty::TyS {
+                sty: ty::TyKind::Opaque(did, substs),
+                ..
+            }) = infcx.tcx.is_suitable_region(f)
+                    .map(|r| r.def_id)
+                    .map(|id| infcx.tcx.return_type_impl_trait(id))
+                    .unwrap_or(None)
+            {
+                // Check whether or not the impl trait return type is intended to capture
+                // data with the static lifetime.
+                //
+                // eg. check for `impl Trait + 'static` instead of `impl Trait`.
+                let has_static_predicate = {
+                    let predicates_of = infcx.tcx.predicates_of(*did);
+                    let bounds = predicates_of.instantiate(infcx.tcx, substs);
+
+                    let mut found = false;
+                    for predicate in bounds.predicates {
+                        if let ty::Predicate::TypeOutlives(binder) = predicate {
+                            if let ty::OutlivesPredicate(
+                                _,
+                                ty::RegionKind::ReStatic
+                            ) = binder.skip_binder() {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    found
+                };
+
+                debug!("add_static_impl_trait_suggestion: has_static_predicate={:?}",
+                       has_static_predicate);
+                let static_str = keywords::StaticLifetime.name();
+                // If there is a static predicate, then the only sensible suggestion is to replace
+                // fr with `'static`.
+                if has_static_predicate {
+                    diag.help(
+                        &format!(
+                            "consider replacing `{}` with `{}`",
+                            fr_name, static_str,
+                        ),
+                    );
+                } else {
+                    // Otherwise, we should suggest adding a constraint on the return type.
+                    let span = infcx.tcx.def_span(*did);
+                    if let Ok(snippet) = infcx.tcx.sess.source_map().span_to_snippet(span) {
+                        let suggestable_fr_name = if fr_name.was_named() {
+                            format!("{}", fr_name)
+                        } else {
+                            "'_".to_string()
+                        };
+
+                        diag.span_suggestion_with_applicability(
+                            span,
+                            &format!(
+                                "to allow this impl Trait to capture borrowed data with lifetime \
+                                 `{}`, add `{}` as a constraint",
+                                fr_name, suggestable_fr_name,
+                            ),
+                            format!("{} + {}", snippet, suggestable_fr_name),
+                            Applicability::MachineApplicable,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Finds some region R such that `fr1: R` and `R` is live at
@@ -483,11 +586,44 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     crate fn find_outlives_blame_span(
         &self,
         mir: &Mir<'tcx>,
-        tcx: TyCtxt<'_, '_, 'tcx>,
         fr1: RegionVid,
         fr2: RegionVid,
-    ) -> Span {
-        let (_, span, _) = self.best_blame_constraint(mir, tcx, fr1, |r| r == fr2);
-        span
+    ) -> (ConstraintCategory, Span) {
+        let (category, span, _) = self.best_blame_constraint(mir, fr1, |r| r == fr2);
+        (category, span)
+    }
+
+    fn retrieve_closure_constraint_info(
+        &self,
+        mir: &Mir<'tcx>,
+        constraint: &OutlivesConstraint
+    ) -> (ConstraintCategory, Span) {
+        let loc = match constraint.locations {
+            Locations::All(span) => return (constraint.category, span),
+            Locations::Single(loc) => loc,
+        };
+
+        let opt_span_category = self
+            .closure_bounds_mapping[&loc]
+            .get(&(constraint.sup, constraint.sub));
+        *opt_span_category.unwrap_or(&(constraint.category, mir.source_info(loc).span))
+    }
+
+    /// Returns `true` if a closure is inferred to be an `FnMut` closure.
+    crate fn is_closure_fn_mut(
+        &self,
+        infcx: &InferCtxt<'_, '_, 'tcx>,
+        fr: RegionVid,
+    ) -> bool {
+        if let Some(ty::ReFree(free_region)) = self.to_error_region(fr) {
+            if let ty::BoundRegion::BrEnv = free_region.bound_region {
+                if let DefiningTy::Closure(def_id, substs) = self.universal_regions.defining_ty {
+                    let closure_kind_ty = substs.closure_kind_ty(def_id, infcx.tcx);
+                    return Some(ty::ClosureKind::FnMut) == closure_kind_ty.to_opt_closure_kind();
+                }
+            }
+        }
+
+        false
     }
 }

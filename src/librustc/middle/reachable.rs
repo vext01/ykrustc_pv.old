@@ -352,7 +352,7 @@ impl<'a, 'tcx: 'a> ItemLikeVisitor<'tcx> for CollectPrivateImplItemsVisitor<'a, 
         // which are currently akin to allocator symbols.
         let def_id = self.tcx.hir.local_def_id(item.id);
         let codegen_attrs = self.tcx.codegen_fn_attrs(def_id);
-        if codegen_attrs.linkage.is_some() ||
+        if codegen_attrs.contains_extern_indicator() ||
             codegen_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL) {
             self.worklist.push(item.id);
         }
@@ -371,7 +371,9 @@ impl<'a, 'tcx: 'a> ItemLikeVisitor<'tcx> for CollectPrivateImplItemsVisitor<'a, 
                     return
                 }
 
-                for default_method in self.tcx.provided_trait_methods(trait_def_id) {
+                let provided_trait_methods = self.tcx.provided_trait_methods(trait_def_id);
+                self.worklist.reserve(provided_trait_methods.len());
+                for default_method in provided_trait_methods {
                     let node_id = self.tcx
                                       .hir
                                       .as_local_node_id(default_method.def_id)
@@ -393,7 +395,6 @@ impl<'a, 'tcx: 'a> ItemLikeVisitor<'tcx> for CollectPrivateImplItemsVisitor<'a, 
 // implementation for it.
 #[derive(Clone)]
 pub struct ReachableSet(pub Lrc<NodeSet>);
-
 
 fn reachable_set<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, crate_num: CrateNum) -> ReachableSet {
     debug_assert!(crate_num == LOCAL_CRATE);
@@ -443,7 +444,7 @@ fn reachable_set<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, crate_num: CrateNum) -> 
     ReachableSet(Lrc::new(reachable_context.reachable_symbols))
 }
 
-pub fn provide(providers: &mut Providers) {
+pub fn provide(providers: &mut Providers<'_>) {
     *providers = Providers {
         reachable_set,
         ..*providers

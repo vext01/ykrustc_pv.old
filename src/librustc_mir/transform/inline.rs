@@ -14,12 +14,12 @@ use rustc::hir;
 use rustc::hir::CodegenFnAttrFlags;
 use rustc::hir::def_id::DefId;
 
-use rustc_data_structures::bitvec::BitArray;
+use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 
 use rustc::mir::*;
 use rustc::mir::visit::*;
-use rustc::ty::{self, Instance, Ty, TyCtxt};
+use rustc::ty::{self, Instance, InstanceDef, Ty, TyCtxt};
 use rustc::ty::subst::{Subst,Substs};
 
 use std::collections::VecDeque;
@@ -94,18 +94,27 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
                 // Only consider direct calls to functions
                 let terminator = bb_data.terminator();
                 if let TerminatorKind::Call {
-                    func: Operand::Constant(ref f), .. } = terminator.kind {
-                        if let ty::FnDef(callee_def_id, substs) = f.ty.sty {
+                    func: ref op, .. } = terminator.kind {
+                        if let ty::FnDef(callee_def_id, substs) = op.ty(caller_mir, self.tcx).sty {
                             if let Some(instance) = Instance::resolve(self.tcx,
                                                                       param_env,
                                                                       callee_def_id,
                                                                       substs) {
-                                callsites.push_back(CallSite {
-                                    callee: instance.def_id(),
-                                    substs: instance.substs,
-                                    bb,
-                                    location: terminator.source_info
-                                });
+                                let is_virtual =
+                                    if let InstanceDef::Virtual(..) = instance.def {
+                                        true
+                                    } else {
+                                        false
+                                    };
+
+                                if !is_virtual {
+                                    callsites.push_back(CallSite {
+                                        callee: instance.def_id(),
+                                        substs: instance.substs,
+                                        bb,
+                                        location: terminator.source_info
+                                    });
+                                }
                             }
                         }
                     }
@@ -271,7 +280,7 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
         // Traverse the MIR manually so we can account for the effects of
         // inlining on the CFG.
         let mut work_list = vec![START_BLOCK];
-        let mut visited = BitArray::new(callee_mir.basic_blocks().len());
+        let mut visited = BitSet::new_empty(callee_mir.basic_blocks().len());
         while let Some(bb) = work_list.pop() {
             if !visited.insert(bb.index()) { continue; }
             let blk = &callee_mir.basic_blocks()[bb];
@@ -447,7 +456,7 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
 
                     let stmt = Statement {
                         source_info: callsite.location,
-                        kind: StatementKind::Assign(tmp.clone(), dest)
+                        kind: StatementKind::Assign(tmp.clone(), box dest)
                     };
                     caller_mir[callsite.bb]
                         .statements.push(stmt);
@@ -594,7 +603,7 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
 
         let stmt = Statement {
             source_info: callsite.location,
-            kind: StatementKind::Assign(Place::Local(arg_tmp), arg),
+            kind: StatementKind::Assign(Place::Local(arg_tmp), box arg),
         };
         caller_mir[callsite.bb].statements.push(stmt);
         arg_tmp

@@ -16,8 +16,7 @@
 #![feature(rustc_private)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![cfg_attr(not(stage0), feature(nll))]
-#![cfg_attr(not(stage0), feature(infer_outlives_requirements))]
+#![feature(nll)]
 #![feature(set_stdio)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(test)]
@@ -25,6 +24,7 @@
 #![feature(ptr_offset_from)]
 #![feature(crate_visibility_modifier)]
 #![feature(const_fn)]
+#![feature(drain_filter)]
 
 #![recursion_limit="256"]
 
@@ -49,6 +49,7 @@ extern crate rustc_errors as errors;
 extern crate pulldown_cmark;
 extern crate tempfile;
 extern crate minifier;
+extern crate parking_lot;
 
 extern crate serialize as rustc_serialize; // used by deriving
 
@@ -405,8 +406,14 @@ fn main_args(args: &[String]) -> isize {
                                   `short` (instead was `{}`)", arg));
         }
     };
+    let treat_err_as_bug = matches.opt_strs("Z").iter().any(|x| {
+        *x == "treat-err-as-bug"
+    });
+    let ui_testing = matches.opt_strs("Z").iter().any(|x| {
+        *x == "ui-testing"
+    });
 
-    let diag = core::new_handler(error_format, None);
+    let diag = core::new_handler(error_format, None, treat_err_as_bug, ui_testing);
 
     // check for deprecated options
     check_deprecated_options(&matches, &diag);
@@ -561,7 +568,7 @@ fn main_args(args: &[String]) -> isize {
     let res = acquire_input(PathBuf::from(input), externs, edition, cg, &matches, error_format,
                             move |out| {
         let Output { krate, passes, renderinfo } = out;
-        let diag = core::new_handler(error_format, None);
+        let diag = core::new_handler(error_format, None, treat_err_as_bug, ui_testing);
         info!("going to format");
         match output_format.as_ref().map(|s| &**s) {
             Some("html") | None => {
@@ -610,16 +617,19 @@ where R: 'static + Send, F: 'static + Send + FnOnce(Output) -> R {
 /// Extracts `--extern CRATE=PATH` arguments from `matches` and
 /// returns a map mapping crate names to their paths or else an
 /// error message.
+// FIXME(eddyb) This shouldn't be duplicated with `rustc::session`.
 fn parse_externs(matches: &getopts::Matches) -> Result<Externs, String> {
     let mut externs: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
     for arg in &matches.opt_strs("extern") {
         let mut parts = arg.splitn(2, '=');
         let name = parts.next().ok_or("--extern value must not be empty".to_string())?;
-        let location = parts.next()
-                                 .ok_or("--extern value must be of the format `foo=bar`"
-                                    .to_string())?;
+        let location = parts.next().map(|s| s.to_string());
+        if location.is_none() && !nightly_options::is_unstable_enabled(matches) {
+            return Err("the `-Z unstable-options` flag must also be passed to \
+                        enable `--extern crate_name` without `=path`".to_string());
+        }
         let name = name.to_string();
-        externs.entry(name).or_default().insert(location.to_string());
+        externs.entry(name).or_default().insert(location);
     }
     Ok(Externs::new(externs))
 }
@@ -692,6 +702,12 @@ where R: 'static + Send,
     let force_unstable_if_unmarked = matches.opt_strs("Z").iter().any(|x| {
         *x == "force-unstable-if-unmarked"
     });
+    let treat_err_as_bug = matches.opt_strs("Z").iter().any(|x| {
+        *x == "treat-err-as-bug"
+    });
+    let ui_testing = matches.opt_strs("Z").iter().any(|x| {
+        *x == "ui-testing"
+    });
 
     let (lint_opts, describe_lints, lint_cap) = get_cmd_lint_options(matches, error_format);
 
@@ -704,7 +720,8 @@ where R: 'static + Send,
             core::run_core(paths, cfgs, externs, Input::File(cratefile), triple, maybe_sysroot,
                            display_warnings, crate_name.clone(),
                            force_unstable_if_unmarked, edition, cg, error_format,
-                           lint_opts, lint_cap, describe_lints, manual_passes, default_passes);
+                           lint_opts, lint_cap, describe_lints, manual_passes, default_passes,
+                           treat_err_as_bug, ui_testing);
 
         info!("finished with rustc");
 

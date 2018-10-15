@@ -49,14 +49,15 @@ use util::nodemap::{DefIdSet, DefIdMap, ItemLocalSet};
 use util::common::{ErrorReported};
 use util::profiling::ProfileCategory::*;
 
-use rustc_data_structures::indexed_set::IdxSet;
-use rustc_target::spec::PanicStrategy;
+use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::indexed_vec::IndexVec;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::stable_hasher::StableVec;
-
-use std::ops::Deref;
 use rustc_data_structures::sync::Lrc;
+use rustc_target::spec::PanicStrategy;
+
+use std::borrow::Cow;
+use std::ops::Deref;
 use std::sync::Arc;
 use syntax_pos::{Span, DUMMY_SP};
 use syntax_pos::symbol::InternedString;
@@ -160,8 +161,23 @@ define_queries! { <'tcx>
             DefId
         ) -> Result<DtorckConstraint<'tcx>, NoSolution>,
 
-        /// True if this is a const fn
-        [] fn is_const_fn: IsConstFn(DefId) -> bool,
+        /// True if this is a const fn, use the `is_const_fn` to know whether your crate actually
+        /// sees it as const fn (e.g. the const-fn-ness might be unstable and you might not have
+        /// the feature gate active)
+        ///
+        /// DO NOT CALL MANUALLY, it is only meant to cache the base data for the `is_const_fn`
+        /// function
+        [] fn is_const_fn_raw: IsConstFn(DefId) -> bool,
+
+
+        /// Returns true if calls to the function may be promoted
+        ///
+        /// This is either because the function is e.g. a tuple-struct or tuple-variant constructor,
+        /// or because it has the `#[rustc_promotable]` attribute. The attribute should be removed
+        /// in the future in favour of some form of check which figures out whether the function
+        /// does not inspect the bits of any of its arguments (so is essentially just a constructor
+        /// function)
+        [] fn is_promotable_const_fn: IsPromotableConstFn(DefId) -> bool,
 
         /// True if this is a foreign item (i.e., linked via `extern { ... }`).
         [] fn is_foreign_item: IsForeignItem(DefId) -> bool,
@@ -208,7 +224,7 @@ define_queries! { <'tcx>
         /// Maps DefId's that have an associated Mir to the result
         /// of the MIR qualify_consts pass. The actual meaning of
         /// the value isn't known except to the pass itself.
-        [] fn mir_const_qualif: MirConstQualif(DefId) -> (u8, Lrc<IdxSet<mir::Local>>),
+        [] fn mir_const_qualif: MirConstQualif(DefId) -> (u8, Lrc<BitSet<mir::Local>>),
 
         /// Fetch the MIR for a given def-id right after it's built - this includes
         /// unreachable code.
@@ -666,21 +682,21 @@ impl<'a, 'tcx, 'lcx> TyCtxt<'a, 'tcx, 'lcx> {
         span: Span,
         key: DefId,
     ) -> Result<&'tcx [Ty<'tcx>], DiagnosticBuilder<'a>> {
-        self.try_get_query::<queries::adt_sized_constraint>(span, key)
+        self.try_get_query::<queries::adt_sized_constraint<'_>>(span, key)
     }
     pub fn try_needs_drop_raw(
         self,
         span: Span,
         key: ty::ParamEnvAnd<'tcx, Ty<'tcx>>,
     ) -> Result<bool, DiagnosticBuilder<'a>> {
-        self.try_get_query::<queries::needs_drop_raw>(span, key)
+        self.try_get_query::<queries::needs_drop_raw<'_>>(span, key)
     }
     pub fn try_optimized_mir(
         self,
         span: Span,
         key: DefId,
     ) -> Result<&'tcx mir::Mir<'tcx>, DiagnosticBuilder<'a>> {
-        self.try_get_query::<queries::optimized_mir>(span, key)
+        self.try_get_query::<queries::optimized_mir<'_>>(span, key)
     }
 }
 

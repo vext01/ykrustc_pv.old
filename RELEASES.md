@@ -1,3 +1,24 @@
+Version 1.29.2 (2018-10-11)
+===========================
+
+- [Workaround for an aliasing-related LLVM bug, which caused miscompilation.][54639]
+- The `rls-preview` component on the windows-gnu targets has been restored.
+
+[54639]: https://github.com/rust-lang/rust/pull/54639
+
+Version 1.29.1 (2018-09-25)
+===========================
+
+Security Notes
+--------------
+
+- The standard library's `str::repeat` function contained an out of bounds write
+  caused by an integer overflow. This has been fixed by deterministically
+  panicking when an overflow happens.
+
+  Thank you to Scott McMurray for responsibily disclosing this vulnerability to
+  us.
+
 Version 1.29.0 (2018-09-13)
 ==========================
 
@@ -31,6 +52,8 @@ Cargo
   using `--target`][cargo/5614]
 - [Added the `cargo-fix` subcommand to automatically move project code from
   2015 edition to 2018.][cargo/5723]
+- [`cargo doc` can now optionally document private types using the
+  `--document-private-items` flag.][cargo/5543]
 
 Misc
 ----
@@ -68,6 +91,7 @@ Compatibility Notes
 [51178]: https://github.com/rust-lang/rust/pull/51178/
 [51122]: https://github.com/rust-lang/rust/pull/51122
 [50494]: https://github.com/rust-lang/rust/pull/50494/
+[cargo/5543]: https://github.com/rust-lang/cargo/pull/5543
 [cargo/5614]: https://github.com/rust-lang/cargo/pull/5614/
 [cargo/5723]: https://github.com/rust-lang/cargo/pull/5723/
 [cargo/5831]: https://github.com/rust-lang/cargo/pull/5831/
@@ -370,6 +394,8 @@ Compatibility Notes
 - [The maximum number for `repr(align(N))` is now 2²⁹.][50378] Previously you
   could enter higher numbers but they were not supported by LLVM. Up to 512MB
   alignment should cover all use cases.
+- The `.description()` method on the `std::error::Error` trait
+  [has been soft-deprecated][50163]. It is no longer required to implement it.
 
 [48553]: https://github.com/rust-lang/rust/pull/48553/
 [48851]: https://github.com/rust-lang/rust/pull/48851/
@@ -383,6 +409,7 @@ Compatibility Notes
 [49719]: https://github.com/rust-lang/rust/pull/49719/
 [49896]: https://github.com/rust-lang/rust/pull/49896/
 [49968]: https://github.com/rust-lang/rust/pull/49968/
+[50163]: https://github.com/rust-lang/rust/pull/50163
 [50177]: https://github.com/rust-lang/rust/pull/50177/
 [50378]: https://github.com/rust-lang/rust/pull/50378/
 [50398]: https://github.com/rust-lang/rust/pull/50398/

@@ -11,6 +11,7 @@
 pub use self::code_stats::{DataTypeKind, SizeKind, FieldInfo, VariantInfo};
 use self::code_stats::CodeStats;
 
+use dep_graph::cgu_reuse_tracker::CguReuseTracker;
 use hir::def_id::CrateNum;
 use rustc_data_structures::fingerprint::Fingerprint;
 
@@ -28,21 +29,19 @@ use data_section::DataSectionObject;
 use rustc_data_structures::base_n;
 use rustc_data_structures::sync::{self, Lrc, Lock, LockCell, OneThread, Once, RwLock};
 
-use syntax::ast::NodeId;
-use errors::{self, DiagnosticBuilder, DiagnosticId};
+use errors::{self, DiagnosticBuilder, DiagnosticId, Applicability};
 use errors::emitter::{Emitter, EmitterWriter};
+use syntax::ast::{self, NodeId};
 use syntax::edition::Edition;
+use syntax::feature_gate::{self, AttributeType};
 use syntax::json::JsonEmitter;
-use syntax::feature_gate;
-use syntax::parse;
-use syntax::parse::ParseSess;
-use syntax::{ast, source_map};
-use syntax::feature_gate::AttributeType;
+use syntax::source_map;
+use syntax::symbol::Symbol;
+use syntax::parse::{self, ParseSess};
 use syntax_pos::{MultiSpan, Span};
 use util::profiling::SelfProfiler;
 
-use rustc_target::spec::PanicStrategy;
-use rustc_target::spec::{Target, TargetTriple};
+use rustc_target::spec::{PanicStrategy, RelroLevel, Target, TargetTriple};
 use rustc_data_structures::flock;
 use jobserver::Client;
 
@@ -125,6 +124,9 @@ pub struct Session {
     pub imported_macro_spans: OneThread<RefCell<FxHashMap<Span, (String, Span)>>>,
 
     incr_comp_session: OneThread<RefCell<IncrCompSession>>,
+    /// Used for incremental compilation tests. Will only be populated if
+    /// `-Zquery-dep-graph` is specified.
+    pub cgu_reuse_tracker: CguReuseTracker,
 
     /// Used by -Z profile-queries in util::common
     pub profile_channel: Lock<Option<mpsc::Sender<ProfileQueriesMsg>>>,
@@ -168,6 +170,10 @@ pub struct Session {
 
     /// A list of additional objects to link in for Yorick support.
     pub yk_link_objects: RefCell<Vec<DataSectionObject>>,
+
+    /// All the crate names specified with `--extern`, and the builtin ones.
+    /// Starting with the Rust 2018 edition, absolute paths resolve in this set.
+    pub extern_prelude: FxHashSet<Symbol>,
 }
 
 pub struct PerfStats {
@@ -435,8 +441,13 @@ impl Session {
                     diag_builder.span_note(span, message);
                 }
                 DiagnosticBuilderMethod::SpanSuggestion(suggestion) => {
-                    let span = span_maybe.expect("span_suggestion needs a span");
-                    diag_builder.span_suggestion(span, message, suggestion);
+                    let span = span_maybe.expect("span_suggestion_* needs a span");
+                    diag_builder.span_suggestion_with_applicability(
+                        span,
+                        message,
+                        suggestion,
+                        Applicability::Unspecified,
+                    );
                 }
             }
         }
@@ -554,9 +565,27 @@ impl Session {
         // lto` and we've for whatever reason forced off ThinLTO via the CLI,
         // then ensure we can't use a ThinLTO.
         match self.opts.cg.lto {
-            config::Lto::No => {}
-            config::Lto::Yes if self.opts.cli_forced_thinlto_off => return config::Lto::Fat,
-            other => return other,
+            config::LtoCli::Unspecified => {
+                // The compiler was invoked without the `-Clto` flag. Fall
+                // through to the default handling
+            }
+            config::LtoCli::No => {
+                // The user explicitly opted out of any kind of LTO
+                return config::Lto::No;
+            }
+            config::LtoCli::Yes |
+            config::LtoCli::Fat |
+            config::LtoCli::NoParam => {
+                // All of these mean fat LTO
+                return config::Lto::Fat;
+            }
+            config::LtoCli::Thin => {
+                return if self.opts.cli_forced_thinlto_off {
+                    config::Lto::Fat
+                } else {
+                    config::Lto::Thin
+                };
+            }
         }
 
         // Ok at this point the target doesn't require anything and the user
@@ -682,7 +711,7 @@ impl Session {
                 .expect("missing sysroot and default_sysroot in Session"),
         }
     }
-    pub fn target_filesearch(&self, kind: PathKind) -> filesearch::FileSearch {
+    pub fn target_filesearch(&self, kind: PathKind) -> filesearch::FileSearch<'_> {
         filesearch::FileSearch::new(
             self.sysroot(),
             self.opts.target_triple.triple(),
@@ -690,7 +719,7 @@ impl Session {
             kind,
         )
     }
-    pub fn host_filesearch(&self, kind: PathKind) -> filesearch::FileSearch {
+    pub fn host_filesearch(&self, kind: PathKind) -> filesearch::FileSearch<'_> {
         filesearch::FileSearch::new(
             self.sysroot(),
             config::host_triple(),
@@ -780,7 +809,7 @@ impl Session {
         *incr_comp_session = IncrCompSession::InvalidBecauseOfErrors { session_directory };
     }
 
-    pub fn incr_comp_session_dir(&self) -> cell::Ref<PathBuf> {
+    pub fn incr_comp_session_dir(&self) -> cell::Ref<'_, PathBuf> {
         let incr_comp_session = self.incr_comp_session.borrow();
         cell::Ref::map(
             incr_comp_session,
@@ -803,7 +832,7 @@ impl Session {
         )
     }
 
-    pub fn incr_comp_session_dir_opt(&self) -> Option<cell::Ref<PathBuf>> {
+    pub fn incr_comp_session_dir_opt(&self) -> Option<cell::Ref<'_, PathBuf>> {
         if self.opts.incremental.is_some() {
             Some(self.incr_comp_session_dir())
         } else {
@@ -958,6 +987,27 @@ impl Session {
     pub fn edition(&self) -> Edition {
         self.opts.edition
     }
+
+    /// True if we cannot skip the PLT for shared library calls.
+    pub fn needs_plt(&self) -> bool {
+        // Check if the current target usually needs PLT to be enabled.
+        // The user can use the command line flag to override it.
+        let needs_plt = self.target.target.options.needs_plt;
+
+        let dbg_opts = &self.opts.debugging_opts;
+
+        let relro_level = dbg_opts.relro_level
+            .unwrap_or(self.target.target.options.relro_level);
+
+        // Only enable this optimization by default if full relro is also enabled.
+        // In this case, lazy binding was already unavailable, so nothing is lost.
+        // This also ensures `-Wl,-z,now` is supported by the linker.
+        let full_relro = RelroLevel::Full == relro_level;
+
+        // If user didn't explicitly forced us to use / skip the PLT,
+        // then try to skip it where possible.
+        dbg_opts.plt.unwrap_or(needs_plt || !full_relro)
+    }
 }
 
 pub fn build_session(
@@ -998,6 +1048,7 @@ pub fn build_session_with_source_map(
     let can_emit_warnings = !(warnings_allow || cap_lints_allow);
 
     let treat_err_as_bug = sopts.debugging_opts.treat_err_as_bug;
+    let dont_buffer_diagnostics = sopts.debugging_opts.dont_buffer_diagnostics;
     let report_delayed_bugs = sopts.debugging_opts.report_delayed_bugs;
 
     let external_macro_backtrace = sopts.debugging_opts.external_macro_backtrace;
@@ -1045,6 +1096,7 @@ pub fn build_session_with_source_map(
             can_emit_warnings,
             treat_err_as_bug,
             report_delayed_bugs,
+            dont_buffer_diagnostics,
             external_macro_backtrace,
             ..Default::default()
         },
@@ -1095,6 +1147,24 @@ pub fn build_session_(
     };
     let working_dir = file_path_mapping.map_prefix(working_dir);
 
+    let cgu_reuse_tracker = if sopts.debugging_opts.query_dep_graph {
+        CguReuseTracker::new()
+    } else {
+        CguReuseTracker::new_disabled()
+    };
+
+
+    let mut extern_prelude: FxHashSet<Symbol> =
+        sopts.externs.iter().map(|kv| Symbol::intern(kv.0)).collect();
+
+    // HACK(eddyb) this ignores the `no_{core,std}` attributes.
+    // FIXME(eddyb) warn (somewhere) if core/std is used with `no_{core,std}`.
+    // if !attr::contains_name(&krate.attrs, "no_core") {
+    // if !attr::contains_name(&krate.attrs, "no_std") {
+    extern_prelude.insert(Symbol::intern("core"));
+    extern_prelude.insert(Symbol::intern("std"));
+    extern_prelude.insert(Symbol::intern("meta"));
+
     let sess = Session {
         target: target_cfg,
         host,
@@ -1125,6 +1195,7 @@ pub fn build_session_(
         injected_panic_runtime: Once::new(),
         imported_macro_spans: OneThread::new(RefCell::new(FxHashMap::default())),
         incr_comp_session: OneThread::new(RefCell::new(IncrCompSession::NotInitialized)),
+        cgu_reuse_tracker,
         self_profiling: Lock::new(SelfProfiler::new()),
         profile_channel: Lock::new(None),
         perf_stats: PerfStats {
@@ -1170,6 +1241,7 @@ pub fn build_session_(
         has_panic_handler: Once::new(),
         driver_lint_caps: FxHashMap(),
         yk_link_objects: RefCell::new(Vec::new()),
+        extern_prelude,
     };
 
     validate_commandline_args_with_session_available(&sess);
@@ -1183,7 +1255,6 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
 
     if sess.opts.incremental.is_some() {
         match sess.lto() {
-            Lto::Yes |
             Lto::Thin |
             Lto::Fat => {
                 sess.err("can't perform LTO when compiling incrementally");
@@ -1223,7 +1294,7 @@ impl CrateDisambiguator {
 }
 
 impl fmt::Display for CrateDisambiguator {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         let (a, b) = self.0.as_value();
         let as_u128 = a as u128 | ((b as u128) << 64);
         f.write_str(&base_n::encode(as_u128, base_n::CASE_INSENSITIVE))

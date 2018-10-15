@@ -25,11 +25,11 @@ use super::{
 };
 
 
-fn numeric_intrinsic<'tcx>(
+fn numeric_intrinsic<'tcx, Tag>(
     name: &str,
     bits: u128,
     kind: Primitive,
-) -> EvalResult<'tcx, Scalar> {
+) -> EvalResult<'tcx, Scalar<Tag>> {
     let size = match kind {
         Primitive::Int(integer, _) => integer.size(),
         _ => bug!("invalid `{}` argument: {:?}", name, bits),
@@ -46,13 +46,13 @@ fn numeric_intrinsic<'tcx>(
     Ok(Scalar::from_uint(bits_out, size))
 }
 
-impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
+impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
     /// Returns whether emulation happened.
     pub fn emulate_intrinsic(
         &mut self,
         instance: ty::Instance<'tcx>,
-        args: &[OpTy<'tcx>],
-        dest: PlaceTy<'tcx>,
+        args: &[OpTy<'tcx, M::PointerTag>],
+        dest: PlaceTy<'tcx, M::PointerTag>,
     ) -> EvalResult<'tcx, bool> {
         let substs = instance.substs;
 
@@ -63,6 +63,13 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
                 let elem_align = self.layout_of(elem_ty)?.align.abi();
                 let align_val = Scalar::from_uint(elem_align, dest.layout.size);
                 self.write_scalar(align_val, dest)?;
+            }
+
+            "needs_drop" => {
+                let ty = substs.type_at(0);
+                let ty_needs_drop = ty.needs_drop(self.tcx.tcx, self.param_env);
+                let val = Scalar::from_bool(ty_needs_drop);
+                self.write_scalar(val, dest)?;
             }
 
             "size_of" => {
@@ -144,11 +151,7 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
                 self.write_scalar(val, dest)?;
             }
             "transmute" => {
-                // Go through an allocation, to make sure the completely different layouts
-                // do not pose a problem.  (When the user transmutes through a union,
-                // there will not be a layout mismatch.)
-                let dest = self.force_allocation(dest)?;
-                self.copy_op(args[0], dest.into())?;
+                self.copy_op_transmute(args[0], dest)?;
             }
 
             _ => return Ok(false),
@@ -162,8 +165,8 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
     pub fn hook_fn(
         &mut self,
         instance: ty::Instance<'tcx>,
-        args: &[OpTy<'tcx>],
-        dest: Option<PlaceTy<'tcx>>,
+        args: &[OpTy<'tcx, M::PointerTag>],
+        dest: Option<PlaceTy<'tcx, M::PointerTag>>,
     ) -> EvalResult<'tcx, bool> {
         let def_id = instance.def_id();
         // Some fn calls are actually BinOp intrinsics

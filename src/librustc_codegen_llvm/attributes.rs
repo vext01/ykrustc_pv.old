@@ -16,6 +16,7 @@ use rustc::hir::def_id::{DefId, LOCAL_CRATE};
 use rustc::session::Session;
 use rustc::session::config::Sanitizer;
 use rustc::ty::TyCtxt;
+use rustc::ty::layout::HasTyCtxt;
 use rustc::ty::query::Providers;
 use rustc_data_structures::sync::Lrc;
 use rustc_data_structures::fx::FxHashMap;
@@ -32,12 +33,16 @@ use value::Value;
 
 /// Mark LLVM function to use provided inline heuristic.
 #[inline]
-pub fn inline(val: &'ll Value, inline: InlineAttr) {
+pub fn inline(cx: &CodegenCx<'ll, '_>, val: &'ll Value, inline: InlineAttr) {
     use self::InlineAttr::*;
     match inline {
         Hint   => Attribute::InlineHint.apply_llfn(Function, val),
         Always => Attribute::AlwaysInline.apply_llfn(Function, val),
-        Never  => Attribute::NoInline.apply_llfn(Function, val),
+        Never  => {
+            if cx.tcx().sess.target.target.arch != "amdgpu" {
+                Attribute::NoInline.apply_llfn(Function, val);
+            }
+        },
         None   => {
             Attribute::InlineHint.unapply_llfn(Function, val);
             Attribute::AlwaysInline.unapply_llfn(Function, val);
@@ -89,9 +94,8 @@ pub fn set_probestack(cx: &CodegenCx<'ll, '_>, llfn: &'ll Value) {
     // Currently stack probes seem somewhat incompatible with the address
     // sanitizer. With asan we're already protected from stack overflow anyway
     // so we don't really need stack probes regardless.
-    match cx.sess().opts.debugging_opts.sanitizer {
-        Some(Sanitizer::Address) => return,
-        _ => {}
+    if let Some(Sanitizer::Address) = cx.sess().opts.debugging_opts.sanitizer {
+        return
     }
 
     // probestack doesn't play nice either with pgo-gen.
@@ -133,6 +137,15 @@ pub fn apply_target_cpu_attr(cx: &CodegenCx<'ll, '_>, llfn: &'ll Value) {
             target_cpu.as_c_str());
 }
 
+/// Sets the `NonLazyBind` LLVM attribute on a given function,
+/// assuming the codegen options allow skipping the PLT.
+pub fn non_lazy_bind(sess: &Session, llfn: &'ll Value) {
+    // Don't generate calls through PLT if it's not necessary
+    if !sess.needs_plt() {
+        Attribute::NonLazyBind.apply_llfn(Function, llfn);
+    }
+}
+
 /// Composite function which sets LLVM attributes for function depending on its AST (#[attribute])
 /// attributes.
 pub fn from_fn_attrs(
@@ -143,7 +156,7 @@ pub fn from_fn_attrs(
     let codegen_fn_attrs = id.map(|id| cx.tcx.codegen_fn_attrs(id))
         .unwrap_or(CodegenFnAttrs::new());
 
-    inline(llfn, codegen_fn_attrs.inline);
+    inline(cx, llfn, codegen_fn_attrs.inline);
 
     // The `uwtable` attribute according to LLVM is:
     //
@@ -275,12 +288,14 @@ pub fn provide_extern(providers: &mut Providers) {
         // `NativeLibrary` internally contains information about
         // `#[link(wasm_import_module = "...")]` for example.
         let native_libs = tcx.native_libraries(cnum);
-        let mut def_id_to_native_lib = FxHashMap();
-        for lib in native_libs.iter() {
+
+        let def_id_to_native_lib = native_libs.iter().filter_map(|lib|
             if let Some(id) = lib.foreign_module {
-                def_id_to_native_lib.insert(id, lib);
+                Some((id, lib))
+            } else {
+                None
             }
-        }
+        ).collect::<FxHashMap<_, _>>();
 
         let mut ret = FxHashMap();
         for lib in tcx.foreign_modules(cnum).iter() {
@@ -291,10 +306,10 @@ pub fn provide_extern(providers: &mut Providers) {
                 Some(s) => s,
                 None => continue,
             };
-            for id in lib.foreign_items.iter() {
+            ret.extend(lib.foreign_items.iter().map(|id| {
                 assert_eq!(id.krate, cnum);
-                ret.insert(*id, module.to_string());
-            }
+                (*id, module.to_string())
+            }));
         }
 
         Lrc::new(ret)

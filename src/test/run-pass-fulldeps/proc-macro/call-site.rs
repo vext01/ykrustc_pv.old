@@ -8,10 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused_variables)]
+#![allow(unused_imports)]
 // aux-build:call-site.rs
 // ignore-stage1
 
-#![feature(proc_macro_non_items)]
+#![feature(proc_macro_hygiene)]
 
 extern crate call_site;
 use call_site::*;

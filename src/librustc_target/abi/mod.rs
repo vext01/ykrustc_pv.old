@@ -802,6 +802,14 @@ impl Abi {
             _ => false,
         }
     }
+
+    /// Returns true if this is an uninhabited type
+    pub fn is_uninhabited(&self) -> bool {
+        match *self {
+            Abi::Uninhabited => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Hash, Debug)]
@@ -866,7 +874,7 @@ impl LayoutDetails {
 /// to those obtained from `layout_of(ty)`, as we need to produce
 /// layouts for which Rust types do not exist, such as enum variants
 /// or synthetic fields of enums (i.e. discriminants) and fat pointers.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TyLayout<'a, Ty> {
     pub ty: Ty,
     pub details: &'a LayoutDetails

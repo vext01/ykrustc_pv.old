@@ -42,7 +42,7 @@ const TAG_MASK: usize = 0b11;
 const TYPE_TAG: usize = 0b00;
 const REGION_TAG: usize = 0b01;
 
-#[derive(Debug, RustcEncodable, RustcDecodable)]
+#[derive(Debug, RustcEncodable, RustcDecodable, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UnpackedKind<'tcx> {
     Lifetime(ty::Region<'tcx>),
     Type(Ty<'tcx>),
@@ -73,23 +73,13 @@ impl<'tcx> UnpackedKind<'tcx> {
 }
 
 impl<'tcx> Ord for Kind<'tcx> {
-    fn cmp(&self, other: &Kind) -> Ordering {
-        match (self.unpack(), other.unpack()) {
-            (UnpackedKind::Type(_), UnpackedKind::Lifetime(_)) => Ordering::Greater,
-
-            (UnpackedKind::Type(ty1), UnpackedKind::Type(ty2)) => {
-                ty1.sty.cmp(&ty2.sty)
-            }
-
-            (UnpackedKind::Lifetime(reg1), UnpackedKind::Lifetime(reg2)) => reg1.cmp(reg2),
-
-            (UnpackedKind::Lifetime(_), UnpackedKind::Type(_))  => Ordering::Less,
-        }
+    fn cmp(&self, other: &Kind<'_>) -> Ordering {
+        self.unpack().cmp(&other.unpack())
     }
 }
 
 impl<'tcx> PartialOrd for Kind<'tcx> {
-    fn partial_cmp(&self, other: &Kind) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Kind<'_>) -> Option<Ordering> {
         Some(self.cmp(&other))
     }
 }
@@ -121,7 +111,7 @@ impl<'tcx> Kind<'tcx> {
 }
 
 impl<'tcx> fmt::Debug for Kind<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.unpack() {
             UnpackedKind::Lifetime(lt) => write!(f, "{:?}", lt),
             UnpackedKind::Type(ty) => write!(f, "{:?}", ty),
@@ -130,7 +120,7 @@ impl<'tcx> fmt::Debug for Kind<'tcx> {
 }
 
 impl<'tcx> fmt::Display for Kind<'tcx> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.unpack() {
             UnpackedKind::Lifetime(lt) => write!(f, "{}", lt),
             UnpackedKind::Type(ty) => write!(f, "{}", ty),
@@ -215,10 +205,9 @@ impl<'a, 'gcx, 'tcx> Substs<'tcx> {
     where F: FnMut(&ty::GenericParamDef, &[Kind<'tcx>]) -> Kind<'tcx>
     {
         Substs::for_item(tcx, def_id, |param, substs| {
-            match self.get(param.index as usize) {
-                Some(&kind) => kind,
-                None => mk_kind(param, substs),
-            }
+            self.get(param.index as usize)
+                .cloned()
+                .unwrap_or_else(|| mk_kind(param, substs))
         })
     }
 
@@ -240,6 +229,7 @@ impl<'a, 'gcx, 'tcx> Substs<'tcx> {
                       mk_kind: &mut F)
     where F: FnMut(&ty::GenericParamDef, &[Kind<'tcx>]) -> Kind<'tcx>
     {
+        substs.reserve(defs.params.len());
         for param in &defs.params {
             let kind = mk_kind(param, substs);
             assert_eq!(param.index as usize, substs.len());
@@ -371,7 +361,7 @@ impl<'tcx> serialize::UseSpecializedDecodable for &'tcx Substs<'tcx> {}
 
 pub trait Subst<'tcx> : Sized {
     fn subst<'a, 'gcx>(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                      substs: &[Kind<'tcx>]) -> Self {
+                       substs: &[Kind<'tcx>]) -> Self {
         self.subst_spanned(tcx, substs, None)
     }
 
@@ -499,7 +489,7 @@ impl<'a, 'gcx, 'tcx> SubstFolder<'a, 'gcx, 'tcx> {
                 span_bug!(
                     span,
                     "Type parameter `{:?}` ({:?}/{}) out of range \
-                         when substituting (root type={:?}) substs={:?}",
+                     when substituting (root type={:?}) substs={:?}",
                     p,
                     source_ty,
                     p.idx,

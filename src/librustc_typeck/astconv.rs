@@ -30,7 +30,7 @@ use std::slice;
 use require_c_abi_if_variadic;
 use util::common::ErrorReported;
 use util::nodemap::FxHashMap;
-use errors::{FatalError, DiagnosticId};
+use errors::{Applicability, FatalError, DiagnosticId};
 use lint;
 
 use std::iter;
@@ -147,7 +147,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                     bound_region: ty::BrNamed(id, name)
                 }))
 
-                    // (*) -- not late-bound, won't change
+                // (*) -- not late-bound, won't change
             }
 
             None => {
@@ -167,8 +167,8 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         };
 
         debug!("ast_region_to_region(lifetime={:?}) yields {:?}",
-                lifetime,
-                r);
+               lifetime,
+               r);
 
         r
     }
@@ -218,7 +218,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                 span,
                 E0632,
                 "cannot provide explicit type parameters when `impl Trait` is \
-                used in argument position."
+                 used in argument position."
             };
 
             err.emit();
@@ -402,21 +402,44 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
     }
 
     /// Creates the relevant generic argument substitutions
-    /// corresponding to a set of generic parameters.
-    pub fn create_substs_for_generic_args<'a, 'b, A, P, I>(
+    /// corresponding to a set of generic parameters. This is a
+    /// rather complex little function. Let me try to explain the
+    /// role of each of its parameters:
+    ///
+    /// To start, we are given the `def_id` of the thing we are
+    /// creating the substitutions for, and a partial set of
+    /// substitutions `parent_substs`. In general, the substitutions
+    /// for an item begin with substitutions for all the "parents" of
+    /// that item -- so e.g. for a method it might include the
+    /// parameters from the impl.
+    ///
+    /// Therefore, the method begins by walking down these parents,
+    /// starting with the outermost parent and proceed inwards until
+    /// it reaches `def_id`. For each parent P, it will check `parent_substs`
+    /// first to see if the parent's substitutions are listed in there. If so,
+    /// we can append those and move on. Otherwise, it invokes the
+    /// three callback functions:
+    ///
+    /// - `args_for_def_id`: given the def-id P, supplies back the
+    ///   generic arguments that were given to that parent from within
+    ///   the path; so e.g. if you have `<T as Foo>::Bar`, the def-id
+    ///   might refer to the trait `Foo`, and the arguments might be
+    ///   `[T]`. The boolean value indicates whether to infer values
+    ///   for arguments whose values were not explicitly provided.
+    /// - `provided_kind`: given the generic parameter and the value from `args_for_def_id`,
+    ///   instantiate a `Kind`
+    /// - `inferred_kind`: if no parameter was provided, and inference is enabled, then
+    ///   creates a suitable inference variable.
+    pub fn create_substs_for_generic_args<'a, 'b>(
         tcx: TyCtxt<'a, 'gcx, 'tcx>,
         def_id: DefId,
         parent_substs: &[Kind<'tcx>],
         has_self: bool,
         self_ty: Option<Ty<'tcx>>,
-        args_for_def_id: A,
-        provided_kind: P,
-        inferred_kind: I,
-    ) -> &'tcx Substs<'tcx> where
-        A: Fn(DefId) -> (Option<&'b GenericArgs>, bool),
-        P: Fn(&GenericParamDef, &GenericArg) -> Kind<'tcx>,
-        I: Fn(Option<&[Kind<'tcx>]>, &GenericParamDef, bool) -> Kind<'tcx>
-    {
+        args_for_def_id: impl Fn(DefId) -> (Option<&'b GenericArgs>, bool),
+        provided_kind: impl Fn(&GenericParamDef, &GenericArg) -> Kind<'tcx>,
+        inferred_kind: impl Fn(Option<&[Kind<'tcx>]>, &GenericParamDef, bool) -> Kind<'tcx>,
+    ) -> &'tcx Substs<'tcx> {
         // Collect the segments of the path: we need to substitute arguments
         // for parameters throughout the entire path (wherever there are
         // generic parameters).
@@ -538,7 +561,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         // region with the current anon region binding (in other words,
         // whatever & would get replaced with).
         debug!("create_substs_for_ast_path(def_id={:?}, self_ty={:?}, \
-               generic_args={:?})",
+                generic_args={:?})",
                def_id, self_ty, generic_args);
 
         let tcx = self.tcx();
@@ -609,7 +632,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                             if default_needs_object_self(param) {
                                 struct_span_err!(tcx.sess, span, E0393,
                                                     "the type parameter `{}` must be explicitly \
-                                                    specified",
+                                                     specified",
                                                     param.name)
                                     .span_label(span,
                                                 format!("missing reference to `{}`", param.name))
@@ -623,7 +646,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                                 self.normalize_ty(
                                     span,
                                     tcx.at(span).type_of(param.def_id)
-                                        .subst_spanned(tcx, substs.unwrap(), Some(span))
+                                       .subst_spanned(tcx, substs.unwrap(), Some(span))
                                 ).into()
                             }
                         } else if infer_types {
@@ -693,7 +716,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
     pub(super) fn instantiate_poly_trait_ref_inner(&self,
         trait_ref: &hir::TraitRef,
         self_ty: Ty<'tcx>,
-        poly_projections: &mut Vec<ty::PolyProjectionPredicate<'tcx>>,
+        poly_projections: &mut Vec<(ty::PolyProjectionPredicate<'tcx>, Span)>,
         speculative: bool)
         -> ty::PolyTraitRef<'tcx>
     {
@@ -716,7 +739,8 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
             let predicate: Result<_, ErrorReported> =
                 self.ast_type_binding_to_poly_projection_predicate(
                     trait_ref.ref_id, poly_trait_ref, binding, speculative, &mut dup_bindings);
-            predicate.ok() // ok to ignore Err() because ErrorReported (see above)
+            // ok to ignore Err() because ErrorReported (see above)
+            Some((predicate.ok()?, binding.span))
         }));
 
         debug!("ast_path_to_poly_trait_ref({:?}, projections={:?}) -> {:?}",
@@ -727,7 +751,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
     pub fn instantiate_poly_trait_ref(&self,
         poly_trait_ref: &hir::PolyTraitRef,
         self_ty: Ty<'tcx>,
-        poly_projections: &mut Vec<ty::PolyProjectionPredicate<'tcx>>)
+        poly_projections: &mut Vec<(ty::PolyProjectionPredicate<'tcx>, Span)>)
         -> ty::PolyTraitRef<'tcx>
     {
         self.instantiate_poly_trait_ref_inner(&poly_trait_ref.trait_ref, self_ty,
@@ -850,7 +874,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                                 binding.span,
                                 E0582,
                                 "binding for associated type `{}` references lifetime `{}`, \
-                                which does not appear in the trait input types",
+                                 which does not appear in the trait input types",
                                 binding.item_name, br_name)
                     .emit();
             }
@@ -890,7 +914,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                         ref_id,
                         binding.span,
                         &format!("associated type binding `{}` specified more than once",
-                                binding.item_name)
+                                 binding.item_name)
                     );
                     err.span_label(binding.span, "used more than once");
                     err.span_label(*prev_span, format!("first use of `{}`", binding.item_name));
@@ -974,7 +998,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         let existential_principal = principal.map_bound(|trait_ref| {
             self.trait_ref_to_existential(trait_ref)
         });
-        let existential_projections = projection_bounds.iter().map(|bound| {
+        let existential_projections = projection_bounds.iter().map(|(bound, _)| {
             bound.map_bound(|b| {
                 let trait_ref = self.trait_ref_to_existential(b.projection_ty.trait_ref(tcx));
                 ty::ExistentialProjection {
@@ -993,7 +1017,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         if !object_safety_violations.is_empty() {
             tcx.report_object_safety_error(
                 span, principal.def_id(), object_safety_violations)
-                .emit();
+               .emit();
             return tcx.types.err;
         }
 
@@ -1006,20 +1030,20 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                 .map(|item| item.def_id));
         }
 
-        for projection_bound in &projection_bounds {
+        for (projection_bound, _) in &projection_bounds {
             associated_types.remove(&projection_bound.projection_def_id());
         }
 
         for item_def_id in associated_types {
             let assoc_item = tcx.associated_item(item_def_id);
             let trait_def_id = assoc_item.container.id();
-            struct_span_err!(tcx.sess, span, E0191,
-                "the value of the associated type `{}` (from the trait `{}`) must be specified",
-                        assoc_item.ident,
-                        tcx.item_path_str(trait_def_id))
-                        .span_label(span, format!(
-                            "missing associated type `{}` value", assoc_item.ident))
-                        .emit();
+            struct_span_err!(tcx.sess, span, E0191, "the value of the associated type `{}` \
+                                                     (from the trait `{}`) must be specified",
+                                                    assoc_item.ident,
+                                                    tcx.item_path_str(trait_def_id))
+                .span_label(span, format!("missing associated type `{}` value",
+                                          assoc_item.ident))
+                .emit();
         }
 
         // Dedup auto traits so that `dyn Trait + Send + Send` is the same as `dyn Trait + Send`.
@@ -1031,11 +1055,10 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
             iter::once(ty::ExistentialPredicate::Trait(*existential_principal.skip_binder()))
             .chain(auto_traits.into_iter().map(ty::ExistentialPredicate::AutoTrait))
             .chain(existential_projections
-                   .map(|x| ty::ExistentialPredicate::Projection(*x.skip_binder())))
+                .map(|x| ty::ExistentialPredicate::Projection(*x.skip_binder())))
             .collect::<SmallVec<[_; 8]>>();
         v.sort_by(|a, b| a.stable_cmp(tcx, b));
         let existential_predicates = ty::Binder::bind(tcx.mk_existential_predicates(v.into_iter()));
-
 
         // Explicitly specified region bound. Use that.
         let region_bound = if !lifetime.is_elided() {
@@ -1069,11 +1092,12 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                                         trait_str: &str,
                                         name: &str) {
         struct_span_err!(self.tcx().sess, span, E0223, "ambiguous associated type")
-            .span_label(span, "ambiguous associated type")
-            .note(&format!("specify the type using the syntax `<{} as {}>::{}`",
-                  type_str, trait_str, name))
-            .emit();
-
+            .span_suggestion_with_applicability(
+                span,
+                "use fully-qualified syntax",
+                format!("<{} as {}>::{}", type_str, trait_str, name),
+                Applicability::HasPlaceholders
+            ).emit();
     }
 
     // Search for a bound on a type parameter which includes the associated item
@@ -1089,12 +1113,11 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         let tcx = self.tcx();
 
         let bounds: Vec<_> = self.get_type_parameter_bounds(span, ty_param_def_id)
-            .predicates.into_iter().filter_map(|p| p.to_opt_poly_trait_ref()).collect();
+            .predicates.into_iter().filter_map(|(p, _)| p.to_opt_poly_trait_ref()).collect();
 
         // Check that there is exactly one way to find an associated type with the
         // correct name.
-        let suitable_bounds =
-            traits::transitive_bounds(tcx, &bounds)
+        let suitable_bounds = traits::transitive_bounds(tcx, &bounds)
             .filter(|b| self.trait_defines_associated_type_named(b.def_id(), assoc_name));
 
         let param_node_id = tcx.hir.as_local_node_id(ty_param_def_id).unwrap();
@@ -1109,10 +1132,10 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
     // Checks that bounds contains exactly one element and reports appropriate
     // errors otherwise.
     fn one_bound_for_assoc_type<I>(&self,
-                                mut bounds: I,
-                                ty_param_name: &str,
-                                assoc_name: ast::Ident,
-                                span: Span)
+                                   mut bounds: I,
+                                   ty_param_name: &str,
+                                   assoc_name: ast::Ident,
+                                   span: Span)
         -> Result<ty::PolyTraitRef<'tcx>, ErrorReported>
         where I: Iterator<Item=ty::PolyTraitRef<'tcx>>
     {
@@ -1120,9 +1143,9 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
             Some(bound) => bound,
             None => {
                 struct_span_err!(self.tcx().sess, span, E0220,
-                          "associated type `{}` not found for `{}`",
-                          assoc_name,
-                          ty_param_name)
+                                 "associated type `{}` not found for `{}`",
+                                 assoc_name,
+                                 ty_param_name)
                   .span_label(span, format!("associated type `{}` not found", assoc_name))
                   .emit();
                 return Err(ErrorReported);
@@ -1141,14 +1164,14 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
             for bound in bounds {
                 let bound_span = self.tcx().associated_items(bound.def_id()).find(|item| {
                     item.kind == ty::AssociatedKind::Type &&
-                    self.tcx().hygienic_eq(assoc_name, item.ident, bound.def_id())
+                        self.tcx().hygienic_eq(assoc_name, item.ident, bound.def_id())
                 })
                 .and_then(|item| self.tcx().hir.span_if_local(item.def_id));
 
                 if let Some(span) = bound_span {
                     err.span_label(span, format!("ambiguous `{}` from `{}`",
-                                                  assoc_name,
-                                                  bound));
+                                                 assoc_name,
+                                                 bound));
                 } else {
                     span_note!(&mut err, span,
                                "associated type `{}` could derive from `{}`",
@@ -1197,8 +1220,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                     }
                 };
 
-                let candidates =
-                    traits::supertraits(tcx, ty::Binder::bind(trait_ref))
+                let candidates = traits::supertraits(tcx, ty::Binder::bind(trait_ref))
                     .filter(|r| self.trait_defines_associated_type_named(r.def_id(), assoc_name));
 
                 match self.one_bound_for_assoc_type(candidates, "Self", assoc_name, span) {
@@ -1229,7 +1251,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         let (assoc_ident, def_scope) = tcx.adjust_ident(assoc_name, trait_did, ref_id);
         let item = tcx.associated_items(trait_did).find(|i| {
             Namespace::from(i.kind) == Namespace::Type &&
-            i.ident.modern() == assoc_ident
+                i.ident.modern() == assoc_ident
         })
         .expect("missing associated type");
 
@@ -1292,8 +1314,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                             if err_for_lt { continue }
                             err_for_lt = true;
                             (struct_span_err!(self.tcx().sess, lt.span, E0110,
-                                            "lifetime parameters are not allowed on \
-                                                this type"),
+                                              "lifetime parameters are not allowed on this type"),
                              lt.span,
                              "lifetime")
                         }
@@ -1301,7 +1322,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                             if err_for_ty { continue }
                             err_for_ty = true;
                             (struct_span_err!(self.tcx().sess, ty.span, E0109,
-                                            "type parameters are not allowed on this type"),
+                                              "type parameters are not allowed on this type"),
                              ty.span,
                              "type")
                         }
@@ -1341,10 +1362,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         match path.def {
             Def::Existential(did) => {
                 // check for desugared impl trait
-                if ty::is_impl_trait_defn(tcx, did).is_some() {
-                    let lifetimes = &path.segments[0].args.as_ref().unwrap().args;
-                    return self.impl_trait_ty_to_ty(did, lifetimes);
-                }
+                assert!(ty::is_impl_trait_defn(tcx, did).is_none());
                 let item_segment = path.segments.split_last().unwrap();
                 self.prohibit_generics(item_segment.1);
                 let substs = self.ast_path_substs_for_ty(span, did, item_segment.0);
@@ -1465,6 +1483,10 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
                 });
                 self.def_to_ty(opt_self_ty, path, false)
             }
+            hir::TyKind::Def(item_id, ref lifetimes) => {
+                let did = tcx.hir.local_def_id(item_id.id);
+                self.impl_trait_ty_to_ty(did, lifetimes)
+            },
             hir::TyKind::Path(hir::QPath::TypeRelative(ref qself, ref segment)) => {
                 debug!("ast_ty_to_ty: qself={:?} segment={:?}", qself, segment);
                 let ty = self.ast_ty_to_ty(qself);
@@ -1575,7 +1597,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
 
         let output_ty = match decl.output {
             hir::Return(ref output) => self.ast_ty_to_ty(output),
-            hir::DefaultReturn(..) => tcx.mk_nil(),
+            hir::DefaultReturn(..) => tcx.mk_unit(),
         };
 
         debug!("ty_of_fn: output_ty={:?}", output_ty);
@@ -1589,7 +1611,7 @@ impl<'o, 'gcx: 'tcx, 'tcx> dyn AstConv<'gcx, 'tcx>+'o {
         ));
 
         // Find any late-bound regions declared in return type that do
-        // not appear in the arguments. These are not wellformed.
+        // not appear in the arguments. These are not well-formed.
         //
         // Example:
         //     for<'a> fn() -> &'a str <-- 'a is bad
@@ -1701,42 +1723,41 @@ fn split_auto_traits<'a, 'b, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
 // and return from functions in multiple places.
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Bounds<'tcx> {
-    pub region_bounds: Vec<ty::Region<'tcx>>,
-    pub implicitly_sized: bool,
-    pub trait_bounds: Vec<ty::PolyTraitRef<'tcx>>,
-    pub projection_bounds: Vec<ty::PolyProjectionPredicate<'tcx>>,
+    pub region_bounds: Vec<(ty::Region<'tcx>, Span)>,
+    pub implicitly_sized: Option<Span>,
+    pub trait_bounds: Vec<(ty::PolyTraitRef<'tcx>, Span)>,
+    pub projection_bounds: Vec<(ty::PolyProjectionPredicate<'tcx>, Span)>,
 }
 
 impl<'a, 'gcx, 'tcx> Bounds<'tcx> {
     pub fn predicates(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>, param_ty: Ty<'tcx>)
-                      -> Vec<ty::Predicate<'tcx>>
+                      -> Vec<(ty::Predicate<'tcx>, Span)>
     {
         // If it could be sized, and is, add the sized predicate
-        let sized_predicate = if self.implicitly_sized {
+        let sized_predicate = self.implicitly_sized.and_then(|span| {
             tcx.lang_items().sized_trait().map(|sized| {
                 let trait_ref = ty::TraitRef {
                     def_id: sized,
                     substs: tcx.mk_substs_trait(param_ty, &[])
                 };
-                trait_ref.to_predicate()
+                (trait_ref.to_predicate(), span)
             })
-        } else {
-            None
-        };
+        });
 
         sized_predicate.into_iter().chain(
-            self.region_bounds.iter().map(|&region_bound| {
+            self.region_bounds.iter().map(|&(region_bound, span)| {
                 // account for the binder being introduced below; no need to shift `param_ty`
                 // because, at present at least, it can only refer to early-bound regions
                 let region_bound = tcx.mk_region(ty::fold::shift_region(*region_bound, 1));
-                ty::Binder::dummy(ty::OutlivesPredicate(param_ty, region_bound)).to_predicate()
+                let outlives = ty::OutlivesPredicate(param_ty, region_bound);
+                (ty::Binder::dummy(outlives).to_predicate(), span)
             }).chain(
-                self.trait_bounds.iter().map(|bound_trait_ref| {
-                    bound_trait_ref.to_predicate()
+                self.trait_bounds.iter().map(|&(bound_trait_ref, span)| {
+                    (bound_trait_ref.to_predicate(), span)
                 })
             ).chain(
-                self.projection_bounds.iter().map(|projection| {
-                    projection.to_predicate()
+                self.projection_bounds.iter().map(|&(projection, span)| {
+                    (projection.to_predicate(), span)
                 })
             )
         ).collect()

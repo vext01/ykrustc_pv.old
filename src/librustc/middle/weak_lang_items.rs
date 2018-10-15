@@ -70,7 +70,7 @@ pub fn link_name(attrs: &[ast::Attribute]) -> Option<Symbol> {
 /// Not all lang items are always required for each compilation, particularly in
 /// the case of panic=abort. In these situations some lang items are injected by
 /// crates and don't actually need to be defined in libstd.
-pub fn whitelisted(tcx: TyCtxt, lang_item: lang_items::LangItem) -> bool {
+pub fn whitelisted(tcx: TyCtxt<'_, '_, '_>, lang_item: lang_items::LangItem) -> bool {
     // If we're not compiling with unwinding, we won't actually need these
     // symbols. Other panic runtimes ensure that the relevant symbols are
     // available to link things together, but they're never exercised.
@@ -113,13 +113,13 @@ fn verify<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
            items.$name().is_none() {
             if lang_items::$item == lang_items::PanicImplLangItem {
                 tcx.sess.err(&format!("`#[panic_handler]` function required, \
-                                        but not found"));
+                                       but not found"));
             } else if lang_items::$item == lang_items::OomLangItem {
                 tcx.sess.err(&format!("`#[alloc_error_handler]` function required, \
-                                        but not found"));
+                                       but not found"));
             } else {
                 tcx.sess.err(&format!("language item required, but not found: `{}`",
-                                        stringify!($name)));
+                                      stringify!($name)));
             }
         }
     )*

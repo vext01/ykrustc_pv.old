@@ -120,11 +120,17 @@ use raw_vec::RawVec;
 /// assert_eq!(vec, [1, 2, 3, 4]);
 /// ```
 ///
-/// It can also initialize each element of a `Vec<T>` with a given value:
+/// It can also initialize each element of a `Vec<T>` with a given value.
+/// This may be more efficient than performing allocation and initialization
+/// in separate steps, especially when initializing a vector of zeros:
 ///
 /// ```
 /// let vec = vec![0; 5];
 /// assert_eq!(vec, [0, 0, 0, 0, 0]);
+///
+/// // The following is equivalent, but potentially slower:
+/// let mut vec1 = Vec::with_capacity(5);
+/// vec1.resize(5, 0);
 /// ```
 ///
 /// Use a `Vec<T>` as an efficient stack:
@@ -947,10 +953,9 @@ impl<T> Vec<T> {
     /// Removes all but the first of consecutive elements in the vector satisfying a given equality
     /// relation.
     ///
-    /// The `same_bucket` function is passed references to two elements from the vector, and
-    /// returns `true` if the elements compare equal, or `false` if they do not. The elements are
-    /// passed in opposite order from their order in the vector, so if `same_bucket(a, b)` returns
-    /// `true`, `a` is removed.
+    /// The `same_bucket` function is passed references to two elements from the vector and
+    /// must determine if the elements compare equal. The elements are passed in opposite order
+    /// from their order in the slice, so if `same_bucket(a, b)` returns `true`, `a` is removed.
     ///
     /// If the vector is sorted, this removes all duplicates.
     ///
@@ -964,90 +969,12 @@ impl<T> Vec<T> {
     /// assert_eq!(vec, ["foo", "bar", "baz", "bar"]);
     /// ```
     #[stable(feature = "dedup_by", since = "1.16.0")]
-    pub fn dedup_by<F>(&mut self, mut same_bucket: F) where F: FnMut(&mut T, &mut T) -> bool {
-        unsafe {
-            // Although we have a mutable reference to `self`, we cannot make
-            // *arbitrary* changes. The `same_bucket` calls could panic, so we
-            // must ensure that the vector is in a valid state at all time.
-            //
-            // The way that we handle this is by using swaps; we iterate
-            // over all the elements, swapping as we go so that at the end
-            // the elements we wish to keep are in the front, and those we
-            // wish to reject are at the back. We can then truncate the
-            // vector. This operation is still O(n).
-            //
-            // Example: We start in this state, where `r` represents "next
-            // read" and `w` represents "next_write`.
-            //
-            //           r
-            //     +---+---+---+---+---+---+
-            //     | 0 | 1 | 1 | 2 | 3 | 3 |
-            //     +---+---+---+---+---+---+
-            //           w
-            //
-            // Comparing self[r] against self[w-1], this is not a duplicate, so
-            // we swap self[r] and self[w] (no effect as r==w) and then increment both
-            // r and w, leaving us with:
-            //
-            //               r
-            //     +---+---+---+---+---+---+
-            //     | 0 | 1 | 1 | 2 | 3 | 3 |
-            //     +---+---+---+---+---+---+
-            //               w
-            //
-            // Comparing self[r] against self[w-1], this value is a duplicate,
-            // so we increment `r` but leave everything else unchanged:
-            //
-            //                   r
-            //     +---+---+---+---+---+---+
-            //     | 0 | 1 | 1 | 2 | 3 | 3 |
-            //     +---+---+---+---+---+---+
-            //               w
-            //
-            // Comparing self[r] against self[w-1], this is not a duplicate,
-            // so swap self[r] and self[w] and advance r and w:
-            //
-            //                       r
-            //     +---+---+---+---+---+---+
-            //     | 0 | 1 | 2 | 1 | 3 | 3 |
-            //     +---+---+---+---+---+---+
-            //                   w
-            //
-            // Not a duplicate, repeat:
-            //
-            //                           r
-            //     +---+---+---+---+---+---+
-            //     | 0 | 1 | 2 | 3 | 1 | 3 |
-            //     +---+---+---+---+---+---+
-            //                       w
-            //
-            // Duplicate, advance r. End of vec. Truncate to w.
-
-            let ln = self.len();
-            if ln <= 1 {
-                return;
-            }
-
-            // Avoid bounds checks by using raw pointers.
-            let p = self.as_mut_ptr();
-            let mut r: usize = 1;
-            let mut w: usize = 1;
-
-            while r < ln {
-                let p_r = p.add(r);
-                let p_wm1 = p.add(w - 1);
-                if !same_bucket(&mut *p_r, &mut *p_wm1) {
-                    if r != w {
-                        let p_w = p_wm1.offset(1);
-                        mem::swap(&mut *p_r, &mut *p_w);
-                    }
-                    w += 1;
-                }
-                r += 1;
-            }
-
-            self.truncate(w);
-        }
+    pub fn dedup_by<F>(&mut self, same_bucket: F) where F: FnMut(&mut T, &mut T) -> bool {
+        let len = {
+            let (dedup, _) = self.as_mut_slice().partition_dedup_by(same_bucket);
+            dedup.len()
+        };
+        self.truncate(len);
     }
 
     /// Appends an element to the back of a collection.
@@ -1533,7 +1460,8 @@ impl<'a> Drop for SetLenOnDrop<'a> {
 }
 
 impl<T: PartialEq> Vec<T> {
-    /// Removes consecutive repeated elements in the vector.
+    /// Removes consecutive repeated elements in the vector according to the
+    /// [`PartialEq`] trait implementation.
     ///
     /// If the vector is sorted, this removes all duplicates.
     ///
@@ -1900,12 +1828,12 @@ impl<T, I> SpecExtend<T, I> for Vec<T>
             unsafe {
                 let mut ptr = self.as_mut_ptr().add(self.len());
                 let mut local_len = SetLenOnDrop::new(&mut self.len);
-                for element in iterator {
+                iterator.for_each(move |element| {
                     ptr::write(ptr, element);
                     ptr = ptr.offset(1);
                     // NB can't overflow since we would have had to alloc the address space
                     local_len.increment_len(1);
-                }
+                });
             }
         } else {
             self.extend_desugared(iterator)
@@ -2410,9 +2338,8 @@ impl<T> Iterator for IntoIter<T> {
                     // same pointer.
                     self.ptr = arith_offset(self.ptr as *const i8, 1) as *mut T;
 
-                    // Use a non-null pointer value
-                    // (self.ptr might be null because of wrapping)
-                    Some(ptr::read(1 as *mut T))
+                    // Make up a value of this ZST.
+                    Some(mem::zeroed())
                 } else {
                     let old = self.ptr;
                     self.ptr = self.ptr.offset(1);
@@ -2451,9 +2378,8 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
                     // See above for why 'ptr.offset' isn't used
                     self.end = arith_offset(self.end as *const i8, -1) as *mut T;
 
-                    // Use a non-null pointer value
-                    // (self.end might be null because of wrapping)
-                    Some(ptr::read(1 as *mut T))
+                    // Make up a value of this ZST.
+                    Some(mem::zeroed())
                 } else {
                     self.end = self.end.offset(-1);
 

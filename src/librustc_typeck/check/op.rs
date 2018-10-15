@@ -16,7 +16,7 @@ use rustc::ty::{self, Ty, TypeFoldable};
 use rustc::ty::TyKind::{Ref, Adt, Str, Uint, Never, Tuple, Char, Array};
 use rustc::ty::adjustment::{Adjustment, Adjust, AllowTwoPhase, AutoBorrow, AutoBorrowMutability};
 use rustc::infer::type_variable::TypeVariableOrigin;
-use errors;
+use errors::{self,Applicability};
 use syntax_pos::Span;
 use syntax::ast::Ident;
 use rustc::hir;
@@ -35,12 +35,12 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         let ty = if !lhs_ty.is_ty_var() && !rhs_ty.is_ty_var()
                     && is_builtin_binop(lhs_ty, rhs_ty, op) {
             self.enforce_builtin_binop_types(lhs_expr, lhs_ty, rhs_expr, rhs_ty, op);
-            self.tcx.mk_nil()
+            self.tcx.mk_unit()
         } else {
             return_ty
         };
 
-        if !self.is_place_expr(lhs_expr) {
+        if !lhs_expr.is_place_expr() {
             struct_span_err!(
                 self.tcx.sess, lhs_expr.span,
                 E0067, "invalid left-hand side expression")
@@ -311,7 +311,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                 hir::BinOpKind::BitOr  => Some("std::ops::BitOrAssign"),
                                 hir::BinOpKind::Shl    => Some("std::ops::ShlAssign"),
                                 hir::BinOpKind::Shr    => Some("std::ops::ShrAssign"),
-                                _             => None
+                                _                      => None
                             };
                             if let Some(missing_trait) = missing_trait {
                                 if op.node == hir::BinOpKind::Add &&
@@ -338,15 +338,15 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         }
                         IsAssign::No => {
                             let mut err = struct_span_err!(self.tcx.sess, expr.span, E0369,
-                                            "binary operation `{}` cannot be applied to type `{}`",
-                                            op.node.as_str(),
-                                            lhs_ty);
+                                "binary operation `{}` cannot be applied to type `{}`",
+                                op.node.as_str(),
+                                lhs_ty);
                             let mut suggested_deref = false;
                             if let Ref(_, mut rty, _) = lhs_ty.sty {
                                 if {
                                     !self.infcx.type_moves_by_default(self.param_env,
-                                                                        rty,
-                                                                        lhs_expr.span) &&
+                                                                      rty,
+                                                                      lhs_expr.span) &&
                                         self.lookup_op_method(rty,
                                                               &[rhs_ty],
                                                               Op::Binary(op, is_assign))
@@ -444,9 +444,12 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     err.span_label(expr.span,
                                    "`+` can't be used to concatenate two `&str` strings");
                     match source_map.span_to_snippet(lhs_expr.span) {
-                        Ok(lstring) => err.span_suggestion(lhs_expr.span,
-                                                           msg,
-                                                           format!("{}.to_owned()", lstring)),
+                        Ok(lstring) => err.span_suggestion_with_applicability(
+                            lhs_expr.span,
+                            msg,
+                            format!("{}.to_owned()", lstring),
+                            Applicability::MachineApplicable,
+                        ),
                         _ => err.help(msg),
                     };
                 }
@@ -462,10 +465,14 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     is_assign,
                 ) {
                     (Ok(l), Ok(r), false) => {
-                        err.multipart_suggestion(msg, vec![
-                            (lhs_expr.span, format!("{}.to_owned()", l)),
-                            (rhs_expr.span, format!("&{}", r)),
-                        ]);
+                        err.multipart_suggestion_with_applicability(
+                            msg,
+                            vec![
+                                (lhs_expr.span, format!("{}.to_owned()", l)),
+                                (rhs_expr.span, format!("&{}", r)),
+                            ],
+                            Applicability::MachineApplicable,
+                        );
                     }
                     _ => {
                         err.help(msg);

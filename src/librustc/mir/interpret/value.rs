@@ -24,15 +24,18 @@ pub enum ConstValue<'tcx> {
     /// to allow HIR creation to happen for everything before needing to be able to run constant
     /// evaluation
     Unevaluated(DefId, &'tcx Substs<'tcx>),
+
     /// Used only for types with layout::abi::Scalar ABI and ZSTs
     ///
     /// Not using the enum `Value` to encode that this must not be `Undef`
     Scalar(Scalar),
-    /// Used only for types with layout::abi::ScalarPair
+
+    /// Used only for *fat pointers* with layout::abi::ScalarPair
     ///
-    /// The second field may be undef in case of `Option<usize>::None`
-    ScalarPair(Scalar, ScalarMaybeUndef),
-    /// Used only for the remaining cases. An allocation + offset into the allocation.
+    /// Needed for pattern matching code related to slices and strings.
+    ScalarPair(Scalar, Scalar),
+
+    /// An allocation + offset into the allocation.
     /// Invariant: The AllocId matches the allocation.
     ByRef(AllocId, &'tcx Allocation, Size),
 }
@@ -67,16 +70,56 @@ impl<'tcx> ConstValue<'tcx> {
         ConstValue::ScalarPair(val, Scalar::Bits {
             bits: len as u128,
             size: cx.data_layout().pointer_size.bytes() as u8,
-        }.into())
+        })
     }
 
     #[inline]
     pub fn new_dyn_trait(val: Scalar, vtable: Pointer) -> Self {
-        ConstValue::ScalarPair(val, Scalar::Ptr(vtable).into())
+        ConstValue::ScalarPair(val, Scalar::Ptr(vtable))
     }
 }
 
-impl<'tcx> Scalar {
+/// A `Scalar` represents an immediate, primitive value existing outside of a
+/// `memory::Allocation`. It is in many ways like a small chunk of a `Allocation`, up to 8 bytes in
+/// size. Like a range of bytes in an `Allocation`, a `Scalar` can either represent the raw bytes
+/// of a simple value or a pointer into another `Allocation`
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, RustcEncodable, RustcDecodable, Hash)]
+pub enum Scalar<Tag=(), Id=AllocId> {
+    /// The raw bytes of a simple value.
+    Bits {
+        /// The first `size` bytes are the value.
+        /// Do not try to read less or more bytes that that. The remaining bytes must be 0.
+        size: u8,
+        bits: u128,
+    },
+
+    /// A pointer into an `Allocation`. An `Allocation` in the `memory` module has a list of
+    /// relocations, but a `Scalar` is only large enough to contain one, so we just represent the
+    /// relocation and its associated offset together as a `Pointer` here.
+    Ptr(Pointer<Tag, Id>),
+}
+
+impl<'tcx> Scalar<()> {
+    #[inline]
+    pub fn with_default_tag<Tag>(self) -> Scalar<Tag>
+        where Tag: Default
+    {
+        match self {
+            Scalar::Ptr(ptr) => Scalar::Ptr(ptr.with_default_tag()),
+            Scalar::Bits { bits, size } => Scalar::Bits { bits, size },
+        }
+    }
+}
+
+impl<'tcx, Tag> Scalar<Tag> {
+    #[inline]
+    pub fn erase_tag(self) -> Scalar {
+        match self {
+            Scalar::Ptr(ptr) => Scalar::Ptr(ptr.erase_tag()),
+            Scalar::Bits { bits, size } => Scalar::Bits { bits, size },
+        }
+    }
+
     #[inline]
     pub fn ptr_null(cx: impl HasDataLayout) -> Self {
         Scalar::Bits {
@@ -168,7 +211,7 @@ impl<'tcx> Scalar {
     pub fn from_uint(i: impl Into<u128>, size: Size) -> Self {
         let i = i.into();
         debug_assert_eq!(truncate(i, size), i,
-                    "Unsigned value {} does not fit in {} bits", i, size.bits());
+                         "Unsigned value {} does not fit in {} bits", i, size.bits());
         Scalar::Bits { bits: i, size: size.bytes() as u8 }
     }
 
@@ -178,7 +221,7 @@ impl<'tcx> Scalar {
         // `into` performed sign extension, we have to truncate
         let truncated = truncate(i as u128, size);
         debug_assert_eq!(sign_extend(truncated, size) as i128, i,
-                    "Signed value {} does not fit in {} bits", i, size.bits());
+                         "Signed value {} does not fit in {} bits", i, size.bits());
         Scalar::Bits { bits: truncated, size: size.bytes() as u8 }
     }
 
@@ -205,7 +248,7 @@ impl<'tcx> Scalar {
     }
 
     #[inline]
-    pub fn to_ptr(self) -> EvalResult<'tcx, Pointer> {
+    pub fn to_ptr(self) -> EvalResult<'tcx, Pointer<Tag>> {
         match self {
             Scalar::Bits { bits: 0, .. } => err!(InvalidNullPointerUsage),
             Scalar::Bits { .. } => err!(ReadBytesAsPointer),
@@ -314,122 +357,9 @@ impl<'tcx> Scalar {
     }
 }
 
-impl From<Pointer> for Scalar {
+impl<Tag> From<Pointer<Tag>> for Scalar<Tag> {
     #[inline(always)]
-    fn from(ptr: Pointer) -> Self {
+    fn from(ptr: Pointer<Tag>) -> Self {
         Scalar::Ptr(ptr)
-    }
-}
-
-/// A `Scalar` represents an immediate, primitive value existing outside of a
-/// `memory::Allocation`. It is in many ways like a small chunk of a `Allocation`, up to 8 bytes in
-/// size. Like a range of bytes in an `Allocation`, a `Scalar` can either represent the raw bytes
-/// of a simple value or a pointer into another `Allocation`
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, RustcEncodable, RustcDecodable, Hash)]
-pub enum Scalar<Id=AllocId> {
-    /// The raw bytes of a simple value.
-    Bits {
-        /// The first `size` bytes are the value.
-        /// Do not try to read less or more bytes that that. The remaining bytes must be 0.
-        size: u8,
-        bits: u128,
-    },
-
-    /// A pointer into an `Allocation`. An `Allocation` in the `memory` module has a list of
-    /// relocations, but a `Scalar` is only large enough to contain one, so we just represent the
-    /// relocation and its associated offset together as a `Pointer` here.
-    Ptr(Pointer<Id>),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, RustcEncodable, RustcDecodable, Hash)]
-pub enum ScalarMaybeUndef<Id=AllocId> {
-    Scalar(Scalar<Id>),
-    Undef,
-}
-
-impl From<Scalar> for ScalarMaybeUndef {
-    #[inline(always)]
-    fn from(s: Scalar) -> Self {
-        ScalarMaybeUndef::Scalar(s)
-    }
-}
-
-impl<'tcx> ScalarMaybeUndef {
-    #[inline]
-    pub fn not_undef(self) -> EvalResult<'static, Scalar> {
-        match self {
-            ScalarMaybeUndef::Scalar(scalar) => Ok(scalar),
-            ScalarMaybeUndef::Undef => err!(ReadUndefBytes(Size::from_bytes(0))),
-        }
-    }
-
-    #[inline(always)]
-    pub fn to_ptr(self) -> EvalResult<'tcx, Pointer> {
-        self.not_undef()?.to_ptr()
-    }
-
-    #[inline(always)]
-    pub fn to_bits(self, target_size: Size) -> EvalResult<'tcx, u128> {
-        self.not_undef()?.to_bits(target_size)
-    }
-
-    #[inline(always)]
-    pub fn to_bool(self) -> EvalResult<'tcx, bool> {
-        self.not_undef()?.to_bool()
-    }
-
-    #[inline(always)]
-    pub fn to_char(self) -> EvalResult<'tcx, char> {
-        self.not_undef()?.to_char()
-    }
-
-    #[inline(always)]
-    pub fn to_f32(self) -> EvalResult<'tcx, f32> {
-        self.not_undef()?.to_f32()
-    }
-
-    #[inline(always)]
-    pub fn to_f64(self) -> EvalResult<'tcx, f64> {
-        self.not_undef()?.to_f64()
-    }
-
-    #[inline(always)]
-    pub fn to_u8(self) -> EvalResult<'tcx, u8> {
-        self.not_undef()?.to_u8()
-    }
-
-    #[inline(always)]
-    pub fn to_u32(self) -> EvalResult<'tcx, u32> {
-        self.not_undef()?.to_u32()
-    }
-
-    #[inline(always)]
-    pub fn to_u64(self) -> EvalResult<'tcx, u64> {
-        self.not_undef()?.to_u64()
-    }
-
-    #[inline(always)]
-    pub fn to_usize(self, cx: impl HasDataLayout) -> EvalResult<'tcx, u64> {
-        self.not_undef()?.to_usize(cx)
-    }
-
-    #[inline(always)]
-    pub fn to_i8(self) -> EvalResult<'tcx, i8> {
-        self.not_undef()?.to_i8()
-    }
-
-    #[inline(always)]
-    pub fn to_i32(self) -> EvalResult<'tcx, i32> {
-        self.not_undef()?.to_i32()
-    }
-
-    #[inline(always)]
-    pub fn to_i64(self) -> EvalResult<'tcx, i64> {
-        self.not_undef()?.to_i64()
-    }
-
-    #[inline(always)]
-    pub fn to_isize(self, cx: impl HasDataLayout) -> EvalResult<'tcx, i64> {
-        self.not_undef()?.to_isize(cx)
     }
 }

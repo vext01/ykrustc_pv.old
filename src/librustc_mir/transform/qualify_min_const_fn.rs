@@ -15,7 +15,7 @@ pub fn is_min_const_fn(
     let mut current = def_id;
     loop {
         let predicates = tcx.predicates_of(current);
-        for predicate in &predicates.predicates {
+        for (predicate, _) in &predicates.predicates {
             match predicate {
                 | Predicate::RegionOutlives(_)
                 | Predicate::TypeOutlives(_)
@@ -216,7 +216,7 @@ fn check_statement(
             check_rvalue(tcx, mir, rval, span)
         }
 
-        StatementKind::ReadForMatch(_) => Err((span, "match in const fn is unstable".into())),
+        StatementKind::FakeRead(..) => Err((span, "match in const fn is unstable".into())),
 
         // just an assignment
         StatementKind::SetDiscriminant { .. } => Ok(()),
@@ -230,7 +230,7 @@ fn check_statement(
         | StatementKind::StorageDead(_)
         | StatementKind::Validate(..)
         | StatementKind::EndRegion(_)
-        | StatementKind::UserAssertTy(..)
+        | StatementKind::AscribeUserType(..)
         | StatementKind::Nop => Ok(()),
     }
 }
@@ -318,6 +318,7 @@ fn check_terminator(
         TerminatorKind::Call {
             func,
             args,
+            from_hir_call: _,
             destination: _,
             cleanup: _,
         } => {

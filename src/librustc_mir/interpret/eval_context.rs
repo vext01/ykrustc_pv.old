@@ -14,7 +14,6 @@ use std::mem;
 use rustc::hir::def_id::DefId;
 use rustc::hir::def::Def;
 use rustc::hir::map::definitions::DefPathData;
-use rustc::ich::StableHashingContext;
 use rustc::mir;
 use rustc::ty::layout::{
     self, Size, Align, HasDataLayout, LayoutOf, TyLayout
@@ -23,24 +22,20 @@ use rustc::ty::subst::{Subst, Substs};
 use rustc::ty::{self, Ty, TyCtxt, TypeFoldable};
 use rustc::ty::query::TyCtxtAt;
 use rustc_data_structures::indexed_vec::IndexVec;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher, StableHasherResult};
 use rustc::mir::interpret::{
     GlobalId, Scalar, FrameInfo, AllocId,
     EvalResult, EvalErrorKind,
-    ScalarMaybeUndef,
     truncate, sign_extend,
 };
 
 use syntax::source_map::{self, Span};
 
 use super::{
-    Value, Operand, MemPlace, MPlaceTy, Place,
+    Value, Operand, MemPlace, MPlaceTy, Place, PlaceTy, ScalarMaybeUndef,
     Memory, Machine
 };
 
-use super::snapshot::InfiniteLoopDetector;
-
-pub struct EvalContext<'a, 'mir, 'tcx: 'a + 'mir, M: Machine<'mir, 'tcx>> {
+pub struct EvalContext<'a, 'mir, 'tcx: 'a + 'mir, M: Machine<'a, 'mir, 'tcx>> {
     /// Stores the `Machine` instance.
     pub machine: M,
 
@@ -48,29 +43,18 @@ pub struct EvalContext<'a, 'mir, 'tcx: 'a + 'mir, M: Machine<'mir, 'tcx>> {
     pub tcx: TyCtxtAt<'a, 'tcx, 'tcx>,
 
     /// Bounds in scope for polymorphic evaluations.
-    pub param_env: ty::ParamEnv<'tcx>,
+    pub(crate) param_env: ty::ParamEnv<'tcx>,
 
     /// The virtual memory system.
     pub memory: Memory<'a, 'mir, 'tcx, M>,
 
     /// The virtual call stack.
-    pub(crate) stack: Vec<Frame<'mir, 'tcx>>,
-
-    /// The maximum number of stack frames allowed
-    pub(super) stack_limit: usize,
-
-    /// When this value is negative, it indicates the number of interpreter
-    /// steps *until* the loop detector is enabled. When it is positive, it is
-    /// the number of steps after the detector has been enabled modulo the loop
-    /// detector period.
-    pub(super) steps_since_detector_enabled: isize,
-
-    pub(super) loop_detector: InfiniteLoopDetector<'a, 'mir, 'tcx, M>,
+    pub(crate) stack: Vec<Frame<'mir, 'tcx, M::PointerTag>>,
 }
 
 /// A stack frame.
 #[derive(Clone)]
-pub struct Frame<'mir, 'tcx: 'mir> {
+pub struct Frame<'mir, 'tcx: 'mir, Tag=()> {
     ////////////////////////////////////////////////////////////////////////////////
     // Function and callsite information
     ////////////////////////////////////////////////////////////////////////////////
@@ -89,15 +73,16 @@ pub struct Frame<'mir, 'tcx: 'mir> {
     /// Work to perform when returning from this function
     pub return_to_block: StackPopCleanup,
 
-    /// The location where the result of the current stack frame should be written to.
-    pub return_place: Place,
+    /// The location where the result of the current stack frame should be written to,
+    /// and its layout in the caller.
+    pub return_place: Option<PlaceTy<'tcx, Tag>>,
 
     /// The list of locals for this stack frame, stored in order as
     /// `[return_ptr, arguments..., variables..., temporaries...]`.
     /// The locals are stored as `Option<Value>`s.
     /// `None` represents a local that is currently dead, while a live local
     /// can either directly contain `Scalar` or refer to some part of an `Allocation`.
-    pub locals: IndexVec<mir::Local, LocalValue<AllocId>>,
+    pub locals: IndexVec<mir::Local, LocalValue<Tag>>,
 
     ////////////////////////////////////////////////////////////////////////////////
     // Current position within the function
@@ -110,32 +95,11 @@ pub struct Frame<'mir, 'tcx: 'mir> {
     pub stmt: usize,
 }
 
-impl<'a, 'mir, 'tcx: 'mir> HashStable<StableHashingContext<'a>> for Frame<'mir, 'tcx> {
-    fn hash_stable<W: StableHasherResult>(
-        &self,
-        hcx: &mut StableHashingContext<'a>,
-        hasher: &mut StableHasher<W>) {
-
-        let Frame {
-            mir,
-            instance,
-            span,
-            return_to_block,
-            return_place,
-            locals,
-            block,
-            stmt,
-        } = self;
-
-        (mir, instance, span, return_to_block).hash_stable(hcx, hasher);
-        (return_place, locals, block, stmt).hash_stable(hcx, hasher);
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum StackPopCleanup {
     /// Jump to the next block in the caller, or cause UB if None (that's a function
-    /// that may never return).
+    /// that may never return). Also store layout of return place so
+    /// we can validate it at that layout.
     Goto(Option<mir::BasicBlock>),
     /// Just do nohing: Used by Main and for the box_alloc hook in miri.
     /// `cleanup` says whether locals are deallocated.  Static computation
@@ -144,38 +108,26 @@ pub enum StackPopCleanup {
     None { cleanup: bool },
 }
 
-impl<'a> HashStable<StableHashingContext<'a>> for StackPopCleanup {
-    fn hash_stable<W: StableHasherResult>(
-        &self,
-        hcx: &mut StableHashingContext<'a>,
-        hasher: &mut StableHasher<W>) {
-        match self {
-            StackPopCleanup::Goto(ref block) => block.hash_stable(hcx, hasher),
-            StackPopCleanup::None { cleanup } => cleanup.hash_stable(hcx, hasher),
-        }
-    }
-}
-
 // State of a local variable
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub enum LocalValue<Id=AllocId> {
+pub enum LocalValue<Tag=(), Id=AllocId> {
     Dead,
     // Mostly for convenience, we re-use the `Operand` type here.
     // This is an optimization over just always having a pointer here;
     // we can thus avoid doing an allocation when the local just stores
     // immediate values *and* never has its address taken.
-    Live(Operand<Id>),
+    Live(Operand<Tag, Id>),
 }
 
-impl<'tcx> LocalValue {
-    pub fn access(&self) -> EvalResult<'tcx, &Operand> {
+impl<'tcx, Tag> LocalValue<Tag> {
+    pub fn access(&self) -> EvalResult<'tcx, &Operand<Tag>> {
         match self {
             LocalValue::Dead => err!(DeadLocal),
             LocalValue::Live(ref val) => Ok(val),
         }
     }
 
-    pub fn access_mut(&mut self) -> EvalResult<'tcx, &mut Operand> {
+    pub fn access_mut(&mut self) -> EvalResult<'tcx, &mut Operand<Tag>> {
         match self {
             LocalValue::Dead => err!(DeadLocal),
             LocalValue::Live(ref mut val) => Ok(val),
@@ -183,19 +135,16 @@ impl<'tcx> LocalValue {
     }
 }
 
-impl_stable_hash_for!(enum self::LocalValue {
-    Dead,
-    Live(x),
-});
-
-impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> HasDataLayout for &'a EvalContext<'a, 'mir, 'tcx, M> {
+impl<'b, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> HasDataLayout
+    for &'b EvalContext<'a, 'mir, 'tcx, M>
+{
     #[inline]
     fn data_layout(&self) -> &layout::TargetDataLayout {
         &self.tcx.data_layout
     }
 }
 
-impl<'c, 'b, 'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> HasDataLayout
+impl<'c, 'b, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> HasDataLayout
     for &'c &'b mut EvalContext<'a, 'mir, 'tcx, M>
 {
     #[inline]
@@ -204,24 +153,27 @@ impl<'c, 'b, 'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> HasDataLayout
     }
 }
 
-impl<'a, 'mir, 'tcx, M> layout::HasTyCtxt<'tcx> for &'a EvalContext<'a, 'mir, 'tcx, M>
-    where M: Machine<'mir, 'tcx>
+impl<'b, 'a, 'mir, 'tcx, M> layout::HasTyCtxt<'tcx> for &'b EvalContext<'a, 'mir, 'tcx, M>
+    where M: Machine<'a, 'mir, 'tcx>
 {
-    #[inline]
-    fn tcx<'b>(&'b self) -> TyCtxt<'b, 'tcx, 'tcx> {
-        *self.tcx
-    }
-}
-
-impl<'c, 'b, 'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> layout::HasTyCtxt<'tcx>
-    for &'c &'b mut EvalContext<'a, 'mir, 'tcx, M> {
     #[inline]
     fn tcx<'d>(&'d self) -> TyCtxt<'d, 'tcx, 'tcx> {
         *self.tcx
     }
 }
 
-impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> LayoutOf for &'a EvalContext<'a, 'mir, 'tcx, M> {
+impl<'c, 'b, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> layout::HasTyCtxt<'tcx>
+    for &'c &'b mut EvalContext<'a, 'mir, 'tcx, M>
+{
+    #[inline]
+    fn tcx<'d>(&'d self) -> TyCtxt<'d, 'tcx, 'tcx> {
+        *self.tcx
+    }
+}
+
+impl<'b, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> LayoutOf
+    for &'b EvalContext<'a, 'mir, 'tcx, M>
+{
     type Ty = Ty<'tcx>;
     type TyLayout = EvalResult<'tcx, TyLayout<'tcx>>;
 
@@ -232,8 +184,9 @@ impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> LayoutOf for &'a EvalContext<'a, 'm
     }
 }
 
-impl<'c, 'b, 'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> LayoutOf
-    for &'c &'b mut EvalContext<'a, 'mir, 'tcx, M> {
+impl<'c, 'b, 'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> LayoutOf
+    for &'c &'b mut EvalContext<'a, 'mir, 'tcx, M>
+{
     type Ty = Ty<'tcx>;
     type TyLayout = EvalResult<'tcx, TyLayout<'tcx>>;
 
@@ -243,9 +196,7 @@ impl<'c, 'b, 'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> LayoutOf
     }
 }
 
-const STEPS_UNTIL_DETECTOR_ENABLED: isize = 1_000_000;
-
-impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
+impl<'a, 'mir, 'tcx: 'mir, M: Machine<'a, 'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
     pub fn new(
         tcx: TyCtxtAt<'a, 'tcx, 'tcx>,
         param_env: ty::ParamEnv<'tcx>,
@@ -258,20 +209,7 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
             param_env,
             memory: Memory::new(tcx, memory_data),
             stack: Vec::new(),
-            stack_limit: tcx.sess.const_eval_stack_frame_limit,
-            loop_detector: Default::default(),
-            steps_since_detector_enabled: -STEPS_UNTIL_DETECTOR_ENABLED,
         }
-    }
-
-    pub(crate) fn with_fresh_body<F: FnOnce(&mut Self) -> R, R>(&mut self, f: F) -> R {
-        let stack = mem::replace(&mut self.stack, Vec::new());
-        let steps = mem::replace(&mut self.steps_since_detector_enabled,
-                                 -STEPS_UNTIL_DETECTOR_ENABLED);
-        let r = f(self);
-        self.stack = stack;
-        self.steps_since_detector_enabled = steps;
-        r
     }
 
     pub fn memory(&self) -> &Memory<'a, 'mir, 'tcx, M> {
@@ -282,7 +220,7 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
         &mut self.memory
     }
 
-    pub fn stack(&self) -> &[Frame<'mir, 'tcx>] {
+    pub fn stack(&self) -> &[Frame<'mir, 'tcx, M::PointerTag>] {
         &self.stack
     }
 
@@ -294,7 +232,11 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
 
     /// Mark a storage as live, killing the previous content and returning it.
     /// Remember to deallocate that!
-    pub fn storage_live(&mut self, local: mir::Local) -> EvalResult<'tcx, LocalValue> {
+    pub fn storage_live(
+        &mut self,
+        local: mir::Local
+    ) -> EvalResult<'tcx, LocalValue<M::PointerTag>> {
+        assert!(local != mir::RETURN_PLACE, "Cannot make return place live");
         trace!("{:?} is now live", local);
 
         let layout = self.layout_of_local(self.cur_frame(), local)?;
@@ -305,13 +247,14 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
 
     /// Returns the old value of the local.
     /// Remember to deallocate that!
-    pub fn storage_dead(&mut self, local: mir::Local) -> LocalValue {
+    pub fn storage_dead(&mut self, local: mir::Local) -> LocalValue<M::PointerTag> {
+        assert!(local != mir::RETURN_PLACE, "Cannot make return place dead");
         trace!("{:?} is now dead", local);
 
         mem::replace(&mut self.frame_mut().locals[local], LocalValue::Dead)
     }
 
-    pub fn str_to_value(&mut self, s: &str) -> EvalResult<'tcx, Value> {
+    pub fn str_to_value(&mut self, s: &str) -> EvalResult<'tcx, Value<M::PointerTag>> {
         let ptr = self.memory.allocate_static_bytes(s.as_bytes());
         Ok(Value::new_slice(Scalar::Ptr(ptr), s.len() as u64, self.tcx.tcx))
     }
@@ -389,22 +332,16 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
     }
 
     /// Return the actual dynamic size and alignment of the place at the given type.
-    /// Only the "extra" (metadata) part of the place matters.
+    /// Only the "meta" (metadata) part of the place matters.
+    /// This can fail to provide an answer for extern types.
     pub(super) fn size_and_align_of(
         &self,
-        metadata: Option<Scalar>,
+        metadata: Option<Scalar<M::PointerTag>>,
         layout: TyLayout<'tcx>,
-    ) -> EvalResult<'tcx, (Size, Align)> {
-        let metadata = match metadata {
-            None => {
-                assert!(!layout.is_unsized());
-                return Ok(layout.size_and_align())
-            }
-            Some(metadata) => {
-                assert!(layout.is_unsized());
-                metadata
-            }
-        };
+    ) -> EvalResult<'tcx, Option<(Size, Align)>> {
+        if !layout.is_unsized() {
+            return Ok(Some(layout.size_and_align()));
+        }
         match layout.ty.sty {
             ty::Adt(..) | ty::Tuple(..) => {
                 // First get the size of all statically known fields.
@@ -424,9 +361,11 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
                 );
 
                 // Recurse to get the size of the dynamically sized field (must be
-                // the last field).
+                // the last field).  Can't have foreign types here, how would we
+                // adjust alignment and size for them?
                 let field = layout.field(self, layout.fields.count() - 1)?;
-                let (unsized_size, unsized_align) = self.size_and_align_of(Some(metadata), field)?;
+                let (unsized_size, unsized_align) = self.size_and_align_of(metadata, field)?
+                    .expect("Fields cannot be extern types");
 
                 // FIXME (#26403, #27023): We should be adding padding
                 // to `sized_size` (to accommodate the `unsized_align`
@@ -453,18 +392,22 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
                 //
                 //   `(size + (align-1)) & -align`
 
-                Ok((size.abi_align(align), align))
+                Ok(Some((size.abi_align(align), align)))
             }
             ty::Dynamic(..) => {
-                let vtable = metadata.to_ptr()?;
+                let vtable = metadata.expect("dyn trait fat ptr must have vtable").to_ptr()?;
                 // the second entry in the vtable is the dynamic size of the object.
-                self.read_size_and_align_from_vtable(vtable)
+                Ok(Some(self.read_size_and_align_from_vtable(vtable)?))
             }
 
             ty::Slice(_) | ty::Str => {
-                let len = metadata.to_usize(self)?;
+                let len = metadata.expect("slice fat ptr must have vtable").to_usize(self)?;
                 let (elem_size, align) = layout.field(self, 0)?.size_and_align();
-                Ok((elem_size * len, align))
+                Ok(Some((elem_size * len, align)))
+            }
+
+            ty::Foreign(_) => {
+                Ok(None)
             }
 
             _ => bug!("size_and_align_of::<{:?}> not supported", layout.ty),
@@ -473,9 +416,9 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
     #[inline]
     pub fn size_and_align_of_mplace(
         &self,
-        mplace: MPlaceTy<'tcx>
-    ) -> EvalResult<'tcx, (Size, Align)> {
-        self.size_and_align_of(mplace.extra, mplace.layout)
+        mplace: MPlaceTy<'tcx, M::PointerTag>
+    ) -> EvalResult<'tcx, Option<(Size, Align)>> {
+        self.size_and_align_of(mplace.meta, mplace.layout)
     }
 
     pub fn push_stack_frame(
@@ -483,7 +426,7 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
         instance: ty::Instance<'tcx>,
         span: source_map::Span,
         mir: &'mir mir::Mir<'tcx>,
-        return_place: Place,
+        return_place: Option<PlaceTy<'tcx, M::PointerTag>>,
         return_to_block: StackPopCleanup,
     ) -> EvalResult<'tcx> {
         ::log_settings::settings().indentation += 1;
@@ -510,6 +453,9 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
             let dummy =
                 LocalValue::Live(Operand::Immediate(Value::Scalar(ScalarMaybeUndef::Undef)));
             let mut locals = IndexVec::from_elem(dummy, &mir.local_decls);
+            // Return place is handled specially by the `eval_place` functions, and the
+            // entry in `locals` should never be used. Make it dead, to be sure.
+            locals[mir::RETURN_PLACE] = LocalValue::Dead;
             // Now mark those locals as dead that we do not want to initialize
             match self.tcx.describe_def(instance.def_id()) {
                 // statics and constants don't have `Storage*` statements, no need to look for them
@@ -547,7 +493,7 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
             self.frame_mut().locals = locals;
         }
 
-        if self.stack.len() > self.stack_limit {
+        if self.stack.len() > self.tcx.sess.const_eval_stack_frame_limit {
             err!(StackFrameLimitReached)
         } else {
             Ok(())
@@ -565,20 +511,46 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
             }
             StackPopCleanup::None { cleanup } => {
                 if !cleanup {
-                    // Leak the locals
+                    // Leak the locals. Also skip validation, this is only used by
+                    // static/const computation which does its own (stronger) final
+                    // validation.
                     return Ok(());
                 }
             }
         }
-        // deallocate all locals that are backed by an allocation
+        // Deallocate all locals that are backed by an allocation.
         for local in frame.locals {
             self.deallocate_local(local)?;
+        }
+        // Validate the return value.
+        if let Some(return_place) = frame.return_place {
+            if M::enforce_validity(self) {
+                // Data got changed, better make sure it matches the type!
+                // It is still possible that the return place held invalid data while
+                // the function is running, but that's okay because nobody could have
+                // accessed that same data from the "outside" to observe any broken
+                // invariant -- that is, unless a function somehow has a ptr to
+                // its return place... but the way MIR is currently generated, the
+                // return place is always a local and then this cannot happen.
+                self.validate_operand(
+                    self.place_to_op(return_place)?,
+                    &mut vec![],
+                    None,
+                    /*const_mode*/false,
+                )?;
+            }
+        } else {
+            // Uh, that shouln't happen... the function did not intend to return
+            return err!(Unreachable);
         }
 
         Ok(())
     }
 
-    pub(super) fn deallocate_local(&mut self, local: LocalValue) -> EvalResult<'tcx> {
+    pub(super) fn deallocate_local(
+        &mut self,
+        local: LocalValue<M::PointerTag>,
+    ) -> EvalResult<'tcx> {
         // FIXME: should we tell the user that there was a local which was never written to?
         if let LocalValue::Live(Operand::Indirect(MemPlace { ptr, .. })) = local {
             trace!("deallocating local");
@@ -600,12 +572,12 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
     }
 
     #[inline(always)]
-    pub fn frame(&self) -> &Frame<'mir, 'tcx> {
+    pub fn frame(&self) -> &Frame<'mir, 'tcx, M::PointerTag> {
         self.stack.last().expect("no call frames exist")
     }
 
     #[inline(always)]
-    pub fn frame_mut(&mut self) -> &mut Frame<'mir, 'tcx> {
+    pub fn frame_mut(&mut self) -> &mut Frame<'mir, 'tcx, M::PointerTag> {
         self.stack.last_mut().expect("no call frames exist")
     }
 
@@ -621,7 +593,7 @@ impl<'a, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M
         }
     }
 
-    pub fn dump_place(&self, place: Place) {
+    pub fn dump_place(&self, place: Place<M::PointerTag>) {
         // Debug output
         if !log_enabled!(::log::Level::Trace) {
             return;

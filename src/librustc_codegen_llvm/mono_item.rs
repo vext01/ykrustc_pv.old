@@ -108,8 +108,8 @@ pub trait MonoItemExt<'a, 'tcx>: fmt::Debug + BaseMonoItemExt<'a, 'tcx> {
         match *self.as_mono_item() {
             MonoItem::Fn(instance) => {
                 format!("Fn({:?}, {})",
-                         instance.def,
-                         instance.substs.as_ptr() as usize)
+                        instance.def,
+                        instance.substs.as_ptr() as usize)
             }
             MonoItem::Static(id) => {
                 format!("Static({:?})", id)
@@ -180,7 +180,7 @@ fn predefine_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
 
     debug!("predefine_fn: mono_ty = {:?} instance = {:?}", mono_ty, instance);
     if instance.def.is_inline(cx.tcx) {
-        attributes::inline(lldecl, attributes::InlineAttr::Hint);
+        attributes::inline(cx, lldecl, attributes::InlineAttr::Hint);
     }
     attributes::from_fn_attrs(cx, lldecl, Some(instance.def.def_id()));
 

@@ -21,6 +21,7 @@ use memmap;
 use rustc_incremental::{copy_cgu_workproducts_to_incr_comp_cache_dir,
                         in_incr_comp_dir, in_incr_comp_dir_sess};
 use rustc::dep_graph::{WorkProduct, WorkProductId, WorkProductFileKind};
+use rustc::dep_graph::cgu_reuse_tracker::CguReuseTracker;
 use rustc::middle::cstore::EncodedMetadata;
 use rustc::session::config::{self, OutputFilenames, OutputType, Passes, Sanitizer, Lto};
 use rustc::session::Session;
@@ -195,6 +196,7 @@ pub fn target_machine_factory(sess: &Session, find_features: bool)
     let features = CString::new(features).unwrap();
     let is_pie_binary = !find_features && is_pie_binary(sess);
     let trap_unreachable = sess.target.target.options.trap_unreachable;
+    let emit_stack_size_section = sess.opts.debugging_opts.emit_stack_sizes;
 
     let asm_comments = sess.asm_comments();
 
@@ -212,6 +214,7 @@ pub fn target_machine_factory(sess: &Session, find_features: bool)
                 trap_unreachable,
                 singlethread,
                 asm_comments,
+                emit_stack_size_section,
             )
         };
 
@@ -377,6 +380,8 @@ pub struct CodegenContext {
     // The incremental compilation session directory, or None if we are not
     // compiling incrementally
     pub incr_comp_session_dir: Option<PathBuf>,
+    // Used to update CGU re-use information during the thinlto phase.
+    pub cgu_reuse_tracker: CguReuseTracker,
     // Channel back to the main control thread to send messages to
     coordinator_send: Sender<Box<dyn Any + Send>>,
     // A reference to the TimeGraph so we can register timings. None means that
@@ -937,7 +942,6 @@ fn need_pre_thin_lto_bitcode_for_incr_comp(sess: &Session) -> bool {
     }
 
     match sess.lto() {
-        Lto::Yes |
         Lto::Fat |
         Lto::No => false,
         Lto::Thin |
@@ -1372,7 +1376,7 @@ fn execute_optimize_work_item(cgcx: &CodegenContext,
         // require LTO so the request for LTO is always unconditionally
         // passed down to the backend, but we don't actually want to do
         // anything about it yet until we've got a final product.
-        Lto::Yes | Lto::Fat | Lto::Thin => {
+        Lto::Fat | Lto::Thin => {
             cgcx.crate_types.len() != 1 ||
                 cgcx.crate_types[0] != config::CrateType::Rlib
         }
@@ -1552,7 +1556,7 @@ fn start_executing_work(tcx: TyCtxt,
                 exported_symbols.insert(LOCAL_CRATE, copy_symbols(LOCAL_CRATE));
                 Some(Arc::new(exported_symbols))
             }
-            Lto::Yes | Lto::Fat | Lto::Thin => {
+            Lto::Fat | Lto::Thin => {
                 exported_symbols.insert(LOCAL_CRATE, copy_symbols(LOCAL_CRATE));
                 for &cnum in tcx.crates().iter() {
                     exported_symbols.insert(cnum, copy_symbols(cnum));
@@ -1608,6 +1612,7 @@ fn start_executing_work(tcx: TyCtxt,
         remark: sess.opts.cg.remark.clone(),
         worker: 0,
         incr_comp_session_dir: sess.incr_comp_session_dir_opt().map(|r| r.clone()),
+        cgu_reuse_tracker: sess.cgu_reuse_tracker.clone(),
         coordinator_send,
         diag_emitter: shared_emitter.clone(),
         time_graph,
@@ -2390,6 +2395,8 @@ impl OngoingCodegen {
                 sess.fatal("Error during codegen/LLVM phase.");
             }
         };
+
+        sess.cgu_reuse_tracker.check_expected_reuse(sess);
 
         sess.abort_if_errors();
 

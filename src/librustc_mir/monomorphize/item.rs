@@ -320,12 +320,13 @@ impl<'a, 'tcx> DefPathBasedNames<'a, 'tcx> {
                 output.push(']');
             },
             ty::Dynamic(ref trait_data, ..) => {
-                if let Some(principal) = trait_data.principal() {
-                    self.push_def_path(principal.def_id(), output);
-                    self.push_type_params(principal.skip_binder().substs,
-                        trait_data.projection_bounds(),
-                        output);
-                }
+                let principal = trait_data.principal();
+                self.push_def_path(principal.def_id(), output);
+                self.push_type_params(
+                    principal.skip_binder().substs,
+                    trait_data.projection_bounds(),
+                    output,
+                );
             },
             ty::Foreign(did) => self.push_def_path(did, output),
             ty::FnDef(..) |
@@ -368,7 +369,7 @@ impl<'a, 'tcx> DefPathBasedNames<'a, 'tcx> {
 
                 output.push(')');
 
-                if !sig.output().is_nil() {
+                if !sig.output().is_unit() {
                     output.push_str(" -> ");
                     self.push_type_name(sig.output(), output);
                 }
@@ -382,6 +383,7 @@ impl<'a, 'tcx> DefPathBasedNames<'a, 'tcx> {
             }
             ty::Error |
             ty::Infer(_) |
+            ty::UnnormalizedProjection(..) |
             ty::Projection(..) |
             ty::Param(_) |
             ty::GeneratorWitness(_) |

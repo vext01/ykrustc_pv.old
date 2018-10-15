@@ -182,7 +182,7 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
                 span,
                 scope: OUTERMOST_SOURCE_SCOPE
             },
-            kind: StatementKind::Assign(Place::Local(dest), rvalue)
+            kind: StatementKind::Assign(Place::Local(dest), box rvalue)
         });
     }
 
@@ -217,7 +217,7 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
         // First, take the Rvalue or Call out of the source MIR,
         // or duplicate it, depending on keep_original.
         if loc.statement_index < no_stmts {
-            let (mut rvalue, source_info) = {
+            let (rvalue, source_info) = {
                 let statement = &mut self.source[loc.block].statements[loc.statement_index];
                 let rhs = match statement.kind {
                     StatementKind::Assign(_, ref mut rhs) => rhs,
@@ -230,11 +230,12 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
                 (if self.keep_original {
                     rhs.clone()
                 } else {
-                    let unit = Rvalue::Aggregate(box AggregateKind::Tuple, vec![]);
+                    let unit = box Rvalue::Aggregate(box AggregateKind::Tuple, vec![]);
                     mem::replace(rhs, unit)
                 }, statement.source_info)
             };
 
+            let mut rvalue = *rvalue;
             self.visit_rvalue(&mut rvalue, loc);
             self.assign(new_temp, rvalue, source_info.span);
         } else {
@@ -257,7 +258,7 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
             };
 
             match terminator.kind {
-                TerminatorKind::Call { mut func, mut args, .. } => {
+                TerminatorKind::Call { mut func, mut args, from_hir_call, .. } => {
                     self.visit_operand(&mut func, loc);
                     for arg in &mut args {
                         self.visit_operand(arg, loc);
@@ -271,7 +272,8 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
                             func,
                             args,
                             cleanup: None,
-                            destination: Some((Place::Local(new_temp), new_target))
+                            destination: Some((Place::Local(new_temp), new_target)),
+                            from_hir_call,
                         },
                         ..terminator
                     };
@@ -301,7 +303,7 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
                 Candidate::Ref(loc) => {
                     let ref mut statement = blocks[loc.block].statements[loc.statement_index];
                     match statement.kind {
-                        StatementKind::Assign(_, Rvalue::Ref(_, _, ref mut place)) => {
+                        StatementKind::Assign(_, box Rvalue::Ref(_, _, ref mut place)) => {
                             // Find the underlying local for this (necessarily interior) borrow.
                             // HACK(eddyb) using a recursive function because of mutable borrows.
                             fn interior_base<'a, 'tcx>(place: &'a mut Place<'tcx>)

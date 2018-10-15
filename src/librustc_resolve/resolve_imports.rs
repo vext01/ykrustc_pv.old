@@ -196,7 +196,11 @@ impl<'a, 'crateloader> Resolver<'a, 'crateloader> {
                     }
 
                     // Fall back to resolving to an external crate.
-                    if !(ns == TypeNS && self.extern_prelude.contains(&ident.name)) {
+                    if !(
+                        ns == TypeNS &&
+                        !ident.is_path_segment_keyword() &&
+                        self.session.extern_prelude.contains(&ident.name)
+                    ) {
                         // ... unless the crate name is not in the `extern_prelude`.
                         return binding;
                     }
@@ -211,7 +215,11 @@ impl<'a, 'crateloader> Resolver<'a, 'crateloader> {
                     )
                 {
                     self.resolve_crate_root(ident)
-                } else if ns == TypeNS && !ident.is_path_segment_keyword() {
+                } else if
+                    ns == TypeNS &&
+                    !ident.is_path_segment_keyword() &&
+                    self.session.extern_prelude.contains(&ident.name)
+                {
                     let crate_id =
                         self.crate_loader.process_path_extern(ident.name, ident.span);
                     self.get_module(DefId { krate: crate_id, index: CRATE_DEF_INDEX })
@@ -326,7 +334,7 @@ impl<'a, 'crateloader> Resolver<'a, 'crateloader> {
         // expansion. With restricted shadowing names from globs and macro expansions cannot
         // shadow names from outer scopes, so we can freely fallback from module search to search
         // in outer scopes. To continue search in outer scopes we have to lie a bit and return
-        // `Determined` to `resolve_lexical_macro_path_segment` even if the correct answer
+        // `Determined` to `early_resolve_ident_in_lexical_scope` even if the correct answer
         // for in-module resolution could be `Undetermined`.
         if restricted_shadowing {
             return Err(Determined);
@@ -452,6 +460,16 @@ impl<'a, 'crateloader> Resolver<'a, 'crateloader> {
         })
     }
 
+    crate fn check_reserved_macro_name(&self, ident: Ident, ns: Namespace) {
+        // Reserve some names that are not quite covered by the general check
+        // performed on `Resolver::builtin_attrs`.
+        if ns == MacroNS &&
+           (ident.name == "cfg" || ident.name == "cfg_attr" || ident.name == "derive") {
+            self.session.span_err(ident.span,
+                                  &format!("name `{}` is reserved in macro namespace", ident));
+        }
+    }
+
     // Define the name or return the existing binding if there is a collision.
     pub fn try_define(&mut self,
                       module: Module<'a>,
@@ -459,6 +477,8 @@ impl<'a, 'crateloader> Resolver<'a, 'crateloader> {
                       ns: Namespace,
                       binding: &'a NameBinding<'a>)
                       -> Result<(), &'a NameBinding<'a>> {
+        self.check_reserved_macro_name(ident, ns);
+        self.set_binding_parent_module(binding, module);
         self.update_resolution(module, ident, ns, |this, resolution| {
             if let Some(old_binding) = resolution.binding {
                 if binding.is_glob_import() {
@@ -619,15 +639,16 @@ impl<'a, 'b:'a, 'c: 'b> ImportResolver<'a, 'b, 'c> {
             self.finalize_resolutions_in(module);
         }
 
-        #[derive(Default)]
-        struct UniformPathsCanaryResult<'a> {
+        struct UniformPathsCanaryResults<'a> {
+            name: Name,
             module_scope: Option<&'a NameBinding<'a>>,
             block_scopes: Vec<&'a NameBinding<'a>>,
         }
+
         // Collect all tripped `uniform_paths` canaries separately.
         let mut uniform_paths_canaries: BTreeMap<
-            (Span, NodeId),
-            (Name, PerNS<UniformPathsCanaryResult>),
+            (Span, NodeId, Namespace),
+            UniformPathsCanaryResults,
         > = BTreeMap::new();
 
         let mut errors = false;
@@ -654,21 +675,25 @@ impl<'a, 'b:'a, 'c: 'b> ImportResolver<'a, 'b, 'c> {
                     import.module_path.len() > 0 &&
                     import.module_path[0].name == keywords::SelfValue.name();
 
-                let (prev_name, canary_results) =
-                    uniform_paths_canaries.entry((import.span, import.id))
-                        .or_insert((name, PerNS::default()));
-
-                // All the canaries with the same `id` should have the same `name`.
-                assert_eq!(*prev_name, name);
-
                 self.per_ns(|_, ns| {
                     if let Some(result) = result[ns].get().ok() {
+                        let canary_results =
+                            uniform_paths_canaries.entry((import.span, import.id, ns))
+                                .or_insert(UniformPathsCanaryResults {
+                                    name,
+                                    module_scope: None,
+                                    block_scopes: vec![],
+                                });
+
+                        // All the canaries with the same `id` should have the same `name`.
+                        assert_eq!(canary_results.name, name);
+
                         if has_explicit_self {
                             // There should only be one `self::x` (module-scoped) canary.
-                            assert!(canary_results[ns].module_scope.is_none());
-                            canary_results[ns].module_scope = Some(result);
+                            assert!(canary_results.module_scope.is_none());
+                            canary_results.module_scope = Some(result);
                         } else {
-                            canary_results[ns].block_scopes.push(result);
+                            canary_results.block_scopes.push(result);
                         }
                     }
                 });
@@ -709,77 +734,72 @@ impl<'a, 'b:'a, 'c: 'b> ImportResolver<'a, 'b, 'c> {
         }
 
         let uniform_paths_feature = self.session.features_untracked().uniform_paths;
-        for ((span, _), (name, results)) in uniform_paths_canaries {
-            self.per_ns(|this, ns| {
-                let external_crate = if ns == TypeNS && this.extern_prelude.contains(&name) {
-                    let crate_id =
-                        this.crate_loader.process_path_extern(name, span);
-                    Some(DefId { krate: crate_id, index: CRATE_DEF_INDEX })
-                } else {
-                    None
-                };
-                let result_filter = |result: &&NameBinding| {
-                    // Ignore canaries that resolve to an import of the same crate.
-                    // That is, we allow `use crate_name; use crate_name::foo;`.
-                    if let Some(def_id) = external_crate {
-                        if let Some(module) = result.module() {
-                            if module.normal_ancestor_id == def_id {
-                                return false;
-                            }
-                        }
-                    }
+        for ((span, _, ns), results) in uniform_paths_canaries {
+            let name = results.name;
+            let external_crate = if ns == TypeNS && self.session.extern_prelude.contains(&name) {
+                let crate_id =
+                    self.crate_loader.process_path_extern(name, span);
+                Some(Def::Mod(DefId { krate: crate_id, index: CRATE_DEF_INDEX }))
+            } else {
+                None
+            };
 
-                    true
-                };
-                let module_scope = results[ns].module_scope.filter(result_filter);
-                let block_scopes = || {
-                    results[ns].block_scopes.iter().cloned().filter(result_filter)
-                };
+            // Currently imports can't resolve in non-module scopes,
+            // we only have canaries in them for future-proofing.
+            if external_crate.is_none() && results.module_scope.is_none() {
+                continue;
+            }
 
-                // An ambiguity requires more than one possible resolution.
+            {
+                let mut all_results = external_crate.into_iter().chain(
+                    results.module_scope.iter()
+                        .chain(&results.block_scopes)
+                        .map(|binding| binding.def())
+                );
+                let first = all_results.next().unwrap();
+
+                // An ambiguity requires more than one *distinct* possible resolution.
                 let possible_resultions =
-                    (external_crate.is_some() as usize) +
-                    (module_scope.is_some() as usize) +
-                    (block_scopes().next().is_some() as usize);
+                    1 + all_results.filter(|&def| def != first).count();
                 if possible_resultions <= 1 {
-                    return;
+                    continue;
                 }
+            }
 
-                errors = true;
+            errors = true;
 
-                let msg = format!("`{}` import is ambiguous", name);
-                let mut err = this.session.struct_span_err(span, &msg);
-                let mut suggestion_choices = String::new();
-                if external_crate.is_some() {
-                    write!(suggestion_choices, "`::{}`", name);
-                    err.span_label(span,
-                        format!("can refer to external crate `::{}`", name));
+            let msg = format!("`{}` import is ambiguous", name);
+            let mut err = self.session.struct_span_err(span, &msg);
+            let mut suggestion_choices = String::new();
+            if external_crate.is_some() {
+                write!(suggestion_choices, "`::{}`", name);
+                err.span_label(span,
+                    format!("can refer to external crate `::{}`", name));
+            }
+            if let Some(result) = results.module_scope {
+                if !suggestion_choices.is_empty() {
+                    suggestion_choices.push_str(" or ");
                 }
-                if let Some(result) = module_scope {
-                    if !suggestion_choices.is_empty() {
-                        suggestion_choices.push_str(" or ");
-                    }
-                    write!(suggestion_choices, "`self::{}`", name);
-                    if uniform_paths_feature {
-                        err.span_label(result.span,
-                            format!("can refer to `self::{}`", name));
-                    } else {
-                        err.span_label(result.span,
-                            format!("may refer to `self::{}` in the future", name));
-                    }
-                }
-                for result in block_scopes() {
-                    err.span_label(result.span,
-                        format!("shadowed by block-scoped `{}`", name));
-                }
-                err.help(&format!("write {} explicitly instead", suggestion_choices));
+                write!(suggestion_choices, "`self::{}`", name);
                 if uniform_paths_feature {
-                    err.note("relative `use` paths enabled by `#![feature(uniform_paths)]`");
+                    err.span_label(result.span,
+                        format!("can refer to `self::{}`", name));
                 } else {
-                    err.note("in the future, `#![feature(uniform_paths)]` may become the default");
+                    err.span_label(result.span,
+                        format!("may refer to `self::{}` in the future", name));
                 }
-                err.emit();
-            });
+            }
+            for result in results.block_scopes {
+                err.span_label(result.span,
+                    format!("shadowed by block-scoped `{}`", name));
+            }
+            err.help(&format!("write {} explicitly instead", suggestion_choices));
+            if uniform_paths_feature {
+                err.note("relative `use` paths enabled by `#![feature(uniform_paths)]`");
+            } else {
+                err.note("in the future, `#![feature(uniform_paths)]` may become the default");
+            }
+            err.emit();
         }
 
         if !error_vec.is_empty() {
@@ -938,17 +958,13 @@ impl<'a, 'b:'a, 'c: 'b> ImportResolver<'a, 'b, 'c> {
                 return None;
             }
             PathResult::Failed(span, msg, true) => {
-                let (mut self_path, mut self_result) = (module_path.clone(), None);
-                let is_special = |ident: Ident| ident.is_path_segment_keyword() &&
-                                                ident.name != keywords::CrateRoot.name();
-                if !self_path.is_empty() && !is_special(self_path[0]) &&
-                   !(self_path.len() > 1 && is_special(self_path[1])) {
-                    self_path[0].name = keywords::SelfValue.name();
-                    self_result = Some(self.resolve_path(None, &self_path, None, false,
-                                                         span, CrateLint::No));
-                }
-                return if let Some(PathResult::Module(..)) = self_result {
-                    Some((span, format!("Did you mean `{}`?", names_to_string(&self_path[..]))))
+                return if let Some(suggested_path) = self.make_path_suggestion(
+                    span, module_path.clone()
+                ) {
+                    Some((
+                        span,
+                        format!("Did you mean `{}`?", names_to_string(&suggested_path[..]))
+                    ))
                 } else {
                     Some((span, msg))
                 };

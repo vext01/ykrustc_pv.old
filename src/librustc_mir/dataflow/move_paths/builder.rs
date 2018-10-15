@@ -281,7 +281,7 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
                 }
                 self.gather_rvalue(rval);
             }
-            StatementKind::ReadForMatch(ref place) => {
+            StatementKind::FakeRead(_, ref place) => {
                 self.create_move_path(place);
             }
             StatementKind::InlineAsm { ref outputs, ref inputs, ref asm } => {
@@ -290,7 +290,7 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
                         self.gather_init(output, InitKind::Deep);
                     }
                 }
-                for input in inputs {
+                for input in inputs.iter() {
                     self.gather_operand(input);
                 }
             }
@@ -304,7 +304,7 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
             }
             StatementKind::EndRegion(_) |
             StatementKind::Validate(..) |
-            StatementKind::UserAssertTy(..) |
+            StatementKind::AscribeUserType(..) |
             StatementKind::Nop => {}
         }
     }
@@ -380,7 +380,13 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
                 self.gather_operand(value);
                 self.gather_init(location, InitKind::Deep);
             }
-            TerminatorKind::Call { ref func, ref args, ref destination, cleanup: _ } => {
+            TerminatorKind::Call {
+                ref func,
+                ref args,
+                ref destination,
+                cleanup: _,
+                from_hir_call: _,
+            } => {
                 self.gather_operand(func);
                 for arg in args {
                     self.gather_operand(arg);

@@ -198,9 +198,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         self.deduce_sig_from_projection(None, &pb)
                     })
                     .next();
-                let kind = object_type
-                    .principal()
-                    .and_then(|p| self.tcx.lang_items().fn_trait_kind(p.def_id()));
+                let kind = self.tcx.lang_items().fn_trait_kind(object_type.principal().def_id());
                 (sig, kind)
             }
             ty::Infer(ty::TyVar(vid)) => self.deduce_expectations_from_obligations(vid),
@@ -231,20 +229,19 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     obligation.predicate
                 );
 
-                match obligation.predicate {
+                if let ty::Predicate::Projection(ref proj_predicate) = obligation.predicate {
                     // Given a Projection predicate, we can potentially infer
                     // the complete signature.
-                    ty::Predicate::Projection(ref proj_predicate) => {
-                        let trait_ref = proj_predicate.to_poly_trait_ref(self.tcx);
-                        self.self_type_matches_expected_vid(trait_ref, expected_vid)
-                            .and_then(|_| {
-                                self.deduce_sig_from_projection(
-                                    Some(obligation.cause.span),
-                                    proj_predicate,
-                                )
-                            })
-                    }
-                    _ => None,
+                    let trait_ref = proj_predicate.to_poly_trait_ref(self.tcx);
+                    self.self_type_matches_expected_vid(trait_ref, expected_vid)
+                        .and_then(|_| {
+                            self.deduce_sig_from_projection(
+                                Some(obligation.cause.span),
+                                proj_predicate
+                            )
+                        })
+                } else {
+                    None
                 }
             })
             .next();
@@ -318,9 +315,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
         let input_tys = match arg_param_ty.sty {
             ty::Tuple(tys) => tys.into_iter(),
-            _ => {
-                return None;
-            }
+            _ => return None
         };
 
         let ret_param_ty = projection.skip_binder().ty;
@@ -504,7 +499,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             .sig
             .inputs()
             .iter()
-            .map(|ty| ArgKind::from_expected_ty(ty))
+            .map(|ty| ArgKind::from_expected_ty(ty, None))
             .collect();
         let (closure_span, found_args) = self.get_fn_like_arguments(expr_map_node);
         let expected_span = expected_sig.cause_span.unwrap_or(closure_span);
@@ -560,8 +555,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             // The liberated version of this signature should be be a subtype
             // of the liberated form of the expectation.
             for ((hir_ty, &supplied_ty), expected_ty) in decl.inputs.iter()
-                           .zip(*supplied_sig.inputs().skip_binder()) // binder moved to (*) below
-                           .zip(expected_sigs.liberated_sig.inputs())
+               .zip(*supplied_sig.inputs().skip_binder()) // binder moved to (*) below
+               .zip(expected_sigs.liberated_sig.inputs())
             // `liberated_sig` is E'.
             {
                 // Instantiate (this part of..) S to S', i.e., with fresh variables.
@@ -638,11 +633,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             self.tcx.types.err
         });
 
-        match decl.output {
-            hir::Return(ref output) => {
-                astconv.ast_ty_to_ty(&output);
-            }
-            hir::DefaultReturn(_) => {}
+        if let hir::Return(ref output) = decl.output {
+            astconv.ast_ty_to_ty(&output);
         }
 
         let result = ty::Binder::bind(self.tcx.mk_fn_sig(

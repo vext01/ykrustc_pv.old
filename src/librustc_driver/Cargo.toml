@@ -36,5 +36,6 @@ rustc_typeck = { path = "../librustc_typeck" }
 rustc_yk = { path = "../librustc_yk" }
 serialize = { path = "../libserialize" }
 syntax = { path = "../libsyntax" }
+smallvec = { version = "0.6.5", features = ["union"] }
 syntax_ext = { path = "../libsyntax_ext" }
 syntax_pos = { path = "../libsyntax_pos" }

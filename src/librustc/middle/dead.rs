@@ -18,6 +18,7 @@ use hir::intravisit::{self, Visitor, NestedVisitorMap};
 use hir::itemlikevisit::ItemLikeVisitor;
 
 use hir::def::Def;
+use hir::CodegenFnAttrFlags;
 use hir::def_id::{DefId, LOCAL_CRATE};
 use lint;
 use middle::privacy;
@@ -131,12 +132,10 @@ impl<'a, 'tcx> MarkSymbolVisitor<'a, 'tcx> {
 
     fn mark_live_symbols(&mut self) {
         let mut scanned = FxHashSet();
-        while !self.worklist.is_empty() {
-            let id = self.worklist.pop().unwrap();
-            if scanned.contains(&id) {
+        while let Some(id) = self.worklist.pop() {
+            if !scanned.insert(id) {
                 continue
             }
-            scanned.insert(id);
 
             if let Some(ref node) = self.tcx.hir.find(id) {
                 self.live_symbols.insert(id);
@@ -212,7 +211,7 @@ impl<'a, 'tcx> Visitor<'tcx> for MarkSymbolVisitor<'a, 'tcx> {
     }
 
     fn visit_variant_data(&mut self, def: &'tcx hir::VariantData, _: ast::Name,
-                        _: &hir::Generics, _: ast::NodeId, _: syntax_pos::Span) {
+                          _: &hir::Generics, _: ast::NodeId, _: syntax_pos::Span) {
         let has_repr_c = self.repr_has_repr_c;
         let inherited_pub_visibility = self.inherited_pub_visibility;
         let live_fields = def.fields().iter().filter(|f| {
@@ -285,7 +284,7 @@ impl<'a, 'tcx> Visitor<'tcx> for MarkSymbolVisitor<'a, 'tcx> {
     }
 }
 
-fn has_allow_dead_code_or_lang_attr(tcx: TyCtxt,
+fn has_allow_dead_code_or_lang_attr(tcx: TyCtxt<'_, '_, '_>,
                                     id: ast::NodeId,
                                     attrs: &[ast::Attribute]) -> bool {
     if attr::contains_name(attrs, "lang") {
@@ -304,14 +303,18 @@ fn has_allow_dead_code_or_lang_attr(tcx: TyCtxt,
         return true;
     }
 
-    // #[used] also keeps the item alive forcefully,
-    // e.g. for placing it in a specific section.
-    if attr::contains_name(attrs, "used") {
+    // Don't lint about global allocators
+    if attr::contains_name(attrs, "global_allocator") {
         return true;
     }
 
-    // Don't lint about global allocators
-    if attr::contains_name(attrs, "global_allocator") {
+    let def_id = tcx.hir.local_def_id(id);
+    let cg_attrs = tcx.codegen_fn_attrs(def_id);
+
+    // #[used], #[no_mangle], #[export_name], etc also keeps the item alive
+    // forcefully, e.g. for placing it in a specific section.
+    if cg_attrs.contains_extern_indicator() ||
+        cg_attrs.flags.contains(CodegenFnAttrFlags::USED) {
         return true;
     }
 
@@ -395,7 +398,13 @@ fn create_and_seed_worklist<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                       krate: &hir::Crate)
                                       -> Vec<ast::NodeId>
 {
-    let worklist = access_levels.map.iter().map(|(&id, _)| id).chain(
+    let worklist = access_levels.map.iter().filter_map(|(&id, level)| {
+        if level >= &privacy::AccessLevel::Reachable {
+            Some(id)
+        } else {
+            None
+        }
+    }).chain(
         // Seed entry point
         tcx.sess.entry_fn.borrow().map(|(id, _, _)| id)
     ).collect::<Vec<_>>();
@@ -494,8 +503,8 @@ impl<'a, 'tcx> DeadVisitor<'a, 'tcx> {
                       ctor_id: Option<ast::NodeId>)
                       -> bool {
         if self.live_symbols.contains(&id)
-           || ctor_id.map_or(false,
-                             |ctor| self.live_symbols.contains(&ctor)) {
+           || ctor_id.map_or(false, |ctor| self.live_symbols.contains(&ctor))
+        {
             return true;
         }
         // If it's a type whose items are live, then it's live, too.

@@ -193,7 +193,7 @@ use rustc::hir::itemlikevisit::ItemLikeVisitor;
 
 use rustc::hir::Node;
 use rustc::hir::def_id::DefId;
-use rustc::mir::interpret::{AllocId, ConstValue, ScalarMaybeUndef};
+use rustc::mir::interpret::{AllocId, ConstValue};
 use rustc::middle::lang_items::{ExchangeMallocFnLangItem, StartFnLangItem};
 use rustc::ty::subst::Substs;
 use rustc::ty::{self, TypeFoldable, Ty, TyCtxt, GenericParamDefKind};
@@ -210,7 +210,7 @@ use rustc::util::common::time;
 
 use monomorphize::item::{MonoItemExt, DefPathBasedNames, InstantiationMode};
 
-use rustc_data_structures::bitvec::BitVector;
+use rustc_data_structures::bit_set::GrowableBitSet;
 use rustc_data_structures::sync::{MTRef, MTLock, ParallelIterator, par_iter};
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
@@ -231,7 +231,7 @@ pub struct InliningMap<'tcx> {
 
     // Contains one bit per mono item in the `targets` field. That bit
     // is true if that mono item needs to be inlined into every CGU.
-    inlines: BitVector<usize>,
+    inlines: GrowableBitSet<usize>,
 }
 
 impl<'tcx> InliningMap<'tcx> {
@@ -240,7 +240,7 @@ impl<'tcx> InliningMap<'tcx> {
         InliningMap {
             index: FxHashMap(),
             targets: Vec::new(),
-            inlines: BitVector::with_capacity(1024),
+            inlines: GrowableBitSet::with_capacity(1024),
         }
     }
 
@@ -256,7 +256,7 @@ impl<'tcx> InliningMap<'tcx> {
         let new_items_count_total = new_items_count + self.targets.len();
 
         self.targets.reserve(new_items_count);
-        self.inlines.grow(new_items_count_total);
+        self.inlines.ensure(new_items_count_total);
 
         for (i, (target, inline)) in new_targets.enumerate() {
             self.targets.push(target);
@@ -907,22 +907,20 @@ fn create_mono_items_for_vtable_methods<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             !impl_ty.needs_subst() && !impl_ty.has_escaping_regions());
 
     if let ty::Dynamic(ref trait_ty, ..) = trait_ty.sty {
-        if let Some(principal) = trait_ty.principal() {
-            let poly_trait_ref = principal.with_self_ty(tcx, impl_ty);
-            assert!(!poly_trait_ref.has_escaping_regions());
+        let poly_trait_ref = trait_ty.principal().with_self_ty(tcx, impl_ty);
+        assert!(!poly_trait_ref.has_escaping_regions());
 
-            // Walk all methods of the trait, including those of its supertraits
-            let methods = tcx.vtable_methods(poly_trait_ref);
-            let methods = methods.iter().cloned().filter_map(|method| method)
-                .map(|(def_id, substs)| ty::Instance::resolve(
-                        tcx,
-                        ty::ParamEnv::reveal_all(),
-                        def_id,
-                        substs).unwrap())
-                .filter(|&instance| should_monomorphize_locally(tcx, &instance))
-                .map(|instance| create_fn_mono_item(instance));
-            output.extend(methods);
-        }
+        // Walk all methods of the trait, including those of its supertraits
+        let methods = tcx.vtable_methods(poly_trait_ref);
+        let methods = methods.iter().cloned().filter_map(|method| method)
+            .map(|(def_id, substs)| ty::Instance::resolve(
+                    tcx,
+                    ty::ParamEnv::reveal_all(),
+                    def_id,
+                    substs).unwrap())
+            .filter(|&instance| should_monomorphize_locally(tcx, &instance))
+            .map(|instance| create_fn_mono_item(instance));
+        output.extend(methods);
         // Also add the destructor
         visit_drop_use(tcx, impl_ty, false, output);
     }
@@ -1163,7 +1161,7 @@ fn collect_miri<'a, 'tcx>(
         }
         Some(AllocType::Memory(alloc)) => {
             trace!("collecting {:?} with {:#?}", alloc_id, alloc);
-            for &inner in alloc.relocations.values() {
+            for &((), inner) in alloc.relocations.values() {
                 collect_miri(tcx, inner, output);
             }
         },
@@ -1263,16 +1261,16 @@ fn collect_const<'a, 'tcx>(
     };
     match val {
         ConstValue::Unevaluated(..) => bug!("const eval yielded unevaluated const"),
-        ConstValue::ScalarPair(Scalar::Ptr(a), ScalarMaybeUndef::Scalar(Scalar::Ptr(b))) => {
+        ConstValue::ScalarPair(Scalar::Ptr(a), Scalar::Ptr(b)) => {
             collect_miri(tcx, a.alloc_id, output);
             collect_miri(tcx, b.alloc_id, output);
         }
-        ConstValue::ScalarPair(_, ScalarMaybeUndef::Scalar(Scalar::Ptr(ptr))) |
+        ConstValue::ScalarPair(_, Scalar::Ptr(ptr)) |
         ConstValue::ScalarPair(Scalar::Ptr(ptr), _) |
         ConstValue::Scalar(Scalar::Ptr(ptr)) =>
             collect_miri(tcx, ptr.alloc_id, output),
         ConstValue::ByRef(_id, alloc, _offset) => {
-            for &id in alloc.relocations.values() {
+            for &((), id) in alloc.relocations.values() {
                 collect_miri(tcx, id, output);
             }
         }

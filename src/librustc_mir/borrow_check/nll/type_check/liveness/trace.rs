@@ -8,21 +8,22 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use borrow_check::location::LocationTable;
 use borrow_check::nll::region_infer::values::{self, PointIndex, RegionValueElements};
 use borrow_check::nll::type_check::liveness::liveness_map::{LiveVar, NllLivenessMap};
 use borrow_check::nll::type_check::liveness::local_use_map::LocalUseMap;
-use borrow_check::nll::type_check::AtLocation;
+use borrow_check::nll::type_check::NormalizeLocation;
 use borrow_check::nll::type_check::TypeChecker;
 use dataflow::move_paths::indexes::MovePathIndex;
 use dataflow::move_paths::MoveData;
 use dataflow::{FlowAtLocation, FlowsAtLocation, MaybeInitializedPlaces};
 use rustc::infer::canonical::QueryRegionConstraint;
-use rustc::mir::{BasicBlock, Local, Location, Mir};
+use rustc::mir::{BasicBlock, ConstraintCategory, Local, Location, Mir};
 use rustc::traits::query::dropck_outlives::DropckOutlivesResult;
 use rustc::traits::query::type_op::outlives::DropckOutlives;
 use rustc::traits::query::type_op::TypeOp;
 use rustc::ty::{Ty, TypeFoldable};
-use rustc_data_structures::bitvec::BitArray;
+use rustc_data_structures::bit_set::HybridBitSet;
 use rustc_data_structures::fx::FxHashMap;
 use std::rc::Rc;
 use util::liveness::LiveVariableMap;
@@ -48,6 +49,7 @@ pub(super) fn trace(
     flow_inits: &mut FlowAtLocation<MaybeInitializedPlaces<'_, 'gcx, 'tcx>>,
     move_data: &MoveData<'tcx>,
     liveness_map: &NllLivenessMap,
+    location_table: &LocationTable,
 ) {
     debug!("trace()");
 
@@ -66,6 +68,7 @@ pub(super) fn trace(
         move_data,
         liveness_map,
         drop_data: FxHashMap::default(),
+        location_table,
     };
 
     LivenessResults::new(cx).compute_for_all_locals();
@@ -104,6 +107,9 @@ where
 
     /// Map tracking which variables need liveness computation.
     liveness_map: &'me NllLivenessMap,
+
+    /// Maps between a MIR Location and a LocationIndex
+    location_table: &'me LocationTable,
 }
 
 struct DropData<'tcx> {
@@ -121,16 +127,16 @@ where
     cx: LivenessContext<'me, 'typeck, 'flow, 'gcx, 'tcx>,
 
     /// Set of points that define the current local.
-    defs: BitArray<PointIndex>,
+    defs: HybridBitSet<PointIndex>,
 
     /// Points where the current variable is "use live" -- meaning
     /// that there is a future "full use" that may use its value.
-    use_live_at: BitArray<PointIndex>,
+    use_live_at: HybridBitSet<PointIndex>,
 
     /// Points where the current variable is "drop live" -- meaning
     /// that there is no future "full use" that may use its value, but
     /// there is a future drop.
-    drop_live_at: BitArray<PointIndex>,
+    drop_live_at: HybridBitSet<PointIndex>,
 
     /// Locations where drops may occur.
     drop_locations: Vec<Location>,
@@ -144,9 +150,9 @@ impl LivenessResults<'me, 'typeck, 'flow, 'gcx, 'tcx> {
         let num_points = cx.elements.num_points();
         LivenessResults {
             cx,
-            defs: BitArray::new(num_points),
-            use_live_at: BitArray::new(num_points),
-            drop_live_at: BitArray::new(num_points),
+            defs: HybridBitSet::new_empty(num_points),
+            use_live_at: HybridBitSet::new_empty(num_points),
+            drop_live_at: HybridBitSet::new_empty(num_points),
             drop_locations: vec![],
             stack: vec![],
         }
@@ -448,11 +454,17 @@ impl LivenessContext<'_, '_, '_, '_, 'tcx> {
     fn add_use_live_facts_for(
         &mut self,
         value: impl TypeFoldable<'tcx>,
-        live_at: &BitArray<PointIndex>,
+        live_at: &HybridBitSet<PointIndex>,
     ) {
         debug!("add_use_live_facts_for(value={:?})", value);
 
-        Self::make_all_regions_live(self.elements, &mut self.typeck, value, live_at)
+        Self::make_all_regions_live(
+            self.elements,
+            &mut self.typeck,
+            value,
+            live_at,
+            self.location_table,
+        )
     }
 
     /// Some variable with type `live_ty` is "drop live" at `location`
@@ -465,7 +477,7 @@ impl LivenessContext<'_, '_, '_, '_, 'tcx> {
         dropped_local: Local,
         dropped_ty: Ty<'tcx>,
         drop_locations: &[Location],
-        live_at: &BitArray<PointIndex>,
+        live_at: &HybridBitSet<PointIndex>,
     ) {
         debug!(
             "add_drop_live_constraint(\
@@ -487,7 +499,11 @@ impl LivenessContext<'_, '_, '_, '_, 'tcx> {
         if let Some(data) = &drop_data.region_constraint_data {
             for &drop_location in drop_locations {
                 self.typeck
-                    .push_region_constraints(drop_location.boring(), data);
+                    .push_region_constraints(
+                        drop_location.to_locations(),
+                        ConstraintCategory::Boring,
+                        data,
+                    );
             }
         }
 
@@ -500,7 +516,13 @@ impl LivenessContext<'_, '_, '_, '_, 'tcx> {
         // All things in the `outlives` array may be touched by
         // the destructor and must be live at this point.
         for &kind in &drop_data.dropck_result.kinds {
-            Self::make_all_regions_live(self.elements, &mut self.typeck, kind, live_at);
+            Self::make_all_regions_live(
+                self.elements,
+                &mut self.typeck,
+                kind,
+                live_at,
+                self.location_table,
+            );
         }
     }
 
@@ -508,7 +530,8 @@ impl LivenessContext<'_, '_, '_, '_, 'tcx> {
         elements: &RegionValueElements,
         typeck: &mut TypeChecker<'_, '_, 'tcx>,
         value: impl TypeFoldable<'tcx>,
-        live_at: &BitArray<PointIndex>,
+        live_at: &HybridBitSet<PointIndex>,
+        location_table: &LocationTable,
     ) {
         debug!("make_all_regions_live(value={:?})", value);
         debug!(
@@ -527,8 +550,12 @@ impl LivenessContext<'_, '_, '_, '_, 'tcx> {
                 .liveness_constraints
                 .add_elements(live_region_vid, live_at);
 
-            if let Some(_) = borrowck_context.all_facts {
-                bug!("polonius liveness facts not implemented yet")
+            if let Some(facts) = borrowck_context.all_facts {
+                for point in live_at.iter() {
+                    let loc = elements.to_location(point);
+                    facts.region_live_at.push((live_region_vid, location_table.start_index(loc)));
+                    facts.region_live_at.push((live_region_vid, location_table.mid_index(loc)));
+                }
             }
         });
     }

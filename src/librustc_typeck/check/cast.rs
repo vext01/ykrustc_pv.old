@@ -40,7 +40,7 @@
 
 use super::FnCtxt;
 
-use errors::DiagnosticBuilder;
+use errors::{DiagnosticBuilder,Applicability};
 use hir::def_id::DefId;
 use lint;
 use rustc::hir;
@@ -73,7 +73,7 @@ enum PointerKind<'tcx> {
     /// No metadata attached, ie pointer to sized type or foreign type
     Thin,
     /// A trait object
-    Vtable(Option<DefId>),
+    Vtable(DefId),
     /// Slice
     Length,
     /// The unsize info of this projection
@@ -105,7 +105,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         Ok(match t.sty {
             ty::Slice(_) | ty::Str => Some(PointerKind::Length),
             ty::Dynamic(ref tty, ..) =>
-                Some(PointerKind::Vtable(tty.principal().map(|p| p.def_id()))),
+                Some(PointerKind::Vtable(tty.principal().def_id())),
             ty::Adt(def, substs) if def.is_struct() => {
                 match def.non_enum_variant().fields.last() {
                     None => Some(PointerKind::Thin),
@@ -124,6 +124,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             ty::Foreign(..) => Some(PointerKind::Thin),
             // We should really try to normalize here.
             ty::Projection(ref pi) => Some(PointerKind::OfProjection(pi)),
+            ty::UnnormalizedProjection(..) => bug!("only used with chalk-engine"),
             ty::Opaque(def_id, substs) => Some(PointerKind::OfOpaque(def_id, substs)),
             ty::Param(ref p) => Some(PointerKind::OfParam(p)),
             // Insufficient type information.
@@ -219,11 +220,11 @@ impl<'a, 'gcx, 'tcx> CastCheck<'tcx> {
                 let cast_ty = fcx.ty_to_string(self.cast_ty);
                 err.span_label(error_span,
                                format!("cannot cast `{}` as `{}`",
-                                        fcx.ty_to_string(self.expr_ty),
-                                        cast_ty));
+                                       fcx.ty_to_string(self.expr_ty),
+                                       cast_ty));
                 if let Ok(snippet) = fcx.sess().source_map().span_to_snippet(self.expr.span) {
                     err.span_help(self.expr.span,
-                                   &format!("did you mean `*{}`?", snippet));
+                        &format!("did you mean `*{}`?", snippet));
                 }
                 err.emit();
             }
@@ -267,16 +268,16 @@ impl<'a, 'gcx, 'tcx> CastCheck<'tcx> {
             }
             CastError::CastToChar => {
                 type_error_struct!(fcx.tcx.sess, self.span, self.expr_ty, E0604,
-                                 "only `u8` can be cast as `char`, not `{}`", self.expr_ty).emit();
+                    "only `u8` can be cast as `char`, not `{}`", self.expr_ty).emit();
             }
             CastError::NonScalar => {
                 type_error_struct!(fcx.tcx.sess, self.span, self.expr_ty, E0605,
-                                 "non-primitive cast: `{}` as `{}`",
-                                 self.expr_ty,
-                                 fcx.ty_to_string(self.cast_ty))
-                                .note("an `as` expression can only be used to convert between \
-                                       primitive types. Consider using the `From` trait")
-                                .emit();
+                                   "non-primitive cast: `{}` as `{}`",
+                                   self.expr_ty,
+                                   fcx.ty_to_string(self.cast_ty))
+                                  .note("an `as` expression can only be used to convert between \
+                                         primitive types. Consider using the `From` trait")
+                                  .emit();
             }
             CastError::SizedUnsizedCast => {
                 use structured_errors::{SizedUnsizedCastError, StructuredDiagnostic};
@@ -299,9 +300,12 @@ impl<'a, 'gcx, 'tcx> CastCheck<'tcx> {
                 err.note("The type information given here is insufficient to check whether \
                           the pointer cast is valid");
                 if unknown_cast_to {
-                    err.span_suggestion_short(self.cast_span,
-                                              "consider giving more type information",
-                                              String::new());
+                    err.span_suggestion_short_with_applicability(
+                        self.cast_span,
+                        "consider giving more type information",
+                        String::new(),
+                        Applicability::Unspecified,
+                    );
                 }
                 err.emit();
             }
@@ -327,9 +331,12 @@ impl<'a, 'gcx, 'tcx> CastCheck<'tcx> {
                 if self.cast_ty.is_trait() {
                     match fcx.tcx.sess.source_map().span_to_snippet(self.cast_span) {
                         Ok(s) => {
-                            err.span_suggestion(self.cast_span,
-                                                "try casting to a reference instead",
-                                                format!("&{}{}", mtstr, s));
+                            err.span_suggestion_with_applicability(
+                                self.cast_span,
+                                "try casting to a reference instead",
+                                format!("&{}{}", mtstr, s),
+                                Applicability::MachineApplicable,
+                            );
                         }
                         Err(_) => {
                             span_help!(err, self.cast_span, "did you mean `&{}{}`?", mtstr, tstr)
@@ -346,9 +353,12 @@ impl<'a, 'gcx, 'tcx> CastCheck<'tcx> {
             ty::Adt(def, ..) if def.is_box() => {
                 match fcx.tcx.sess.source_map().span_to_snippet(self.cast_span) {
                     Ok(s) => {
-                        err.span_suggestion(self.cast_span,
-                                            "try casting to a `Box` instead",
-                                            format!("Box<{}>", s));
+                        err.span_suggestion_with_applicability(
+                            self.cast_span,
+                            "try casting to a `Box` instead",
+                            format!("Box<{}>", s),
+                            Applicability::MachineApplicable,
+                        );
                     }
                     Err(_) => span_help!(err, self.cast_span, "did you mean `Box<{}>`?", tstr),
                 }
@@ -436,7 +446,7 @@ impl<'a, 'gcx, 'tcx> CastCheck<'tcx> {
                                              self.expr_ty,
                                              fcx.tcx.mk_fn_ptr(f),
                                              AllowTwoPhase::No);
-                    if !res.is_ok() {
+                    if res.is_err() {
                         return Err(CastError::NonScalar);
                     }
                     (FnPtr, t_cast)

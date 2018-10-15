@@ -23,5 +23,7 @@ pub struct Bar {
 }
 
 fn main() {
-    let _: AssertSync<Foo> = unimplemented!(); //~ ERROR E0275
+    let _: AssertSync<Foo> = unimplemented!();
+    //~^ ERROR E0277
+    //~| ERROR E0277
 }

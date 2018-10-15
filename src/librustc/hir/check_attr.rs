@@ -14,38 +14,80 @@
 //! conflicts between multiple such attributes attached to the same
 //! item.
 
-use syntax_pos::Span;
-use ty::TyCtxt;
-
 use hir;
 use hir::intravisit::{self, Visitor, NestedVisitorMap};
+use ty::TyCtxt;
+use std::fmt::{self, Display};
+use syntax_pos::Span;
 
 #[derive(Copy, Clone, PartialEq)]
-enum Target {
+pub(crate) enum Target {
+    ExternCrate,
+    Use,
+    Static,
+    Const,
     Fn,
+    Closure,
+    Mod,
+    ForeignMod,
+    GlobalAsm,
+    Ty,
+    Existential,
+    Enum,
     Struct,
     Union,
-    Enum,
-    Const,
-    ForeignMod,
+    Trait,
+    TraitAlias,
+    Impl,
     Expression,
     Statement,
-    Closure,
-    Static,
-    Other,
+}
+
+impl Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", match *self {
+            Target::ExternCrate => "extern crate",
+            Target::Use => "use",
+            Target::Static => "static item",
+            Target::Const => "constant item",
+            Target::Fn => "function",
+            Target::Closure => "closure",
+            Target::Mod => "module",
+            Target::ForeignMod => "foreign module",
+            Target::GlobalAsm => "global asm",
+            Target::Ty => "type alias",
+            Target::Existential => "existential type",
+            Target::Enum => "enum",
+            Target::Struct => "struct",
+            Target::Union => "union",
+            Target::Trait => "trait",
+            Target::TraitAlias => "trait alias",
+            Target::Impl => "item",
+            Target::Expression => "expression",
+            Target::Statement => "statement",
+        })
+    }
 }
 
 impl Target {
-    fn from_item(item: &hir::Item) -> Target {
+    pub(crate) fn from_item(item: &hir::Item) -> Target {
         match item.node {
+            hir::ItemKind::ExternCrate(..) => Target::ExternCrate,
+            hir::ItemKind::Use(..) => Target::Use,
+            hir::ItemKind::Static(..) => Target::Static,
+            hir::ItemKind::Const(..) => Target::Const,
             hir::ItemKind::Fn(..) => Target::Fn,
+            hir::ItemKind::Mod(..) => Target::Mod,
+            hir::ItemKind::ForeignMod(..) => Target::ForeignMod,
+            hir::ItemKind::GlobalAsm(..) => Target::GlobalAsm,
+            hir::ItemKind::Ty(..) => Target::Ty,
+            hir::ItemKind::Existential(..) => Target::Existential,
+            hir::ItemKind::Enum(..) => Target::Enum,
             hir::ItemKind::Struct(..) => Target::Struct,
             hir::ItemKind::Union(..) => Target::Union,
-            hir::ItemKind::Enum(..) => Target::Enum,
-            hir::ItemKind::Const(..) => Target::Const,
-            hir::ItemKind::ForeignMod(..) => Target::ForeignMod,
-            hir::ItemKind::Static(..) => Target::Static,
-            _ => Target::Other,
+            hir::ItemKind::Trait(..) => Target::Trait,
+            hir::ItemKind::TraitAlias(..) => Target::TraitAlias,
+            hir::ItemKind::Impl(..) => Target::Impl,
         }
     }
 }
@@ -70,6 +112,8 @@ impl<'a, 'tcx> CheckAttrVisitor<'a, 'tcx> {
                 self.check_inline(attr, &item.span, target)
             } else if attr.check_name("non_exhaustive") {
                 self.check_non_exhaustive(attr, item, target)
+            } else if attr.check_name("marker") {
+                self.check_marker(attr, item, target)
             }
         }
 
@@ -114,6 +158,26 @@ impl<'a, 'tcx> CheckAttrVisitor<'a, 'tcx> {
         }
     }
 
+    /// Check if the `#[marker]` attribute on an `item` is valid.
+    fn check_marker(&self, attr: &hir::Attribute, item: &hir::Item, target: Target) {
+        match target {
+            Target::Trait => { /* Valid */ },
+            _ => {
+                self.tcx.sess
+                    .struct_span_err(attr.span, "attribute can only be applied to a trait")
+                    .span_label(item.span, "not a trait")
+                    .emit();
+                return;
+            }
+        }
+
+        if !attr.is_word() {
+            self.tcx.sess
+                .struct_span_err(attr.span, "attribute should be empty")
+                .emit();
+        }
+    }
+
     /// Check if the `#[repr]` attributes on `item` are valid.
     fn check_repr(&self, item: &hir::Item, target: Target) {
         // Extract the names of all repr hints, e.g., [foo, bar, align] for:
@@ -125,7 +189,7 @@ impl<'a, 'tcx> CheckAttrVisitor<'a, 'tcx> {
             .iter()
             .filter(|attr| attr.name() == "repr")
             .filter_map(|attr| attr.meta_item_list())
-            .flat_map(|hints| hints)
+            .flatten()
             .collect();
 
         let mut int_reprs = 0;
@@ -185,7 +249,7 @@ impl<'a, 'tcx> CheckAttrVisitor<'a, 'tcx> {
                         continue
                     }
                 }
-                "i8" | "u8" | "i16" | "u16" |
+                "i8"  | "u8"  | "i16" | "u16" |
                 "i32" | "u32" | "i64" | "u64" |
                 "isize" | "usize" => {
                     int_reprs += 1;

@@ -36,6 +36,8 @@ pub enum NonMacroAttrKind {
     Tool,
     /// Single-segment custom attribute registered by a derive macro (`#[serde(default)]`).
     DeriveHelper,
+    /// Single-segment custom attriubte registered by a legacy plugin (`register_attribute`).
+    LegacyPluginHelper,
     /// Single-segment custom attribute not registered in any way (`#[my_attr]`).
     Custom,
 }
@@ -69,6 +71,7 @@ pub enum Def {
     Static(DefId, bool /* is_mutbl */),
     StructCtor(DefId, CtorKind), // DefId refers to NodeId of the struct's constructor
     VariantCtor(DefId, CtorKind), // DefId refers to the enum variant
+    SelfCtor(DefId /* impl */),  // DefId refers to the impl
     Method(DefId),
     AssociatedConst(DefId),
 
@@ -258,6 +261,7 @@ impl NonMacroAttrKind {
             NonMacroAttrKind::Builtin => "built-in attribute",
             NonMacroAttrKind::Tool => "tool attribute",
             NonMacroAttrKind::DeriveHelper => "derive helper attribute",
+            NonMacroAttrKind::LegacyPluginHelper => "legacy plugin helper attribute",
             NonMacroAttrKind::Custom => "custom attribute",
         }
     }
@@ -272,7 +276,8 @@ impl Def {
             Def::AssociatedTy(id) | Def::TyParam(id) | Def::Struct(id) | Def::StructCtor(id, ..) |
             Def::Union(id) | Def::Trait(id) | Def::Method(id) | Def::Const(id) |
             Def::AssociatedConst(id) | Def::Macro(id, ..) |
-            Def::Existential(id) | Def::AssociatedExistential(id) | Def::ForeignTy(id) => {
+            Def::Existential(id) | Def::AssociatedExistential(id) | Def::ForeignTy(id) |
+            Def::SelfCtor(id) => {
                 id
             }
 
@@ -309,6 +314,7 @@ impl Def {
             Def::StructCtor(.., CtorKind::Fn) => "tuple struct",
             Def::StructCtor(.., CtorKind::Const) => "unit struct",
             Def::StructCtor(.., CtorKind::Fictive) => bug!("impossible struct constructor"),
+            Def::SelfCtor(..) => "self constructor",
             Def::Union(..) => "union",
             Def::Trait(..) => "trait",
             Def::ForeignTy(..) => "foreign type",

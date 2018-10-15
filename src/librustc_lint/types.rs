@@ -24,6 +24,7 @@ use std::{i8, i16, i32, i64, u8, u16, u32, u64, f32, f64};
 use syntax::{ast, attr};
 use syntax::errors::Applicability;
 use rustc_target::spec::abi::Abi;
+use syntax::edition::Edition;
 use syntax_pos::Span;
 use syntax::source_map;
 
@@ -38,7 +39,8 @@ declare_lint! {
 declare_lint! {
     OVERFLOWING_LITERALS,
     Warn,
-    "literal out of range for its type"
+    "literal out of range for its type",
+    Edition::Edition2018 => Deny
 }
 
 declare_lint! {
@@ -691,7 +693,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                 }
 
                 let sig = cx.erase_late_bound_regions(&sig);
-                if !sig.output().is_nil() {
+                if !sig.output().is_unit() {
                     let r = self.check_type_for_ffi(cache, sig.output());
                     match r {
                         FfiSafe => {}
@@ -720,6 +722,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
             ty::Closure(..) |
             ty::Generator(..) |
             ty::GeneratorWitness(..) |
+            ty::UnnormalizedProjection(..) |
             ty::Projection(..) |
             ty::Opaque(..) |
             ty::FnDef(..) => bug!("Unexpected type in foreign function"),
@@ -767,7 +770,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
 
         if let hir::Return(ref ret_hir) = decl.output {
             let ret_ty = sig.output();
-            if !ret_ty.is_nil() {
+            if !ret_ty.is_unit() {
                 self.check_type_for_ffi_and_report_errors(ret_hir.span, ret_ty);
             }
         }

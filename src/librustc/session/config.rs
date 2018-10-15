@@ -68,14 +68,12 @@ pub enum OptLevel {
     SizeMin,    // -Oz
 }
 
+/// This is what the `LtoCli` values get mapped to after resolving defaults and
+/// and taking other command line options into account.
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum Lto {
     /// Don't do any LTO whatsoever
     No,
-
-    /// Do a full crate graph LTO. The flavor is determined by the compiler
-    /// (currently the default is "fat").
-    Yes,
 
     /// Do a full crate graph LTO with ThinLTO
     Thin,
@@ -86,6 +84,23 @@ pub enum Lto {
 
     /// Do a full crate graph LTO with "fat" LTO
     Fat,
+}
+
+/// The different settings that the `-C lto` flag can have.
+#[derive(Clone, Copy, PartialEq, Hash, Debug)]
+pub enum LtoCli {
+    /// `-C lto=no`
+    No,
+    /// `-C lto=yes`
+    Yes,
+    /// `-C lto`
+    NoParam,
+    /// `-C lto=thin`
+    Thin,
+    /// `-C lto=fat`
+    Fat,
+    /// No `-C lto` flag passed
+    Unspecified,
 }
 
 #[derive(Clone, PartialEq, Hash)]
@@ -260,18 +275,18 @@ impl OutputTypes {
 // DO NOT switch BTreeMap or BTreeSet out for an unsorted container type! That
 // would break dependency tracking for commandline arguments.
 #[derive(Clone, Hash)]
-pub struct Externs(BTreeMap<String, BTreeSet<String>>);
+pub struct Externs(BTreeMap<String, BTreeSet<Option<String>>>);
 
 impl Externs {
-    pub fn new(data: BTreeMap<String, BTreeSet<String>>) -> Externs {
+    pub fn new(data: BTreeMap<String, BTreeSet<Option<String>>>) -> Externs {
         Externs(data)
     }
 
-    pub fn get(&self, key: &str) -> Option<&BTreeSet<String>> {
+    pub fn get(&self, key: &str) -> Option<&BTreeSet<Option<String>>> {
         self.0.get(key)
     }
 
-    pub fn iter<'a>(&'a self) -> BTreeMapIter<'a, String, BTreeSet<String>> {
+    pub fn iter<'a>(&'a self) -> BTreeMapIter<'a, String, BTreeSet<Option<String>>> {
         self.0.iter()
     }
 }
@@ -631,7 +646,6 @@ impl Options {
         match self.debugging_opts.share_generics {
             Some(setting) => setting,
             None => {
-                self.incremental.is_some() ||
                 match self.optimize {
                     OptLevel::No   |
                     OptLevel::Less |
@@ -801,7 +815,8 @@ macro_rules! options {
         pub const parse_unpretty: Option<&'static str> =
             Some("`string` or `string=string`");
         pub const parse_lto: Option<&'static str> =
-            Some("one of `thin`, `fat`, or omitted");
+            Some("either a boolean (`yes`, `no`, `on`, `off`, etc), `thin`, \
+                  `fat`, or omitted");
         pub const parse_cross_lang_lto: Option<&'static str> =
             Some("either a boolean (`yes`, `no`, `on`, `off`, etc), \
                   or the path to the linker plugin");
@@ -809,7 +824,7 @@ macro_rules! options {
 
     #[allow(dead_code)]
     mod $mod_set {
-        use super::{$struct_name, Passes, Sanitizer, Lto, CrossLangLto};
+        use super::{$struct_name, Passes, Sanitizer, LtoCli, CrossLangLto};
         use rustc_target::spec::{LinkerFlavor, PanicStrategy, RelroLevel};
         use std::path::PathBuf;
 
@@ -1002,11 +1017,23 @@ macro_rules! options {
             }
         }
 
-        fn parse_lto(slot: &mut Lto, v: Option<&str>) -> bool {
+        fn parse_lto(slot: &mut LtoCli, v: Option<&str>) -> bool {
+            if v.is_some() {
+                let mut bool_arg = None;
+                if parse_opt_bool(&mut bool_arg, v) {
+                    *slot = if bool_arg.unwrap() {
+                        LtoCli::Yes
+                    } else {
+                        LtoCli::No
+                    };
+                    return true
+                }
+            }
+
             *slot = match v {
-                None => Lto::Yes,
-                Some("thin") => Lto::Thin,
-                Some("fat") => Lto::Fat,
+                None => LtoCli::NoParam,
+                Some("thin") => LtoCli::Thin,
+                Some("fat") => LtoCli::Fat,
                 Some(_) => return false,
             };
             true
@@ -1047,7 +1074,7 @@ options! {CodegenOptions, CodegenSetter, basic_codegen_options,
         "extra arguments to append to the linker invocation (space separated)"),
     link_dead_code: bool = (false, parse_bool, [UNTRACKED],
         "don't let linker strip dead code (turning it on can be used for code coverage)"),
-    lto: Lto = (Lto::No, parse_lto, [TRACKED],
+    lto: LtoCli = (LtoCli::Unspecified, parse_lto, [TRACKED],
         "perform LLVM link-time optimizations"),
     target_cpu: Option<String> = (None, parse_opt_string, [TRACKED],
         "select target processor (rustc --print target-cpus for details)"),
@@ -1108,6 +1135,8 @@ options! {CodegenOptions, CodegenSetter, basic_codegen_options,
         [TRACKED], "panic strategy to compile crate with"),
     incremental: Option<String> = (None, parse_opt_string, [UNTRACKED],
           "enable incremental compilation"),
+    default_linker_libraries: Option<bool> = (None, parse_opt_bool, [UNTRACKED],
+          "allow the linker to link its default libraries"),
 }
 
 options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
@@ -1293,8 +1322,6 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
         useful for profiling / PGO."),
     relro_level: Option<RelroLevel> = (None, parse_relro_level, [TRACKED],
         "choose which RELRO level to use"),
-    disable_ast_check_for_mutation_in_guard: bool = (false, parse_bool, [UNTRACKED],
-        "skip AST-based mutation-in-guard check (mir-borrowck provides more precise check)"),
     nll_subminimal_causes: bool = (false, parse_bool, [UNTRACKED],
         "when tracking region error causes, accept subminimal results for faster execution."),
     nll_facts: bool = (false, parse_bool, [UNTRACKED],
@@ -1302,7 +1329,9 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
     disable_nll_user_type_assert: bool = (false, parse_bool, [UNTRACKED],
         "disable user provided type assertion in NLL"),
     nll_dont_emit_read_for_match: bool = (false, parse_bool, [UNTRACKED],
-        "in match codegen, do not include ReadForMatch statements (used by mir-borrowck)"),
+        "in match codegen, do not include FakeRead statements (used by mir-borrowck)"),
+    dont_buffer_diagnostics: bool = (false, parse_bool, [UNTRACKED],
+        "emit diagnostics rather than buffering (breaks NLL error downgrading, sorting)."),
     polonius: bool = (false, parse_bool, [UNTRACKED],
         "enable polonius-based borrow-checker"),
     codegen_time_graph: bool = (false, parse_bool, [UNTRACKED],
@@ -1356,6 +1385,12 @@ options! {DebuggingOptions, DebuggingSetter, basic_debugging_options,
           "run the self profiler"),
     profile_json: bool = (false, parse_bool, [UNTRACKED],
           "output a json file with profiler results"),
+    emit_stack_sizes: bool = (false, parse_bool, [UNTRACKED],
+          "emits a section containing stack size metadata"),
+    plt: Option<bool> = (None, parse_opt_bool, [TRACKED],
+          "whether to use the PLT when calling into shared libraries;
+          only has effect for PIC code on systems with ELF binaries
+          (default: PLT is disabled if full relro is enabled)"),
 }
 
 pub fn default_lib_output() -> CrateType {
@@ -2141,6 +2176,8 @@ pub fn build_session_options_and_crate_config(
     let cfg = parse_cfgspecs(matches.opt_strs("cfg"));
     let test = matches.opt_present("test");
 
+    let is_unstable_enabled = nightly_options::is_unstable_enabled(matches);
+
     prints.extend(matches.opt_strs("print").into_iter().map(|s| match &*s {
         "crate-name" => PrintRequest::CrateName,
         "file-names" => PrintRequest::FileNames,
@@ -2154,15 +2191,13 @@ pub fn build_session_options_and_crate_config(
         "tls-models" => PrintRequest::TlsModels,
         "native-static-libs" => PrintRequest::NativeStaticLibs,
         "target-spec-json" => {
-            if nightly_options::is_unstable_enabled(matches) {
+            if is_unstable_enabled {
                 PrintRequest::TargetSpec
             } else {
                 early_error(
                     error_format,
-                    &format!(
-                        "the `-Z unstable-options` flag must also be passed to \
-                         enable the target-spec-json print option"
-                    ),
+                    "the `-Z unstable-options` flag must also be passed to \
+                     enable the target-spec-json print option",
                 );
             }
         }
@@ -2192,18 +2227,19 @@ pub fn build_session_options_and_crate_config(
             Some(s) => s,
             None => early_error(error_format, "--extern value must not be empty"),
         };
-        let location = match parts.next() {
-            Some(s) => s,
-            None => early_error(
+        let location = parts.next().map(|s| s.to_string());
+        if location.is_none() && !is_unstable_enabled {
+            early_error(
                 error_format,
-                "--extern value must be of the format `foo=bar`",
-            ),
+                "the `-Z unstable-options` flag must also be passed to \
+                 enable `--extern crate_name` without `=path`",
+            );
         };
 
         externs
             .entry(name.to_string())
             .or_default()
-            .insert(location.to_string());
+            .insert(location);
     }
 
     let crate_name = matches.opt_str("crate-name");
@@ -2347,7 +2383,7 @@ pub mod nightly_options {
 }
 
 impl fmt::Display for CrateType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             CrateType::Executable => "bin".fmt(f),
             CrateType::Dylib => "dylib".fmt(f),
@@ -2384,8 +2420,8 @@ mod dep_tracking {
     use std::hash::Hash;
     use std::path::PathBuf;
     use std::collections::hash_map::DefaultHasher;
-    use super::{CrateType, DebugInfo, ErrorOutputType, Lto, OptLevel, OutputTypes,
-                Passes, Sanitizer, CrossLangLto};
+    use super::{CrateType, DebugInfo, ErrorOutputType, OptLevel, OutputTypes,
+                Passes, Sanitizer, LtoCli, CrossLangLto};
     use syntax::feature_gate::UnstableFeatures;
     use rustc_target::spec::{PanicStrategy, RelroLevel, TargetTriple};
     use syntax::edition::Edition;
@@ -2440,7 +2476,7 @@ mod dep_tracking {
     impl_dep_tracking_hash_via_hash!(RelroLevel);
     impl_dep_tracking_hash_via_hash!(Passes);
     impl_dep_tracking_hash_via_hash!(OptLevel);
-    impl_dep_tracking_hash_via_hash!(Lto);
+    impl_dep_tracking_hash_via_hash!(LtoCli);
     impl_dep_tracking_hash_via_hash!(DebugInfo);
     impl_dep_tracking_hash_via_hash!(UnstableFeatures);
     impl_dep_tracking_hash_via_hash!(OutputTypes);
@@ -2514,7 +2550,7 @@ mod tests {
     use lint;
     use middle::cstore;
     use session::config::{build_configuration, build_session_options_and_crate_config};
-    use session::config::{Lto, CrossLangLto};
+    use session::config::{LtoCli, CrossLangLto};
     use session::build_session;
     use std::collections::{BTreeMap, BTreeSet};
     use std::iter::FromIterator;
@@ -2659,33 +2695,33 @@ mod tests {
         v1.externs = Externs::new(mk_map(vec![
             (
                 String::from("a"),
-                mk_set(vec![String::from("b"), String::from("c")]),
+                mk_set(vec![Some(String::from("b")), Some(String::from("c"))]),
             ),
             (
                 String::from("d"),
-                mk_set(vec![String::from("e"), String::from("f")]),
+                mk_set(vec![Some(String::from("e")), Some(String::from("f"))]),
             ),
         ]));
 
         v2.externs = Externs::new(mk_map(vec![
             (
                 String::from("d"),
-                mk_set(vec![String::from("e"), String::from("f")]),
+                mk_set(vec![Some(String::from("e")), Some(String::from("f"))]),
             ),
             (
                 String::from("a"),
-                mk_set(vec![String::from("b"), String::from("c")]),
+                mk_set(vec![Some(String::from("b")), Some(String::from("c"))]),
             ),
         ]));
 
         v3.externs = Externs::new(mk_map(vec![
             (
                 String::from("a"),
-                mk_set(vec![String::from("b"), String::from("c")]),
+                mk_set(vec![Some(String::from("b")), Some(String::from("c"))]),
             ),
             (
                 String::from("d"),
-                mk_set(vec![String::from("f"), String::from("e")]),
+                mk_set(vec![Some(String::from("f")), Some(String::from("e"))]),
             ),
         ]));
 
@@ -2948,7 +2984,7 @@ mod tests {
 
         // Make sure changing a [TRACKED] option changes the hash
         opts = reference.clone();
-        opts.cg.lto = Lto::Fat;
+        opts.cg.lto = LtoCli::Fat;
         assert!(reference.dep_tracking_hash() != opts.dep_tracking_hash());
 
         opts = reference.clone();

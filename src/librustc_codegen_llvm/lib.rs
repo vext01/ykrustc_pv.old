@@ -26,8 +26,7 @@
 #![feature(in_band_lifetimes)]
 #![allow(unused_attributes)]
 #![feature(libc)]
-#![cfg_attr(not(stage0), feature(nll))]
-#![cfg_attr(not(stage0), feature(infer_outlives_requirements))]
+#![feature(nll)]
 #![feature(quote)]
 #![feature(range_contains)]
 #![feature(rustc_diagnostic_macros)]
@@ -310,7 +309,7 @@ impl ModuleCodegen {
         };
         let bytecode_compressed = if emit_bc_compressed {
             Some(outputs.temp_path(OutputType::Bitcode, Some(&self.name))
-                    .with_extension(RLIB_BYTECODE_EXTENSION))
+                        .with_extension(RLIB_BYTECODE_EXTENSION))
         } else {
             None
         };

@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use infer::{RegionObligation, InferCtxt};
+use infer::InferCtxt;
 use mir::interpret::GlobalId;
 use ty::{self, Ty, TypeFoldable, ToPolyTraitRef, ToPredicate};
 use ty::error::ExpectedFound;
@@ -45,7 +45,6 @@ impl<'tcx> ForestObligation for PendingPredicateObligation<'tcx> {
 /// along. Once all type inference constraints have been generated, the
 /// method `select_all_or_error` can be used to report any remaining
 /// ambiguous cases as errors.
-
 pub struct FulfillmentContext<'tcx> {
     // A list of all obligations that have been registered with this
     // fulfillment context.
@@ -89,7 +88,7 @@ impl<'a, 'gcx, 'tcx> FulfillmentContext<'tcx> {
 
     /// Attempts to select obligations using `selcx`.
     fn select(&mut self, selcx: &mut SelectionContext<'a, 'gcx, 'tcx>)
-              -> Result<(),Vec<FulfillmentError<'tcx>>> {
+              -> Result<(), Vec<FulfillmentError<'tcx>>> {
         debug!("select(obligation-forest-size={})", self.predicates.len());
 
         let mut errors = Vec::new();
@@ -293,7 +292,7 @@ impl<'a, 'b, 'gcx, 'tcx> ObligationProcessor for FulfillProcessor<'a, 'b, 'gcx, 
             ty::Predicate::Trait(ref data) => {
                 let trait_obligation = obligation.with(data.clone());
 
-                if data.is_global() && !data.has_late_bound_regions() {
+                if data.is_global() {
                     // no type variables present, can use evaluation for better caching.
                     // FIXME: consider caching errors too.
                     if self.selcx.infcx().predicate_must_hold(&obligation) {
@@ -363,6 +362,7 @@ impl<'a, 'b, 'gcx, 'tcx> ObligationProcessor for FulfillProcessor<'a, 'b, 'gcx, 
                         match binder.no_late_bound_regions() {
                             // If so, this obligation is an error (for now). Eventually we should be
                             // able to support additional cases here, like `for<'a> &'a str: 'a`.
+                            // NOTE: this is duplicate-implemented between here and fulfillment.
                             None => {
                                 ProcessResult::Error(CodeSelectionError(Unimplemented))
                             }
@@ -372,13 +372,11 @@ impl<'a, 'b, 'gcx, 'tcx> ObligationProcessor for FulfillProcessor<'a, 'b, 'gcx, 
                             Some(t_a) => {
                                 let r_static = self.selcx.tcx().types.re_static;
                                 if self.register_region_obligations {
-                                    self.selcx.infcx().register_region_obligation(
-                                        obligation.cause.body_id,
-                                        RegionObligation {
-                                            sup_type: t_a,
-                                            sub_region: r_static,
-                                            cause: obligation.cause.clone(),
-                                        });
+                                    self.selcx.infcx().register_region_obligation_with_cause(
+                                        t_a,
+                                        r_static,
+                                        &obligation.cause,
+                                    );
                                 }
                                 ProcessResult::Changed(vec![])
                             }
@@ -387,13 +385,11 @@ impl<'a, 'b, 'gcx, 'tcx> ObligationProcessor for FulfillProcessor<'a, 'b, 'gcx, 
                     // If there aren't, register the obligation.
                     Some(ty::OutlivesPredicate(t_a, r_b)) => {
                         if self.register_region_obligations {
-                            self.selcx.infcx().register_region_obligation(
-                                obligation.cause.body_id,
-                                RegionObligation {
-                                    sup_type: t_a,
-                                    sub_region: r_b,
-                                    cause: obligation.cause.clone()
-                                });
+                            self.selcx.infcx().register_region_obligation_with_cause(
+                                t_a,
+                                r_b,
+                                &obligation.cause,
+                            );
                         }
                         ProcessResult::Changed(vec![])
                     }
@@ -526,7 +522,7 @@ impl<'a, 'b, 'gcx, 'tcx> ObligationProcessor for FulfillProcessor<'a, 'b, 'gcx, 
         if self.selcx.coinductive_match(cycle.clone().map(|s| s.obligation.predicate)) {
             debug!("process_child_obligations: coinductive match");
         } else {
-            let cycle : Vec<_> = cycle.map(|c| c.obligation.clone()).collect();
+            let cycle: Vec<_> = cycle.map(|c| c.obligation.clone()).collect();
             self.selcx.infcx().report_overflow_error_cycle(&cycle);
         }
     }
