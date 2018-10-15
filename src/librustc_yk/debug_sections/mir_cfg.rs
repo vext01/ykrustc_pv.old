@@ -1,12 +1,12 @@
 use rustc::ty::TyCtxt;
 
 use rustc_metadata::cstore::CStore; //, CrateMetadata};
-use rustc::hir::def_id::{CRATE_DEF_INDEX, DefId, LOCAL_CRATE};
-use rustc::hir::def::Def;
+use rustc::hir::def_id::DefId;
 use rustc::mir::{Mir, TerminatorKind, BasicBlock, Operand, Constant};
 use rustc::ty::{TyS, TyKind, Const};
 use rustc::session::Session;
 use data_section::{DataSection, DataSectionObject};
+use rustc::util::nodemap::DefIdSet;
 //use rustc_data_structures::indexed_vec::Idx;
 //use rustc_mir::transform::mir_keys;
 
@@ -37,83 +37,21 @@ const SENTINAL: u8 = 255;
 
 const MIR_CFG_SECTION_NAME: &'static str = ".yk_mir_cfg";
 
-pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _cstore: &CStore, _sess: &Session) -> DataSectionObject {
+pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _cstore: &CStore, _sess: &Session, def_ids: &DefIdSet) -> DataSectionObject {
     let mut sec = DataSection::new(MIR_CFG_SECTION_NAME);
 
-    // Process the local crate.
-    for def_id in tcx.mir_keys(LOCAL_CRATE).iter() {
-        process_mir(tcx, &mut sec, def_id, tcx.optimized_mir(*def_id));
-    }
-
-    // Process other crates.
-    let mut seen_def_ids = Vec::new();
-    for k_num in tcx.crates().iter() {
-        let crate_def_id = DefId{krate: *k_num, index: CRATE_DEF_INDEX};
-        if !seen_def_ids.contains(&crate_def_id) {
-            seen_def_ids.push(crate_def_id);
-            for exp in tcx.item_children(crate_def_id).iter() {
-                process_def(tcx, &mut sec, &mut seen_def_ids, &exp.def);
-            }
+    for def_id in def_ids {
+        if tcx.is_mir_available(*def_id) {
+            process_mir(tcx, &mut sec, def_id, tcx.optimized_mir(*def_id));
+        } else {
+            sec.write_u8(NO_MIR);
+            sec.write_u64(tcx.crate_hash(def_id.krate).as_u64());
+            sec.write_u32(def_id.index.as_raw_u32());
         }
     }
 
     sec.write_u8(SENTINAL);
     sec.compile().unwrap()
-}
-
-fn process_def<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, sec: &mut DataSection, seen_def_ids: &mut Vec<DefId>, d: &Def) {
-    // We are delving deeper into anywhere that might contain MIR.
-    match d {
-        Def::Mod(def_id)
-            | Def::Struct(def_id)
-            | Def::Union(def_id)
-            | Def::Enum(def_id)
-            | Def::Variant(def_id)
-            | Def::Trait(def_id)
-            | Def::Existential(def_id)
-            | Def::TyAlias(def_id)
-            | Def::ForeignTy(def_id)
-            | Def::TraitAlias(def_id)
-            | Def::AssociatedTy(def_id)
-            | Def::AssociatedExistential(def_id)
-            | Def::TyParam(def_id)
-            | Def::Fn(def_id)
-            | Def::Const(def_id)
-            | Def::Static(def_id, ..)
-            | Def::StructCtor(def_id, ..)
-            | Def::VariantCtor(def_id, ..)
-            | Def::Method(def_id)
-            | Def::AssociatedConst(def_id)
-            | Def::Macro(def_id, ..) => {
-            if !seen_def_ids.contains(def_id) {
-                seen_def_ids.push(*def_id);
-                if tcx.is_mir_available(*def_id) {
-                    process_mir(tcx, sec, def_id, tcx.optimized_mir(*def_id));
-                    for exp in tcx.item_children(*def_id).iter() {
-                        process_def(tcx, sec, seen_def_ids, &exp.def);
-                    }
-                } else {
-                    // We explcitely record if MIR was unavailable for a DefId.
-                    sec.write_u8(NO_MIR);
-                    sec.write_u64(tcx.crate_hash(def_id.krate).as_u64());
-                    sec.write_u32(def_id.index.as_raw_u32());
-                }
-            }
-        },
-        // XXX
-        //
-        //Local(ast::NodeId),
-        //Upvar(ast::NodeId,  // node id of closed over local
-        //      usize,        // index in the freevars list of the closure
-        //      ast::NodeId), // expr node that creates the closure
-        //Label(ast::NodeId),
-        // Macro namespace
-        //NonMacroAttr(NonMacroAttrKind), // e.g. `#[inline]` or `#[rustfmt::skip]`
-        //| Def::PrimTy(hir::PrimTy),
-        //| Def::ToolMod, // e.g. `rustfmt` in `#[rustfmt::skip]`
-        //Def::Err,
-        _ => (),
-    }
 }
 
 fn process_mir(tcx: &TyCtxt, sec: &mut DataSection, def_id: &DefId, mir: &Mir) {

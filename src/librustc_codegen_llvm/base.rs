@@ -743,7 +743,7 @@ fn determine_cgu_reuse<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
 pub fn codegen_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                              rx: mpsc::Receiver<Box<dyn Any + Send>>)
-                             -> OngoingCodegen {
+                             -> (OngoingCodegen, Arc<DefIdSet>) {
 
     check_for_rustc_errors_attr(tcx);
 
@@ -804,13 +804,12 @@ pub fn codegen_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
         ongoing_codegen.check_for_errors(tcx.sess);
 
-        return ongoing_codegen;
+        return (ongoing_codegen, Arc::new(DefIdSet()));
     }
 
     // Run the monomorphization collector and partition the collected items into
     // codegen units.
-    let codegen_units =
-        tcx.collect_and_partition_mono_items(LOCAL_CRATE).1;
+    let (def_ids, codegen_units) = tcx.collect_and_partition_mono_items(LOCAL_CRATE);
     let codegen_units = (*codegen_units).clone();
 
     // Force all codegen_unit queries so they are already either red or green
@@ -969,7 +968,7 @@ pub fn codegen_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     ongoing_codegen.check_for_errors(tcx.sess);
 
     assert_and_save_dep_graph(tcx);
-    ongoing_codegen
+    (ongoing_codegen, def_ids)
 }
 
 fn assert_and_save_dep_graph<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {

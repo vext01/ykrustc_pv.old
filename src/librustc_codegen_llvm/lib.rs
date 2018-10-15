@@ -74,7 +74,9 @@ pub use llvm_util::target_features;
 use std::any::Any;
 use std::path::{PathBuf};
 use std::sync::mpsc;
+use std::sync::Arc;
 use rustc_data_structures::sync::Lrc;
+use rustc::util::nodemap::DefIdSet;
 
 use rustc::dep_graph::DepGraph;
 use rustc::hir::def_id::CrateNum;
@@ -211,8 +213,9 @@ impl CodegenBackend for LlvmCodegenBackend {
         &self,
         tcx: TyCtxt<'a, 'tcx, 'tcx>,
         rx: mpsc::Receiver<Box<dyn Any + Send>>
-    ) -> Box<dyn Any> {
-        box base::codegen_crate(tcx, rx)
+    ) -> (Box<dyn Any>, Arc<DefIdSet>) {
+        let cgr = base::codegen_crate(tcx, rx);
+        (box cgr.0, cgr.1)
     }
 
     fn join_codegen_and_link(
