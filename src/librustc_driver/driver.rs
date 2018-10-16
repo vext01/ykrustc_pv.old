@@ -346,8 +346,10 @@ pub fn compile_input(
                     .borrow()
                     .contains(&config::CrateType::Executable);
                 if is_exe {
-                    tcx.sess.yk_link_objects.borrow_mut().push(crate_map::emit_crate_map(&tcx));
-                    tcx.sess.yk_link_objects.borrow_mut().push(mir_cfg::emit_mir_cfg_section(&tcx, cstore, sess, &def_ids));
+                    tcx.sess.yk_link_objects.borrow_mut()
+                       .push(crate_map::emit_crate_map(&tcx));
+                    tcx.sess.yk_link_objects.borrow_mut()
+                       .push(mir_cfg::emit_mir_cfg_section(&tcx, &def_ids));
                 }
 
                 Ok((outputs.clone(), ongoing_codegen, tcx.dep_graph.clone()))
@@ -1377,7 +1379,8 @@ pub fn phase_4_codegen<'a, 'tcx>(
     });
 
     tcx.sess.profiler(|p| p.start_activity(ProfileCategory::Codegen));
-    let (codegen, def_ids) = time(tcx.sess, "codegen", move || codegen_backend.codegen_crate(tcx, rx));
+    let (codegen, def_ids) =
+        time(tcx.sess, "codegen", move || codegen_backend.codegen_crate(tcx, rx));
     tcx.sess.profiler(|p| p.end_activity(ProfileCategory::Codegen));
     if tcx.sess.profile_queries() {
         profile::dump(&tcx.sess, "profile_queries".to_string())

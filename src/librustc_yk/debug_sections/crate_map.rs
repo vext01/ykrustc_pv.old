@@ -1,5 +1,5 @@
 use rustc::ty::TyCtxt;
-use data_section::{DataSection, DataSectionObject};
+use rustc_yk_datasection::{DataSection, DataSectionObject};
 use rustc::hir::def_id::LOCAL_CRATE;
 
 const CRATE_MAP_SECTION_NAME: &str = ".yk_crate_map";
@@ -33,17 +33,6 @@ pub fn emit_crate_map<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>) -> DataSe
         let hash = tcx.crate_hash(*krate).as_u64();
         eprintln!("MAP: {:?} ({}) -> 0x{:x}", krate, tcx.crate_name(*krate), hash);
         sec.write_u64(hash);
-
-        //sec.write_str(&tcx.crate_name(*krate).as_str());
-        //sec.write_u8(0);
-
-        //let source = tcx.used_crate_source(*krate);
-        //let path = if let Some((ref p, _))  = source.rlib {
-        //    p.to_str().unwrap()
-        //} else {
-        //    ""  // Not an rlib.
-        //};
-        //sec.write_str(path);
     }
 
     sec.compile().unwrap()

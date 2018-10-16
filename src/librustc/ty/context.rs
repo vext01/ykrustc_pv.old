@@ -1303,10 +1303,6 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         self.all_crate_nums(LOCAL_CRATE)
     }
 
-    //pub fn crate_disambiguator(self, k_num: CrateNum) -> CrateDisambiguator {
-    //    self.cstore.crate_disambiguator_untracked(k_num)
-    //}
-
     pub fn features(self) -> Lrc<feature_gate::Features> {
         self.features_query(LOCAL_CRATE)
     }

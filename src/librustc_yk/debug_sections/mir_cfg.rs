@@ -1,14 +1,10 @@
 use rustc::ty::TyCtxt;
 
-use rustc_metadata::cstore::CStore; //, CrateMetadata};
 use rustc::hir::def_id::DefId;
 use rustc::mir::{Mir, TerminatorKind, BasicBlock, Operand, Constant};
 use rustc::ty::{TyS, TyKind, Const};
-use rustc::session::Session;
-use data_section::{DataSection, DataSectionObject};
+use rustc_yk_datasection::{DataSection, DataSectionObject};
 use rustc::util::nodemap::DefIdSet;
-//use rustc_data_structures::indexed_vec::Idx;
-//use rustc_mir::transform::mir_keys;
 
 // Edge kinds.
 const GOTO: u8 = 0;
@@ -37,7 +33,10 @@ const SENTINAL: u8 = 255;
 
 const MIR_CFG_SECTION_NAME: &'static str = ".yk_mir_cfg";
 
-pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, _cstore: &CStore, _sess: &Session, def_ids: &DefIdSet) -> DataSectionObject {
+pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(
+    tcx: &'a TyCtxt<'a, 'tcx, 'gcx>,
+    def_ids: &DefIdSet) -> DataSectionObject
+{
     let mut sec = DataSection::new(MIR_CFG_SECTION_NAME);
 
     for def_id in def_ids {

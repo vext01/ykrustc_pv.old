@@ -879,19 +879,13 @@ extern "C" int64_t LLVMRustDIBuilderCreateOpPlusUconst() {
 #endif
 }
 
-// Insert a label before the given instruction.
-extern "C" bool LLVMRustAddYkBlockLabel(LLVMBuilderRef Builder, LLVMRustDIBuilderRef DBuilder, DISubprogram *SP, Instruction *Instr, char *Name) {
+// Insert a DWARF label before the given instruction.
+extern "C" bool LLVMRustAddYkBlockLabel(LLVMBuilderRef Builder,
+                                        LLVMRustDIBuilderRef DBuilder, DISubprogram *SP,
+                                        Instruction *Instr, char *Name) {
     auto Loc = DebugLoc::get(0, 0, SP);
     DILabel *label = DBuilder->createLabel(SP, Name, SP->getFile(), 0, true);
     DBuilder->insertLabel(label, Loc, Instr);
-    return true;
-}
-
-// Insert a label after the given block.
-extern "C" bool LLVMRustAddYkBlockLabelAfter(LLVMBuilderRef Builder, LLVMRustDIBuilderRef DBuilder, DISubprogram *SP, BasicBlock *Block, char *Name) {
-    auto Loc = DebugLoc::get(0, 0, SP);
-    DILabel *label = DBuilder->createLabel(SP, Name, SP->getFile(), 0, true);
-    DBuilder->insertLabel(label, Loc, Block);
     return true;
 }
 

@@ -24,7 +24,7 @@ use session::config::{OutputType, Lto};
 use util::nodemap::{FxHashMap, FxHashSet};
 use util::common::{duration_to_secs_str, ErrorReported};
 use util::common::ProfileQueriesMsg;
-use data_section::DataSectionObject;
+use rustc_yk_datasection::DataSectionObject;
 
 use rustc_data_structures::base_n;
 use rustc_data_structures::sync::{self, Lrc, Lock, LockCell, OneThread, Once, RwLock};

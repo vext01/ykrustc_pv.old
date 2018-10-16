@@ -10,7 +10,7 @@
 
 use llvm::{self, BasicBlock, LLVMGetFirstInstruction,
            LLVMPositionBuilderBefore, LLVMPositionBuilderAtEnd,
-           LLVMRustAddYkBlockLabel, LLVMRustAddYkBlockLabelAfter};
+           LLVMRustAddYkBlockLabel};
 use std::ffi::CString;
 //use rustc_data_structures::indexed_vec::Idx;
 
@@ -62,7 +62,7 @@ impl FunctionCx<'a, 'll, 'tcx> {
 
             // Make an appropriate name for the label.
             // The label identifies the crate by its hash. It might be tempting to use the crate
-            // number, but this wouldn't serve as a unique ID as crate numbers are only unique to
+            // number, but this wouldn't serve as a unique ID, as crate numbers are only unique to
             // any given compilation session.
             let did = self.instance.def.def_id();
             let k_hash = bx.tcx().crate_hash(did.krate).as_u64();
@@ -70,34 +70,19 @@ impl FunctionCx<'a, 'll, 'tcx> {
                                         k_hash, did.index.as_raw_u32(), bb.index())).unwrap();
 
             // Get the sub_program.
-            // XXX must be an easier way.
             let loc = Location{block: bb, statement_index: 0};
             let source_info = self.mir.source_info(loc);
             let (_, span) = self.debug_loc(*source_info);
             let di_sp = self.fn_metadata(span);
 
-            unsafe { LLVMRustAddYkBlockLabel(bx.llbuilder, di_bldr, di_sp, first_instr, lbl_name.as_ptr()) };
-        }
-
-        // Yorick terminator label.
-        // Ideally we'd have put this after the terminatir and called it the "end label", but since
-        // the bx's ownership is passed off to `codegen_terminator`, this makes that strategy hard.
-        if self.cx.has_debug() && first_instr_o.is_some() {
-            let di_bldr = DIB(self.cx);
-            let did = self.instance.def.def_id();
-            let lbl_name = CString::new(format!("__YK_TERM_BLK_{}_{}_{}", did.krate.as_u32(), did.index.as_raw_u32(), bb.index())).unwrap();
-            let loc = Location{block: bb, statement_index: 0};
-            let source_info = self.mir.source_info(loc);
-            let (_, span) = self.debug_loc(*source_info);
-            {
-                let di_sp = self.fn_metadata(span);
-                unsafe { LLVMRustAddYkBlockLabelAfter(bx.llbuilder, di_bldr, di_sp, bx.llbb(), lbl_name.as_ptr()) };
+            unsafe {
+                LLVMRustAddYkBlockLabel(bx.llbuilder, di_bldr, di_sp, first_instr,
+                                        lbl_name.as_ptr());
             }
         }
 
         unsafe { LLVMPositionBuilderAtEnd(bx.llbuilder, bx.llbb()); }
         self.codegen_terminator(bx, bb, data.terminator());
-
     }
 
     fn codegen_terminator(&mut self,
@@ -371,28 +356,9 @@ impl FunctionCx<'a, 'll, 'tcx> {
             }
 
             mir::TerminatorKind::Assert { ref cond, expected, ref msg, target, cleanup } => {
+                // In upstream Rust, there was code here to merge a block with a statically known
+                // assertion target with its successor. We disable this for Yorick.
                 let cond = self.codegen_operand(&bx, cond).immediate();
-                let mut _const_cond = common::const_to_opt_u128(cond, false).map(|c| c == 1);
-
-                // This case can currently arise only from functions marked
-                // with #[rustc_inherit_overflow_checks] and inlined from
-                // another crate (mostly core::num generic/#[inline] fns),
-                // while the current crate doesn't use overflow checks.
-                // NOTE: Unlike binops, negation doesn't have its own
-                // checked operation, just a comparison with the minimum
-                // value, so we have to check for the assert message.
-                if !bx.cx.check_overflow {
-                    if let mir::interpret::EvalErrorKind::OverflowNeg = *msg {
-                        _const_cond = Some(expected);
-                    }
-                }
-
-                // Don't codegen the panic block if success if known.
-                // XXX disable this for yorick.
-                //if const_cond == Some(expected) {
-                //    funclet_br(self, bx, target);
-                //    return;
-                //}
 
                 // Pass the condition through llvm.expect for branch hinting.
                 let expect = bx.cx.get_intrinsic(&"llvm.expect.i1");

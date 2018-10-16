@@ -727,7 +727,6 @@ fn link_natively(sess: &Session,
         if crate_type == config::CrateType::Executable {
             cmd.arg("-Wl,--no-gc-sections");
             cmd.args(sess.yk_link_objects.borrow().iter().map(|o| o.path()));
-            // XXX remove objects.
         }
     }
 

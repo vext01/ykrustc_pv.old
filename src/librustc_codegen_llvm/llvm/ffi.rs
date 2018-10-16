@@ -1436,9 +1436,6 @@ extern "C" {
     pub fn LLVMRustAddYkBlockLabel(Builder: &Builder, DIBuilder: &DIBuilder,
                                    SP: &DISubprogram, InsertBefore: &Value,
                                    Name: *const c_char);
-    pub fn LLVMRustAddYkBlockLabelAfter(Builder: &Builder, DIBuilder: &DIBuilder,
-                                   SP: &DISubprogram, InsertAfter: &BasicBlock,
-                                   Name: *const c_char);
 }
 
 #[allow(improper_ctypes)] // FIXME(#52456) needed for RustString.

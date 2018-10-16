@@ -133,7 +133,7 @@ impl CStore {
         metas[cnum] = Some(data);
     }
 
-    pub fn iter_crate_data<I>(&self, mut i: I)
+    pub(super) fn iter_crate_data<I>(&self, mut i: I)
         where I: FnMut(CrateNum, &Lrc<CrateMetadata>)
     {
         for (k, v) in self.metas.borrow().iter_enumerated() {

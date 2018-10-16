@@ -94,6 +94,7 @@ extern crate parking_lot;
 extern crate rustc_errors as errors;
 extern crate rustc_rayon as rayon;
 extern crate rustc_rayon_core as rayon_core;
+extern crate rustc_yk_datasection;
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
 extern crate syntax_pos;
@@ -101,7 +102,6 @@ extern crate jobserver;
 extern crate proc_macro;
 extern crate chalk_engine;
 extern crate rustc_fs_util;
-extern crate data_section;
 
 extern crate serialize as rustc_serialize; // used by deriving
 
