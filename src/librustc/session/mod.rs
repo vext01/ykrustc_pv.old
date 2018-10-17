@@ -24,7 +24,7 @@ use session::config::{OutputType, Lto};
 use util::nodemap::{FxHashMap, FxHashSet};
 use util::common::{duration_to_secs_str, ErrorReported};
 use util::common::ProfileQueriesMsg;
-use rustc_yk_datasection::DataSectionObject;
+use rustc_yk_link::YkExtraLinkObject;
 
 use rustc_data_structures::base_n;
 use rustc_data_structures::sync::{self, Lrc, Lock, LockCell, OneThread, Once, RwLock};
@@ -169,7 +169,7 @@ pub struct Session {
     pub driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
 
     /// A list of additional objects to link in for Yorick support.
-    pub yk_link_objects: RefCell<Vec<DataSectionObject>>,
+    pub yk_link_objects: RefCell<Vec<YkExtraLinkObject>>,
 
     /// All the crate names specified with `--extern`, and the builtin ones.
     /// Starting with the Rust 2018 edition, absolute paths resolve in this set.

@@ -1,10 +1,10 @@
 [package]
 authors = ["Edd Barrett"]
-name = "rustc_yk"
+name = "rustc_yk_sections"
 version = "0.0.0"
 
 [lib]
-name = "rustc_yk"
+name = "rustc_yk_sections"
 path = "lib.rs"
 crate-type = ["dylib"]
 test = false
@@ -13,4 +13,8 @@ test = false
 rustc = {path = "../librustc"}
 rustc_metadata = {path = "../librustc_metadata"}
 rustc_data_structures = {path = "../librustc_data_structures"}
-rustc_yk_datasection = {path = "../librustc_yk_datasection"}
+rustc_yk_link = { path = "../librustc_yk_link" }
+bincode = "1.0"
+serde = "1.0"
+serde_derive = "1.0"
+mkstemp-rs = "1.0"

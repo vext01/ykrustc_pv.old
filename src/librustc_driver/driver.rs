@@ -38,7 +38,7 @@ use rustc_privacy;
 use rustc_plugin::registry::Registry;
 use rustc_plugin as plugin;
 use rustc_passes::{self, ast_validation, hir_stats, loops, rvalue_promotion};
-use rustc_yk::debug_sections::{crate_map, mir_cfg};
+use rustc_yk_sections::mir_cfg::emit_mir_cfg_section;
 use rustc::util::nodemap::DefIdSet;
 use super::Compilation;
 
@@ -347,9 +347,7 @@ pub fn compile_input(
                     .contains(&config::CrateType::Executable);
                 if is_exe {
                     tcx.sess.yk_link_objects.borrow_mut()
-                       .push(crate_map::emit_crate_map(&tcx));
-                    tcx.sess.yk_link_objects.borrow_mut()
-                       .push(mir_cfg::emit_mir_cfg_section(&tcx, &def_ids));
+                       .push(emit_mir_cfg_section(&tcx, &def_ids));
                 }
 
                 Ok((outputs.clone(), ongoing_codegen, tcx.dep_graph.clone()))
