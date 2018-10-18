@@ -11,10 +11,6 @@ test = false
 
 [dependencies]
 rustc = {path = "../librustc"}
-rustc_metadata = {path = "../librustc_metadata"}
-rustc_data_structures = {path = "../librustc_data_structures"}
 rustc_yk_link = { path = "../librustc_yk_link" }
-bincode = "1.0"
-serde = "1.0"
-serde_derive = "1.0"
 mkstemp-rs = "1.0"
+byteorder = "1.2"

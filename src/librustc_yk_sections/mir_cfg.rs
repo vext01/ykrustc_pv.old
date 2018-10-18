@@ -1,162 +1,197 @@
+/// Custom CFG serialiser for Yorick.
+/// At the time of writing no crate using `proc_macro` can be used in-compiler, otherwise we'd have
+/// used Serde.
+
+
 use rustc::ty::TyCtxt;
 
 use rustc::hir::def_id::DefId;
-use rustc::mir::{Mir, TerminatorKind, Operand, Constant};
+use rustc::mir::{Mir, TerminatorKind, Operand, Constant, BasicBlock};
 use rustc::ty::{TyS, TyKind, Const};
 use rustc::util::nodemap::DefIdSet;
 use std::path::PathBuf;
 use mkstemp::TempFile;
-use bincode;
 use rustc_yk_link::YkExtraLinkObject;
-use std::fs;
+//use std::fs; //::{self, File};
+use byteorder::{NativeEndian, WriteBytesExt};
 
-/// Information about a call target.
-#[derive(Serialize)]
-enum CallKind {
-    Known { crate_hash: u64, def_idx: u32 },
-    Unknown,
-}
-
-/// Describes how a block is terminated.
-#[derive(Serialize)]
-enum CfgTerminator {
-    Goto { bb: u32 },
-    SwitchInt { bbs: Vec<u32> },
-    Resume,
-    Abort,
-    Return,
-    Unreachable,
-    Drop{bb: u32, unwind_bb: Option<u32> },
-    DropAndReplace { bb: u32, unwind_bb: Option<u32> },
-    Call { call_kind: CallKind, cleanup_bb: Option<u32> },
-    Assert { bb: u32, cleanup_bb: Option<u32> },
-    Yield{bb: u32, drop_bb: Option<u32>},
-    GeneratorDrop,
-    FalseEdges { bb: u32, imaginary_bbs: Vec<u32> },
-    FalseUnwind { bb: u32, unwind_bb: Option<u32> },
-}
-
-/// Indentifies the start of a MIR block.
-#[derive(Serialize)]
-struct MirLoc {
-    crate_hash: u64,
-    def_idx: u32,
-    bb: u32,
-}
-
-/// A Control Flow Graph (CFG) edge.
-#[derive(Serialize)]
-struct CfgEdge(MirLoc, CfgTerminator);
+// Edge kinds.
+const GOTO: u8 = 0;
+const SWITCHINT: u8 = 1;
+const RESUME: u8 = 2;
+const ABORT: u8 = 3;
+const RETURN: u8 = 4;
+const UNREACHABLE: u8 = 5;
+const DROP_NO_UNWIND: u8 = 6;
+const DROP_WITH_UNWIND: u8 = 7;
+const DROP_AND_REPLACE_NO_UNWIND: u8 = 8;
+const DROP_AND_REPLACE_WITH_UNWIND: u8 = 9;
+const CALL_NO_CLEANUP: u8 = 10;
+const CALL_WITH_CLEANUP: u8 = 11;
+const CALL_UNKNOWN_NO_CLEANUP: u8 = 12;
+const CALL_UNKNOWN_WITH_CLEANUP: u8 = 13;
+const ASSERT_NO_CLEANUP: u8 = 14;
+const ASSERT_WITH_CLEANUP: u8 = 15;
+const YIELD_NO_DROP: u8 = 16;
+const YIELD_WITH_DROP: u8 = 17;
+const GENERATOR_DROP: u8 = 18;
+const FALSE_EDGES: u8 = 19;
+const FALSE_UNWIND: u8 = 20;
+const NO_MIR: u8 = 254;
+const SENTINAL: u8 = 255;
 
 const MIR_CFG_SECTION_NAME: &'static str = ".yk_mir_cfg";
 const MIR_CFG_TEMPLATE: &'static str = ".ykcfg.XXXXXXXX";
 
 /// Serialises the control flow for the given `DefId`s into a ELF object file and returns a handle for linking.
 pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, def_ids: &DefIdSet) -> YkExtraLinkObject {
-    let mut edges = Vec::new();
+    // First serialise the CFG into a plain binary file.
+    let mut template = std::env::temp_dir();
+    template.push(MIR_CFG_TEMPLATE);
+    let mut fh = TempFile::new(template.to_str().unwrap(), false).unwrap();
 
     for def_id in def_ids {
         if tcx.is_mir_available(*def_id) {
-            edges.extend(process_mir(tcx, def_id, tcx.optimized_mir(*def_id)));
+            process_mir(&mut fh, tcx, def_id, tcx.optimized_mir(*def_id));
         } else {
-            eprintln!("No MIR for {:?}", def_id);
+            fh.write_u8(NO_MIR).unwrap();
+            fh.write_u64::<NativeEndian>(tcx.crate_hash(def_id.krate).as_u64()).unwrap();
+            fh.write_u32::<NativeEndian>(def_id.index.as_raw_u32()).unwrap();
         }
     }
 
-    let mut template = std::env::temp_dir();
-    template.push(MIR_CFG_TEMPLATE);
-    let fh = TempFile::new(template.to_str().unwrap(), false).unwrap();
+    // Write end-of-section sentinal.
+    fh.write_u8(SENTINAL).unwrap();
+
+    // Now graft it into an object file.
     let path = PathBuf::from(fh.path());
-
-    bincode::serialize_into(fh, &edges).unwrap();
     let ret = YkExtraLinkObject::new(&path, MIR_CFG_SECTION_NAME);
-
     fs::remove_file(path).unwrap();
+
     ret
 }
 
-fn process_mir(tcx: &TyCtxt, def_id: &DefId, mir: &Mir) -> Vec<CfgEdge> {
-    let mut edges = Vec::new();
-
+/// For each block in the given MIR write out one CFG edge record.
+fn process_mir(fh: &mut TempFile, tcx: &TyCtxt, def_id: &DefId, mir: &Mir) {
     for (bb, maybe_bb_data) in mir.basic_blocks().iter_enumerated() {
         if maybe_bb_data.terminator.is_none() {
             continue; // XXX find out what that would mean? Assert it can't?
         }
 
-        let loc = MirLoc {
-            crate_hash: tcx.crate_hash(def_id.krate).as_u64(),
-            def_idx: def_id.index.as_raw_u32(),
-            bb: bb.index() as u32,
-        };
-
         let bb_data = maybe_bb_data.terminator.as_ref().unwrap();
-        let term = match bb_data.kind {
-            TerminatorKind::Goto { target, .. } => CfgTerminator::Goto { bb: target.index() as u32 },
-            TerminatorKind::SwitchInt { ref targets, .. } => {
-                CfgTerminator::SwitchInt { bbs: targets.iter().map(|t| t.index() as u32).collect::<Vec<u32>>() }
+
+        match bb_data.kind {
+            TerminatorKind::Goto{target: target_bb} => {
+                write_rec_header(fh, tcx, GOTO, def_id, bb);
+                fh.write_u32::<NativeEndian>(target_bb.index() as u32).unwrap();
             },
-            TerminatorKind::Resume => CfgTerminator::Resume,
-            TerminatorKind::Abort => CfgTerminator::Abort,
-            TerminatorKind::Return => CfgTerminator::Return,
-            TerminatorKind::Unreachable => CfgTerminator::Unreachable,
-            TerminatorKind::Drop { target, unwind, .. } => {
-                CfgTerminator::Drop {
-                    bb: target.index() as u32,
-                    unwind_bb: unwind.map(|u| u.index() as u32),
+            TerminatorKind::SwitchInt{ref targets, ..} => {
+                write_rec_header(fh, tcx, SWITCHINT, def_id, bb);
+
+                if cfg!(target_pointer_width = "64") {
+                    fh.write_u64::<NativeEndian>(targets.len() as u64).unwrap();
+                } else {
+                    panic!("unknown pointer width");
+                }
+
+                for target_bb in targets {
+                    fh.write_u32::<NativeEndian>(target_bb.index() as u32).unwrap();
                 }
             },
-            TerminatorKind::DropAndReplace{target, unwind, ..} => {
-                CfgTerminator::DropAndReplace {
-                    bb: target.index() as u32,
-                    unwind_bb: unwind.map(|u| u.index() as u32),
+            TerminatorKind::Resume => write_rec_header(fh, tcx, RESUME, def_id, bb),
+            TerminatorKind::Abort => write_rec_header(fh, tcx, ABORT, def_id, bb),
+            TerminatorKind::Return => write_rec_header(fh, tcx, RETURN, def_id, bb),
+            TerminatorKind::Unreachable => write_rec_header(fh, tcx, UNREACHABLE, def_id, bb),
+            TerminatorKind::Drop{target: target_bb, unwind: opt_unwind_bb, ..} => {
+                if let Some(unwind_bb) = opt_unwind_bb {
+                    write_rec_header(fh, tcx, DROP_WITH_UNWIND, def_id, bb);
+                    fh.write_u32::<NativeEndian>(target_bb.index() as u32).unwrap();
+                    fh.write_u32::<NativeEndian>(unwind_bb.index() as u32).unwrap();
+                } else {
+                    write_rec_header(fh, tcx, DROP_NO_UNWIND, def_id, bb);
+                    fh.write_u32::<NativeEndian>(target_bb.index() as u32).unwrap();
                 }
             },
-            TerminatorKind::Call { ref func, cleanup, .. } => {
-                // This only supports statically known functions for now.
-                let call_kind = if let Operand::Constant(box Constant {
+            TerminatorKind::DropAndReplace{target: target_bb, unwind: opt_unwind_bb, ..} => {
+                if let Some(unwind_bb) = opt_unwind_bb {
+                    write_rec_header(fh, tcx, DROP_AND_REPLACE_WITH_UNWIND, def_id, bb);
+                    fh.write_u32::<NativeEndian>(target_bb.index() as u32).unwrap();
+                    fh.write_u32::<NativeEndian>(unwind_bb.index() as u32).unwrap();
+                } else {
+                    write_rec_header(fh, tcx, DROP_AND_REPLACE_NO_UNWIND, def_id, bb);
+                    fh.write_u32::<NativeEndian>(target_bb.index() as u32).unwrap();
+                }
+            },
+            TerminatorKind::Call{ref func, cleanup: opt_cleanup_bb, ..} => {
+                if let Operand::Constant(box Constant {
                     literal: Const {
                         ty: &TyS {
                             sty: TyKind::FnDef(target_def_id, _substs), ..
                         }, ..
                     }, ..
                 }, ..) = func {
-                    CallKind::Known {
-                        crate_hash: tcx.crate_hash(target_def_id.krate).as_u64(),
-                        def_idx: target_def_id.index.as_raw_u32(),
+                    // A statically known call target.
+                    if opt_cleanup_bb.is_some() {
+                        write_rec_header(fh, tcx, CALL_WITH_CLEANUP, def_id, bb);
+                    } else {
+                        write_rec_header(fh, tcx, CALL_NO_CLEANUP, def_id, bb);
+                    }
+
+                    fh.write_u64::<NativeEndian>(tcx.crate_hash(target_def_id.krate).as_u64()).unwrap();
+                    fh.write_u32::<NativeEndian>(target_def_id.index.as_raw_u32()).unwrap();
+
+                    if let Some(cleanup_bb) = opt_cleanup_bb {
+                        fh.write_u32::<NativeEndian>(cleanup_bb.index() as u32).unwrap();
                     }
                 } else {
-                    CallKind::Unknown
-                };
-
-                CfgTerminator::Call { call_kind, cleanup_bb: cleanup.map(|c| c.index() as u32) }
-            },
-            TerminatorKind::Assert { target, cleanup, .. } => {
-                CfgTerminator::Assert {
-                    bb: target.index() as u32,
-                    cleanup_bb: cleanup.map(|c| c.index() as u32)
+                    // It's a kind of call that we can't statically know the target of.
+                    if let Some(cleanup_bb) = opt_cleanup_bb {
+                        write_rec_header(fh, tcx, CALL_UNKNOWN_WITH_CLEANUP, def_id, bb);
+                        fh.write_u32::<NativeEndian>(cleanup_bb.index() as u32).unwrap();
+                    } else {
+                        write_rec_header(fh, tcx, CALL_UNKNOWN_NO_CLEANUP, def_id, bb);
+                    }
                 }
             },
-            TerminatorKind::Yield { resume, drop, .. } => {
-                CfgTerminator::Yield {
-                    bb: resume.index() as u32,
-                    drop_bb: drop.map(|d| d.index() as u32),
+            TerminatorKind::Assert{target: target_bb, cleanup: opt_cleanup_bb, ..} => {
+                if let Some(cleanup_bb) = opt_cleanup_bb {
+                    write_rec_header(fh, tcx, ASSERT_WITH_CLEANUP, def_id, bb);
+                    fh.write_u32::<NativeEndian>(target_bb.index() as u32).unwrap();
+                    fh.write_u32::<NativeEndian>(cleanup_bb.index() as u32).unwrap();
+                } else {
+                    write_rec_header(fh, tcx, ASSERT_NO_CLEANUP, def_id, bb);
+                    fh.write_u32::<NativeEndian>(target_bb.index() as u32).unwrap();
                 }
             },
-            TerminatorKind::GeneratorDrop => CfgTerminator::GeneratorDrop,
-            TerminatorKind::FalseEdges { real_target, ref imaginary_targets, .. } => {
-                CfgTerminator::FalseEdges {
-                    bb: real_target.index() as u32,
-                    imaginary_bbs: imaginary_targets.iter().map(|t| t.index() as u32).collect(),
+            TerminatorKind::Yield{resume: resume_bb, drop: opt_drop_bb, ..} => {
+                if let Some(drop_bb) = opt_drop_bb {
+                    write_rec_header(fh, tcx, YIELD_WITH_DROP, def_id, bb);
+                    fh.write_u32::<NativeEndian>(resume_bb.index() as u32).unwrap();
+                    fh.write_u32::<NativeEndian>(drop_bb.index() as u32).unwrap();
+                } else {
+                    write_rec_header(fh, tcx, YIELD_NO_DROP, def_id, bb);
+                    fh.write_u32::<NativeEndian>(resume_bb.index() as u32).unwrap();
                 }
             },
-            TerminatorKind::FalseUnwind { real_target, unwind, .. } => {
-                CfgTerminator::FalseUnwind {
-                    bb: real_target.index() as u32,
-                    unwind_bb: unwind.map(|u| u.index() as u32),
-                }
+            TerminatorKind::GeneratorDrop => write_rec_header(fh, tcx, GENERATOR_DROP, def_id, bb),
+            TerminatorKind::FalseEdges{real_target: real_target_bb, ..} => {
+                // Fake edges not considered.
+                write_rec_header(fh, tcx, FALSE_EDGES, def_id, bb);
+                fh.write_u32::<NativeEndian>(real_target_bb.index() as u32).unwrap();
             },
-        };
-        edges.push(CfgEdge(loc, term));
+            TerminatorKind::FalseUnwind{real_target: real_target_bb, ..} => {
+                // Fake edges not considered.
+                write_rec_header(fh, tcx, FALSE_UNWIND, def_id, bb);
+                fh.write_u32::<NativeEndian>(real_target_bb.index() as u32).unwrap();
+            },
+        }
     }
-    edges
+}
+
+/// Writes the "header" of a record, which is common to all record types.
+fn write_rec_header(fh: &mut TempFile, tcx: &TyCtxt, kind: u8, def_id: &DefId, bb: BasicBlock) {
+    fh.write_u8(kind).unwrap();
+    fh.write_u64::<NativeEndian>(tcx.crate_hash(def_id.krate).as_u64()).unwrap();
+    fh.write_u32::<NativeEndian>(def_id.index.as_raw_u32()).unwrap();
+    fh.write_u32::<NativeEndian>(bb.index() as u32).unwrap();
 }

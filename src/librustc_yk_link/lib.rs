@@ -29,7 +29,6 @@ impl YkExtraLinkObject {
             "-j", ".data",
             source_path.to_str().unwrap(), &out_filename]);
 
-        println!("{:?}", cmd);
         let output = cmd.output().unwrap();
         if !output.status.success() {
             eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
