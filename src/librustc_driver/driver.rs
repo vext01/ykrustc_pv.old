@@ -801,6 +801,7 @@ where
                 trait_map: resolver.trait_map,
                 maybe_unused_trait_imports: resolver.maybe_unused_trait_imports,
                 maybe_unused_extern_crates: resolver.maybe_unused_extern_crates,
+                extern_prelude: resolver.extern_prelude,
             },
 
             analysis: ty::CrateAnalysis {
@@ -1669,7 +1670,7 @@ pub fn build_output_filenames(
                 .crate_name
                 .clone()
                 .or_else(|| attr::find_crate_name(attrs).map(|n| n.to_string()))
-                .unwrap_or_else(|| input.filestem());
+                .unwrap_or_else(|| input.filestem().to_owned());
 
             OutputFilenames {
                 out_directory: dirpath,

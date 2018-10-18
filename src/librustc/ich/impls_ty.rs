@@ -1297,7 +1297,7 @@ impl_stable_hash_for!(enum infer::canonical::CanonicalTyVarKind {
 });
 
 impl_stable_hash_for!(
-    impl<'tcx, R> for struct infer::canonical::QueryResult<'tcx, R> {
+    impl<'tcx, R> for struct infer::canonical::QueryResponse<'tcx, R> {
         var_values, region_constraints, certainty, value
     }
 );
@@ -1417,3 +1417,8 @@ impl_stable_hash_for!(enum traits::QuantifierKind {
     Universal,
     Existential
 });
+
+impl_stable_hash_for!(struct ty::subst::UserSubsts<'tcx> { substs, user_self_ty });
+
+impl_stable_hash_for!(struct ty::subst::UserSelfTy<'tcx> { impl_def_id, self_ty });
+

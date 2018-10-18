@@ -37,7 +37,7 @@ use syntax::ast::{self, Name};
 use syntax::symbol::InternedString;
 use syntax_pos::{Span, DUMMY_SP};
 use ty::fold::{TypeFoldable, TypeFolder, TypeVisitor};
-use ty::subst::{Subst, Substs};
+use ty::subst::{CanonicalUserSubsts, Subst, Substs};
 use ty::{self, AdtDef, CanonicalTy, ClosureSubsts, GeneratorSubsts, Region, Ty, TyCtxt};
 use util::ppaux;
 
@@ -710,7 +710,7 @@ pub struct LocalDecl<'tcx> {
     /// e.g. via `let x: T`, then we carry that type here. The MIR
     /// borrow checker needs this information since it can affect
     /// region inference.
-    pub user_ty: Option<(CanonicalTy<'tcx>, Span)>,
+    pub user_ty: Option<(UserTypeAnnotation<'tcx>, Span)>,
 
     /// Name of the local, used in debuginfo and pretty-printing.
     ///
@@ -1737,7 +1737,7 @@ pub enum StatementKind<'tcx> {
     /// - `Contravariant` -- requires that `T_y :> T`
     /// - `Invariant` -- requires that `T_y == T`
     /// - `Bivariant` -- no effect
-    AscribeUserType(Place<'tcx>, ty::Variance, CanonicalTy<'tcx>),
+    AscribeUserType(Place<'tcx>, ty::Variance, UserTypeAnnotation<'tcx>),
 
     /// No-op. Useful for deleting instructions without affecting statement indices.
     Nop,
@@ -1967,7 +1967,10 @@ impl<'tcx> Place<'tcx> {
         Place::Projection(Box::new(PlaceProjection { base: self, elem }))
     }
 
-    /// Find the innermost `Local` from this `Place`.
+    /// Find the innermost `Local` from this `Place`, *if* it is either a local itself or
+    /// a single deref of a local.
+    ///
+    /// FIXME: can we safely swap the semantics of `fn base_local` below in here instead?
     pub fn local(&self) -> Option<Local> {
         match self {
             Place::Local(local) |
@@ -1976,6 +1979,15 @@ impl<'tcx> Place<'tcx> {
                 elem: ProjectionElem::Deref,
             }) => Some(*local),
             _ => None,
+        }
+    }
+
+    /// Find the innermost `Local` from this `Place`.
+    pub fn base_local(&self) -> Option<Local> {
+        match self {
+            Place::Local(local) => Some(*local),
+            Place::Projection(box Projection { base, elem: _ }) => base.base_local(),
+            Place::Promoted(..) | Place::Static(..) => None,
         }
     }
 }
@@ -2188,7 +2200,7 @@ pub enum AggregateKind<'tcx> {
         &'tcx AdtDef,
         usize,
         &'tcx Substs<'tcx>,
-        Option<CanonicalTy<'tcx>>,
+        Option<UserTypeAnnotation<'tcx>>,
         Option<usize>,
     ),
 
@@ -2392,7 +2404,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
 /// this does not necessarily mean that they are "==" in Rust -- in
 /// particular one must be wary of `NaN`!
 
-#[derive(Clone, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable)]
 pub struct Constant<'tcx> {
     pub span: Span,
     pub ty: Ty<'tcx>,
@@ -2402,9 +2414,27 @@ pub struct Constant<'tcx> {
     /// indicate that `Vec<_>` was explicitly specified.
     ///
     /// Needed for NLL to impose user-given type constraints.
-    pub user_ty: Option<CanonicalTy<'tcx>>,
+    pub user_ty: Option<UserTypeAnnotation<'tcx>>,
 
     pub literal: &'tcx ty::Const<'tcx>,
+}
+
+/// A user-given type annotation attached to a constant.  These arise
+/// from constants that are named via paths, like `Foo::<A>::new` and
+/// so forth.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable)]
+pub enum UserTypeAnnotation<'tcx> {
+    Ty(CanonicalTy<'tcx>),
+    FnDef(DefId, CanonicalUserSubsts<'tcx>),
+    AdtDef(&'tcx AdtDef, CanonicalUserSubsts<'tcx>),
+}
+
+EnumTypeFoldableImpl! {
+    impl<'tcx> TypeFoldable<'tcx> for UserTypeAnnotation<'tcx> {
+        (UserTypeAnnotation::Ty)(ty),
+        (UserTypeAnnotation::FnDef)(def, substs),
+        (UserTypeAnnotation::AdtDef)(def, substs),
+    }
 }
 
 newtype_index! {

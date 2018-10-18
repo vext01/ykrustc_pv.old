@@ -36,7 +36,6 @@ use syntax::edition::Edition;
 use syntax::feature_gate::{self, AttributeType};
 use syntax::json::JsonEmitter;
 use syntax::source_map;
-use syntax::symbol::Symbol;
 use syntax::parse::{self, ParseSess};
 use syntax_pos::{MultiSpan, Span};
 use util::profiling::SelfProfiler;
@@ -63,6 +62,9 @@ pub mod search_paths;
 /// Represents the data associated with a compilation
 /// session for a single crate.
 pub struct Session {
+    /// A list of additional objects to link in for Yorick support.
+    pub yk_link_objects: RefCell<Vec<YkExtraLinkObject>>,
+
     pub target: config::Config,
     pub host: Target,
     pub opts: config::Options,
@@ -167,13 +169,6 @@ pub struct Session {
 
     /// Cap lint level specified by a driver specifically.
     pub driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
-
-    /// A list of additional objects to link in for Yorick support.
-    pub yk_link_objects: RefCell<Vec<YkExtraLinkObject>>,
-
-    /// All the crate names specified with `--extern`, and the builtin ones.
-    /// Starting with the Rust 2018 edition, absolute paths resolve in this set.
-    pub extern_prelude: FxHashSet<Symbol>,
 }
 
 pub struct PerfStats {
@@ -707,8 +702,8 @@ impl Session {
         match self.opts.maybe_sysroot {
             Some(ref sysroot) => sysroot,
             None => self.default_sysroot
-                .as_ref()
-                .expect("missing sysroot and default_sysroot in Session"),
+                        .as_ref()
+                        .expect("missing sysroot and default_sysroot in Session"),
         }
     }
     pub fn target_filesearch(&self, kind: PathKind) -> filesearch::FileSearch<'_> {
@@ -731,14 +726,8 @@ impl Session {
     pub fn set_incr_session_load_dep_graph(&self, load: bool) {
         let mut incr_comp_session = self.incr_comp_session.borrow_mut();
 
-        match *incr_comp_session {
-            IncrCompSession::Active {
-                ref mut load_dep_graph,
-                ..
-            } => {
-                *load_dep_graph = load;
-            }
-            _ => {}
+        if let IncrCompSession::Active { ref mut load_dep_graph, .. } = *incr_comp_session {
+            *load_dep_graph = load;
         }
     }
 
@@ -876,9 +865,9 @@ impl Session {
     /// This expends fuel if applicable, and records fuel if applicable.
     pub fn consider_optimizing<T: Fn() -> String>(&self, crate_name: &str, msg: T) -> bool {
         let mut ret = true;
-        match self.optimization_fuel_crate {
-            Some(ref c) if c == crate_name => {
-                assert!(self.query_threads() == 1);
+        if let Some(ref c) = self.optimization_fuel_crate {
+            if c == crate_name {
+                assert_eq!(self.query_threads(), 1);
                 let fuel = self.optimization_fuel_limit.get();
                 ret = fuel != 0;
                 if fuel == 0 && !self.out_of_fuel.get() {
@@ -888,14 +877,12 @@ impl Session {
                     self.optimization_fuel_limit.set(fuel - 1);
                 }
             }
-            _ => {}
         }
-        match self.print_fuel_crate {
-            Some(ref c) if c == crate_name => {
-                assert!(self.query_threads() == 1);
+        if let Some(ref c) = self.print_fuel_crate {
+            if c == crate_name {
+                assert_eq!(self.query_threads(), 1);
                 self.print_fuel.set(self.print_fuel.get() + 1);
             }
-            _ => {}
         }
         ret
     }
@@ -1112,14 +1099,11 @@ pub fn build_session_(
     source_map: Lrc<source_map::SourceMap>,
 ) -> Session {
     let host_triple = TargetTriple::from_triple(config::host_triple());
-    let host = match Target::search(&host_triple) {
-        Ok(t) => t,
-        Err(e) => {
-            span_diagnostic
-                .fatal(&format!("Error loading host specification: {}", e))
-                .raise();
-        }
-    };
+    let host = Target::search(&host_triple).unwrap_or_else(|e|
+        span_diagnostic
+            .fatal(&format!("Error loading host specification: {}", e))
+            .raise()
+    );
     let target_cfg = config::build_target_config(&sopts, &span_diagnostic);
 
     let p_s = parse::ParseSess::with_span_handler(span_diagnostic, source_map);
@@ -1139,12 +1123,11 @@ pub fn build_session_(
     let print_fuel_crate = sopts.debugging_opts.print_fuel.clone();
     let print_fuel = LockCell::new(0);
 
-    let working_dir = match env::current_dir() {
-        Ok(dir) => dir,
-        Err(e) => p_s.span_diagnostic
+    let working_dir = env::current_dir().unwrap_or_else(|e|
+        p_s.span_diagnostic
             .fatal(&format!("Current directory is invalid: {}", e))
-            .raise(),
-    };
+            .raise()
+    );
     let working_dir = file_path_mapping.map_prefix(working_dir);
 
     let cgu_reuse_tracker = if sopts.debugging_opts.query_dep_graph {
@@ -1153,19 +1136,8 @@ pub fn build_session_(
         CguReuseTracker::new_disabled()
     };
 
-
-    let mut extern_prelude: FxHashSet<Symbol> =
-        sopts.externs.iter().map(|kv| Symbol::intern(kv.0)).collect();
-
-    // HACK(eddyb) this ignores the `no_{core,std}` attributes.
-    // FIXME(eddyb) warn (somewhere) if core/std is used with `no_{core,std}`.
-    // if !attr::contains_name(&krate.attrs, "no_core") {
-    // if !attr::contains_name(&krate.attrs, "no_std") {
-    extern_prelude.insert(Symbol::intern("core"));
-    extern_prelude.insert(Symbol::intern("std"));
-    extern_prelude.insert(Symbol::intern("meta"));
-
     let sess = Session {
+        yk_link_objects: RefCell::new(Vec::new()),
         target: target_cfg,
         host,
         opts: sopts,
@@ -1240,8 +1212,6 @@ pub fn build_session_(
         has_global_allocator: Once::new(),
         has_panic_handler: Once::new(),
         driver_lint_caps: FxHashMap(),
-        yk_link_objects: RefCell::new(Vec::new()),
-        extern_prelude,
     };
 
     validate_commandline_args_with_session_available(&sess);

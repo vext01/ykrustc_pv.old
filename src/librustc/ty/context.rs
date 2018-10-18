@@ -33,7 +33,7 @@ use middle::resolve_lifetime::{self, ObjectLifetimeDefault};
 use middle::stability;
 use mir::{self, Mir, interpret};
 use mir::interpret::Allocation;
-use ty::subst::{CanonicalSubsts, Kind, Substs, Subst};
+use ty::subst::{CanonicalUserSubsts, Kind, Substs, Subst};
 use ty::ReprOptions;
 use traits;
 use traits::{Clause, Clauses, GoalKind, Goal, Goals};
@@ -383,7 +383,7 @@ pub struct TypeckTables<'tcx> {
     /// If the user wrote `foo.collect::<Vec<_>>()`, then the
     /// canonical substitutions would include only `for<X> { Vec<X>
     /// }`.
-    user_substs: ItemLocalMap<CanonicalSubsts<'tcx>>,
+    user_substs: ItemLocalMap<CanonicalUserSubsts<'tcx>>,
 
     adjustments: ItemLocalMap<Vec<ty::adjustment::Adjustment<'tcx>>>,
 
@@ -573,14 +573,14 @@ impl<'tcx> TypeckTables<'tcx> {
         self.node_substs.get(&id.local_id).cloned()
     }
 
-    pub fn user_substs_mut(&mut self) -> LocalTableInContextMut<'_, CanonicalSubsts<'tcx>> {
+    pub fn user_substs_mut(&mut self) -> LocalTableInContextMut<'_, CanonicalUserSubsts<'tcx>> {
         LocalTableInContextMut {
             local_id_root: self.local_id_root,
             data: &mut self.user_substs
         }
     }
 
-    pub fn user_substs(&self, id: hir::HirId) -> Option<CanonicalSubsts<'tcx>> {
+    pub fn user_substs(&self, id: hir::HirId) -> Option<CanonicalUserSubsts<'tcx>> {
         validate_hir_id_for_typeck_tables(self.local_id_root, id, false);
         self.user_substs.get(&id.local_id).cloned()
     }
@@ -936,8 +936,8 @@ pub struct GlobalCtxt<'tcx> {
     freevars: FxHashMap<DefId, Lrc<Vec<hir::Freevar>>>,
 
     maybe_unused_trait_imports: FxHashSet<DefId>,
-
     maybe_unused_extern_crates: Vec<(DefId, Span)>,
+    pub extern_prelude: FxHashSet<ast::Name>,
 
     // Internal cache for metadata decoding. No need to track deps on this.
     pub rcache: Lock<FxHashMap<ty::CReaderCacheKey, Ty<'tcx>>>,
@@ -1223,6 +1223,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                     .into_iter()
                     .map(|(id, sp)| (hir.local_def_id(id), sp))
                     .collect(),
+            extern_prelude: resolutions.extern_prelude,
             hir,
             def_path_hash_to_def_id,
             queries: query::Queries::new(
