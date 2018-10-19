@@ -354,7 +354,7 @@ unsafe impl<'a> ReverseSearcher<'a> for CharSearcher<'a> {
     #[inline]
     fn next_back(&mut self) -> SearchStep {
         let old_finger = self.finger_back;
-        let slice = unsafe { self.haystack.slice_unchecked(self.finger, old_finger) };
+        let slice = unsafe { self.haystack.get_unchecked(self.finger..old_finger) };
         let mut iter = slice.chars();
         let old_len = iter.iter.len();
         if let Some(ch) = iter.next_back() {
@@ -491,7 +491,7 @@ impl<F> MultiCharEq for F where F: FnMut(char) -> bool {
     fn matches(&mut self, c: char) -> bool { (*self)(c) }
 }
 
-impl<'a> MultiCharEq for &'a [char] {
+impl MultiCharEq for &[char] {
     #[inline]
     fn matches(&mut self, c: char) -> bool {
         self.iter().any(|&m| { m == c })
@@ -666,7 +666,7 @@ impl<'a, 'b> Pattern<'a> for &'b [char] {
 pub struct CharPredicateSearcher<'a, F>(<MultiCharEqPattern<F> as Pattern<'a>>::Searcher)
     where F: FnMut(char) -> bool;
 
-impl<'a, F> fmt::Debug for CharPredicateSearcher<'a, F>
+impl<F> fmt::Debug for CharPredicateSearcher<'_, F>
     where F: FnMut(char) -> bool
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

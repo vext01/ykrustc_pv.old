@@ -8,10 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused_variables)]
+#![allow(deprecated)]
 // ignore-cloudabi no environment variables present
 // ignore-emscripten env vars don't work?
-
-#![feature(path)]
 
 use std::env::*;
 use std::path::PathBuf;

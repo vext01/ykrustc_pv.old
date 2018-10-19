@@ -14,7 +14,7 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc::dep_graph::{PreviousDepGraph, SerializedDepGraph, WorkProduct, WorkProductId};
 use rustc::session::Session;
 use rustc::ty::TyCtxt;
-use rustc::ty::maps::OnDiskCache;
+use rustc::ty::query::OnDiskCache;
 use rustc::util::common::time_ext;
 use rustc_serialize::Decodable as RustcDecodable;
 use rustc_serialize::opaque::Decoder;
@@ -207,11 +207,11 @@ pub fn load_dep_graph(sess: &Session) ->
 pub fn load_query_result_cache<'sess>(sess: &'sess Session) -> OnDiskCache<'sess> {
     if sess.opts.incremental.is_none() ||
        !sess.opts.debugging_opts.incremental_queries {
-        return OnDiskCache::new_empty(sess.codemap());
+        return OnDiskCache::new_empty(sess.source_map());
     }
 
     match load_data(sess.opts.debugging_opts.incremental_info, &query_cache_path(sess)) {
         LoadResult::Ok{ data: (bytes, start_pos) } => OnDiskCache::new(sess, bytes, start_pos),
-        _ => OnDiskCache::new_empty(sess.codemap())
+        _ => OnDiskCache::new_empty(sess.source_map())
     }
 }

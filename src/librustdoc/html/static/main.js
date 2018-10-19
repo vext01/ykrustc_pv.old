@@ -39,7 +39,10 @@
                      "associatedconstant",
                      "union",
                      "foreigntype",
-                     "keyword"];
+                     "keyword",
+                     "existential",
+                     "attr",
+                     "derive"];
 
     var search_input = document.getElementsByClassName('search-input')[0];
 
@@ -51,6 +54,8 @@
     var currentTab = 0;
 
     var themesWidth = null;
+
+    var titleBeforeSearch = document.title;
 
     if (!String.prototype.startsWith) {
         String.prototype.startsWith = function(searchString, position) {
@@ -221,6 +226,25 @@
             }
         }
     }
+
+    function expandSection(id) {
+        var elem = document.getElementById(id);
+        if (elem && isHidden(elem)) {
+            var h3 = elem.parentNode.previousSibling;
+            if (h3 && h3.tagName !== 'H3') {
+                h3 = h3.previousSibling; // skip div.docblock
+            }
+
+            if (h3) {
+                var collapses = h3.getElementsByClassName("collapse-toggle");
+                if (collapses.length > 0) {
+                    // The element is not visible, we need to make it appear!
+                    collapseDocs(collapses[0], "show");
+                }
+            }
+        }
+    }
+
     highlightSourceLines(null);
     window.onhashchange = highlightSourceLines;
 
@@ -267,6 +291,7 @@
             ev.preventDefault();
             addClass(search, "hidden");
             removeClass(document.getElementById("main"), "hidden");
+            document.title = titleBeforeSearch;
         }
         defocusSearchBar();
     }
@@ -314,6 +339,15 @@
         }
     }
 
+    function findParentElement(elem, tagName) {
+        do {
+            if (elem && elem.tagName === tagName) {
+                return elem;
+            }
+        } while (elem = elem.parentNode);
+        return null;
+    }
+
     document.onkeypress = handleShortcut;
     document.onkeydown = handleShortcut;
     document.onclick = function(ev) {
@@ -351,6 +385,13 @@
         } else if (!hasClass(document.getElementById("help"), "hidden")) {
             addClass(document.getElementById("help"), "hidden");
             removeClass(document.body, "blur");
+        } else {
+            // Making a collapsed element visible on onhashchange seems
+            // too late
+            var a = findParentElement(ev.target, 'A');
+            if (a && a.hash) {
+                expandSection(a.hash.replace(/^#/, ''));
+            }
         }
     };
 
@@ -415,6 +456,10 @@
         var currentResults, index, searchIndex;
         var MAX_LEV_DISTANCE = 3;
         var MAX_RESULTS = 200;
+        var GENERICS_DATA = 1;
+        var NAME = 0;
+        var INPUTS_DATA = 0;
+        var OUTPUT_DATA = 1;
         var params = getQueryStringParams();
 
         // Populate search bar with query string search term when provided,
@@ -465,6 +510,8 @@
                             var res = buildHrefAndPath(obj);
                             obj.displayPath = pathSplitter(res[0]);
                             obj.fullPath = obj.displayPath + obj.name;
+                            // To be sure than it some items aren't considered as duplicate.
+                            obj.fullPath += '|' + obj.ty;
                             obj.href = res[1];
                             out.push(obj);
                             if (out.length >= MAX_RESULTS) {
@@ -601,8 +648,9 @@
                 // match as well.
                 var lev_distance = MAX_LEV_DISTANCE + 1;
                 if (val.generics.length > 0) {
-                    if (obj.g && obj.g.length >= val.generics.length) {
-                        var elems = obj.g.slice(0);
+                    if (obj.length > GENERICS_DATA &&
+                          obj[GENERICS_DATA].length >= val.generics.length) {
+                        var elems = obj[GENERICS_DATA].slice(0);
                         var total = 0;
                         var done = 0;
                         // We need to find the type that matches the most to remove it in order
@@ -634,11 +682,12 @@
             // Check for type name and type generics (if any).
             function checkType(obj, val, literalSearch) {
                 var lev_distance = MAX_LEV_DISTANCE + 1;
-                if (obj.n === val.name) {
+                if (obj[NAME] === val.name) {
                     if (literalSearch === true) {
                         if (val.generics && val.generics.length !== 0) {
-                            if (obj.g && obj.length >= val.generics.length) {
-                                var elems = obj.g.slice(0);
+                            if (obj.length > GENERICS_DATA &&
+                                  obj[GENERICS_DATA].length >= val.generics.length) {
+                                var elems = obj[GENERICS_DATA].slice(0);
                                 var allFound = true;
                                 var x;
 
@@ -662,7 +711,7 @@
                     }
                     // If the type has generics but don't match, then it won't return at this point.
                     // Otherwise, `checkGenerics` will return 0 and it'll return.
-                    if (obj.g && obj.g.length !== 0) {
+                    if (obj.length > GENERICS_DATA && obj[GENERICS_DATA].length !== 0) {
                         var tmp_lev = checkGenerics(obj, val);
                         if (tmp_lev <= MAX_LEV_DISTANCE) {
                             return tmp_lev;
@@ -673,22 +722,23 @@
                 }
                 // Names didn't match so let's check if one of the generic types could.
                 if (literalSearch === true) {
-                     if (obj.g && obj.g.length > 0) {
-                        for (var x = 0; x < obj.g.length; ++x) {
-                            if (obj.g[x] === val.name) {
+                     if (obj.length > GENERICS_DATA && obj[GENERICS_DATA].length > 0) {
+                        for (var x = 0; x < obj[GENERICS_DATA].length; ++x) {
+                            if (obj[GENERICS_DATA][x] === val.name) {
                                 return true;
                             }
                         }
                     }
                     return false;
                 }
-                var lev_distance = Math.min(levenshtein(obj.n, val.name), lev_distance);
+                var lev_distance = Math.min(levenshtein(obj[NAME], val.name),
+                                            lev_distance);
                 if (lev_distance <= MAX_LEV_DISTANCE) {
                     lev_distance = Math.min(checkGenerics(obj, val), lev_distance);
-                } else if (obj.g && obj.g.length > 0) {
+                } else if (obj.length > GENERICS_DATA && obj[GENERICS_DATA].length > 0) {
                     // We can check if the type we're looking for is inside the generics!
-                    for (var x = 0; x < obj.g.length; ++x) {
-                        lev_distance = Math.min(levenshtein(obj.g[x], val.name),
+                    for (var x = 0; x < obj[GENERICS_DATA].length; ++x) {
+                        lev_distance = Math.min(levenshtein(obj[GENERICS_DATA][x], val.name),
                                                 lev_distance);
                     }
                 }
@@ -700,9 +750,10 @@
             function findArg(obj, val, literalSearch) {
                 var lev_distance = MAX_LEV_DISTANCE + 1;
 
-                if (obj && obj.type && obj.type.i && obj.type.i.length > 0) {
-                    for (var i = 0; i < obj.type.i.length; i++) {
-                        var tmp = checkType(obj.type.i[i], val, literalSearch);
+                if (obj && obj.type && obj.type[INPUTS_DATA] &&
+                      obj.type[INPUTS_DATA].length > 0) {
+                    for (var i = 0; i < obj.type[INPUTS_DATA].length; i++) {
+                        var tmp = checkType(obj.type[INPUTS_DATA][i], val, literalSearch);
                         if (literalSearch === true && tmp === true) {
                             return true;
                         }
@@ -718,8 +769,8 @@
             function checkReturned(obj, val, literalSearch) {
                 var lev_distance = MAX_LEV_DISTANCE + 1;
 
-                if (obj && obj.type && obj.type.o) {
-                    var tmp = checkType(obj.type.o, val, literalSearch);
+                if (obj && obj.type && obj.type.length > OUTPUT_DATA) {
+                    var tmp = checkType(obj.type[OUTPUT_DATA], val, literalSearch);
                     if (literalSearch === true && tmp === true) {
                         return true;
                     }
@@ -731,8 +782,8 @@
                 return literalSearch === true ? false : lev_distance;
             }
 
-            function checkPath(startsWith, lastElem, ty) {
-                if (startsWith.length === 0) {
+            function checkPath(contains, lastElem, ty) {
+                if (contains.length === 0) {
                     return 0;
                 }
                 var ret_lev = MAX_LEV_DISTANCE + 1;
@@ -742,17 +793,17 @@
                     path.push(ty.parent.name.toLowerCase());
                 }
 
-                if (startsWith.length > path.length) {
+                if (contains.length > path.length) {
                     return MAX_LEV_DISTANCE + 1;
                 }
                 for (var i = 0; i < path.length; ++i) {
-                    if (i + startsWith.length > path.length) {
+                    if (i + contains.length > path.length) {
                         break;
                     }
                     var lev_total = 0;
                     var aborted = false;
-                    for (var x = 0; x < startsWith.length; ++x) {
-                        var lev = levenshtein(path[i + x], startsWith[x]);
+                    for (var x = 0; x < contains.length; ++x) {
+                        var lev = levenshtein(path[i + x], contains[x]);
                         if (lev > MAX_LEV_DISTANCE) {
                             aborted = true;
                             break;
@@ -760,7 +811,7 @@
                         lev_total += lev;
                     }
                     if (aborted === false) {
-                        ret_lev = Math.min(ret_lev, Math.round(lev_total / startsWith.length));
+                        ret_lev = Math.min(ret_lev, Math.round(lev_total / contains.length));
                     }
                 }
                 return ret_lev;
@@ -781,7 +832,7 @@
                     case "fn":
                         return (name == "method" || name == "tymethod");
                     case "type":
-                        return (name == "primitive");
+                        return (name == "primitive" || name == "keyword");
                 }
 
                 // No match
@@ -864,7 +915,7 @@
                     var fullId = generateId(ty);
 
                     // allow searching for void (no output) functions as well
-                    var typeOutput = type.o ? type.o.name : "";
+                    var typeOutput = type.length > OUTPUT_DATA ? type[OUTPUT_DATA].name : "";
                     var returned = checkReturned(ty, output, true);
                     if (output.name === "*" || returned === true) {
                         var in_args = false;
@@ -924,7 +975,7 @@
                     }
                 }
                 val = paths[paths.length - 1];
-                var startsWith = paths.slice(0, paths.length > 1 ? paths.length - 1 : 1);
+                var contains = paths.slice(0, paths.length > 1 ? paths.length - 1 : 1);
 
                 for (j = 0; j < nSearchWords; ++j) {
                     var lev_distance;
@@ -934,7 +985,7 @@
                     }
                     var lev_add = 0;
                     if (paths.length > 1) {
-                        var lev = checkPath(startsWith, paths[paths.length - 1], ty);
+                        var lev = checkPath(contains, paths[paths.length - 1], ty);
                         if (lev > MAX_LEV_DISTANCE) {
                             continue;
                         } else if (lev > 0) {
@@ -977,7 +1028,7 @@
                     }
 
                     lev += lev_add;
-                    if (lev > 0 && val.length > 3 && searchWords[j].startsWith(val)) {
+                    if (lev > 0 && val.length > 3 && searchWords[j].indexOf(val) > -1) {
                         if (val.length < 6) {
                             lev -= 1;
                         } else {
@@ -1743,9 +1794,12 @@
                         x[k].setAttribute('href', rootPath + href);
                     }
                 }
-                var li = document.createElement('li');
-                li.appendChild(code);
-                list.appendChild(li);
+                var display = document.createElement('h3');
+                addClass(display, "impl");
+                display.innerHTML = '<span class="in-band"><table class="table-display"><tbody>\
+                    <tr><td><code>' + code.outerHTML + '</code></td><td></td></tr></tbody></table>\
+                    </span>';
+                list.appendChild(display);
             }
         }
     };
@@ -1775,7 +1829,7 @@
         }
     }
 
-    function toggleAllDocs(pageId) {
+    function toggleAllDocs(pageId, fromAutoCollapse) {
         var toggle = document.getElementById("toggle-all-docs");
         if (!toggle) {
             return;
@@ -1787,9 +1841,11 @@
                 e.innerHTML = labelForToggleButton(false);
             });
             toggle.title = "collapse all docs";
-            onEach(document.getElementsByClassName("collapse-toggle"), function(e) {
-                collapseDocs(e, "show");
-            });
+            if (fromAutoCollapse !== true) {
+                onEach(document.getElementsByClassName("collapse-toggle"), function(e) {
+                    collapseDocs(e, "show");
+                });
+            }
         } else {
             updateLocalStorage("rustdoc-collapse", "true");
             addClass(toggle, "will-expand");
@@ -1797,10 +1853,11 @@
                 e.innerHTML = labelForToggleButton(true);
             });
             toggle.title = "expand all docs";
-
-            onEach(document.getElementsByClassName("collapse-toggle"), function(e) {
-                collapseDocs(e, "hide", pageId);
-            });
+            if (fromAutoCollapse !== true) {
+                onEach(document.getElementsByClassName("collapse-toggle"), function(e) {
+                    collapseDocs(e, "hide", pageId);
+                });
+            }
         }
     }
 
@@ -1921,19 +1978,37 @@
         }
     }
 
-    function autoCollapseAllImpls(pageId) {
-        // Automatically minimize all non-inherent impls
-        onEach(document.getElementsByClassName('impl'), function(n) {
-            // inherent impl ids are like 'impl' or impl-<number>'
-            var inherent = (n.id.match(/^impl(?:-\d+)?$/) !== null);
-            if (!inherent) {
-                onEach(n.childNodes, function(m) {
-                    if (hasClass(m, "collapse-toggle")) {
-                        collapseDocs(m, "hide", pageId);
+    function autoCollapse(pageId, collapse) {
+        if (collapse) {
+            toggleAllDocs(pageId, true);
+        }
+        var collapser = function(e) {
+                // inherent impl ids are like 'impl' or impl-<number>'.
+                // they will never be hidden by default.
+                var n = e.parentElement;
+                if (n.id.match(/^impl(?:-\d+)?$/) === null) {
+                    // Automatically minimize all non-inherent impls
+                    if (collapse || hasClass(n, 'impl')) {
+                        collapseDocs(e, "hide", pageId);
                     }
+                }
+        };
+        if (getCurrentValue('rustdoc-trait-implementations') !== "false") {
+            var impl_list = document.getElementById('implementations-list');
+
+            if (impl_list !== null) {
+                onEach(impl_list.getElementsByClassName("collapse-toggle"), collapser);
+            }
+        }
+        if (getCurrentValue('rustdoc-method-docs') !== "false") {
+            var implItems = document.getElementsByClassName('impl-items');
+
+            if (implItems && implItems.length > 0) {
+                onEach(implItems, function(elem) {
+                    onEach(elem.getElementsByClassName("collapse-toggle"), collapser);
                 });
             }
-        });
+        }
     }
 
     var x = document.getElementById('toggle-all-docs');
@@ -1970,7 +2045,8 @@
         if (!next) {
             return;
         }
-        if ((checkIfThereAreMethods(next.childNodes) || hasClass(e, 'method')) &&
+        if ((hasClass(e, 'method') || hasClass(e, 'associatedconstant') ||
+             checkIfThereAreMethods(next.childNodes)) &&
             (hasClass(next, 'docblock') ||
              hasClass(e, 'impl') ||
              (hasClass(next, 'stability') &&
@@ -1979,20 +2055,23 @@
         }
     };
     onEach(document.getElementsByClassName('method'), func);
+    onEach(document.getElementsByClassName('associatedconstant'), func);
     onEach(document.getElementsByClassName('impl'), func);
-    onEach(document.getElementsByClassName('impl-items'), function(e) {
-        onEach(e.getElementsByClassName('associatedconstant'), func);
-    });
 
-    function createToggle(otherMessage, extraClass) {
+    function createToggle(otherMessage, fontSize, extraClass, show) {
         var span = document.createElement('span');
         span.className = 'toggle-label';
-        span.style.display = 'none';
+        if (show) {
+            span.style.display = 'none';
+        }
         if (!otherMessage) {
             span.innerHTML = '&nbsp;Expand&nbsp;description';
         } else {
             span.innerHTML = otherMessage;
-            span.style.fontSize = '20px';
+        }
+
+        if (fontSize) {
+            span.style.fontSize = fontSize;
         }
 
         var mainToggle = toggle.cloneNode(true);
@@ -2000,8 +2079,15 @@
 
         var wrapper = document.createElement('div');
         wrapper.className = 'toggle-wrapper';
+        if (!show) {
+            addClass(wrapper, 'collapsed');
+            var inner = mainToggle.getElementsByClassName('inner');
+            if (inner && inner.length > 0) {
+                inner[0].innerHTML = '+';
+            }
+        }
         if (extraClass) {
-            wrapper.className += ' ' + extraClass;
+            addClass(wrapper, extraClass);
         }
         wrapper.appendChild(mainToggle);
         return wrapper;
@@ -2031,20 +2117,37 @@
         }
         if (e.parentNode.id === "main") {
             var otherMessage;
+            var fontSize;
             var extraClass;
+            var show = true;
+
             if (hasClass(e, "type-decl")) {
+                fontSize = "20px";
                 otherMessage = '&nbsp;Show&nbsp;declaration';
+                show = getCurrentValue('rustdoc-item-declarations') === "false";
+                if (!show) {
+                    extraClass = 'collapsed';
+                }
+            } else if (hasClass(e, "non-exhaustive")) {
+                otherMessage = '&nbsp;This&nbsp;';
+                if (hasClass(e, "non-exhaustive-struct")) {
+                    otherMessage += 'struct';
+                } else if (hasClass(e, "non-exhaustive-enum")) {
+                    otherMessage += 'enum';
+                } else if (hasClass(e, "non-exhaustive-type")) {
+                    otherMessage += 'type';
+                }
+                otherMessage += '&nbsp;is&nbsp;marked&nbsp;as&nbsp;non-exhaustive';
             } else if (hasClass(e.childNodes[0], "impl-items")) {
                 extraClass = "marg-left";
             }
-            e.parentNode.insertBefore(createToggle(otherMessage, extraClass), e);
-            if (otherMessage && getCurrentValue('rustdoc-item-declarations') !== "false") {
+
+            e.parentNode.insertBefore(createToggle(otherMessage, fontSize, extraClass, show), e);
+            if (otherMessage && show) {
                 collapseDocs(e.previousSibling.childNodes[0], "toggle");
             }
         }
     });
-
-    autoCollapseAllImpls(getPageId());
 
     function createToggleWrapper(tog) {
         var span = document.createElement('span');
@@ -2175,8 +2278,10 @@
         hideSidebar();
     };
 
-    if (getCurrentValue("rustdoc-collapse") === "true") {
-        toggleAllDocs(getPageId());
+    autoCollapse(getPageId(), getCurrentValue("rustdoc-collapse") === "true");
+
+    if (window.location.hash && window.location.hash.length > 0) {
+        expandSection(window.location.hash.replace(/^#/, ''));
     }
 }());
 

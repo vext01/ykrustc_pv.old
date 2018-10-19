@@ -13,6 +13,7 @@ use rustc::hir::{self, HirId};
 use rustc::lint::builtin::UNUSED_MUT;
 use rustc::ty;
 use rustc::util::nodemap::{FxHashMap, FxHashSet};
+use errors::Applicability;
 use std::slice;
 use syntax::ptr::P;
 
@@ -44,28 +45,26 @@ struct UnusedMutCx<'a, 'tcx: 'a> {
 impl<'a, 'tcx> UnusedMutCx<'a, 'tcx> {
     fn check_unused_mut_pat(&self, pats: &[P<hir::Pat>]) {
         let tcx = self.bccx.tcx;
-        let mut mutables = FxHashMap();
+        let mut mutables: FxHashMap<_, Vec<_>> = FxHashMap();
         for p in pats {
-            p.each_binding(|_, hir_id, span, path1| {
-                let name = path1.node;
-
+            p.each_binding(|_, hir_id, span, ident| {
                 // Skip anything that looks like `_foo`
-                if name.as_str().starts_with("_") {
+                if ident.as_str().starts_with("_") {
                     return;
                 }
 
                 // Skip anything that looks like `&foo` or `&mut foo`, only look
                 // for by-value bindings
-                let bm = match self.bccx.tables.pat_binding_modes().get(hir_id) {
-                    Some(&bm) => bm,
-                    None => span_bug!(span, "missing binding mode"),
-                };
-                match bm {
-                    ty::BindByValue(hir::MutMutable) => {}
-                    _ => return,
-                }
+                if let Some(&bm) = self.bccx.tables.pat_binding_modes().get(hir_id) {
+                    match bm {
+                        ty::BindByValue(hir::MutMutable) => {}
+                        _ => return,
+                    }
 
-                mutables.entry(name).or_insert(Vec::new()).push((hir_id, span));
+                    mutables.entry(ident.name).or_default().push((hir_id, span));
+                } else {
+                    tcx.sess.delay_span_bug(span, "missing binding mode");
+                }
             });
         }
 
@@ -77,15 +76,23 @@ impl<'a, 'tcx> UnusedMutCx<'a, 'tcx> {
             }
 
             let (hir_id, span) = ids[0];
-            let mut_span = tcx.sess.codemap().span_until_non_whitespace(span);
+            if span.compiler_desugaring_kind().is_some() {
+                // If the `mut` arises as part of a desugaring, we should ignore it.
+                continue;
+            }
 
             // Ok, every name wasn't used mutably, so issue a warning that this
             // didn't need to be mutable.
+            let mut_span = tcx.sess.source_map().span_until_non_whitespace(span);
             tcx.struct_span_lint_hir(UNUSED_MUT,
                                      hir_id,
                                      span,
                                      "variable does not need to be mutable")
-                .span_suggestion_short(mut_span, "remove this `mut`", "".to_owned())
+                .span_suggestion_short_with_applicability(
+                    mut_span,
+                    "remove this `mut`",
+                    String::new(),
+                    Applicability::MachineApplicable)
                 .emit();
         }
     }

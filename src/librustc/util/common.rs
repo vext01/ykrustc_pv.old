@@ -14,13 +14,10 @@ use rustc_data_structures::sync::Lock;
 
 use std::cell::{RefCell, Cell};
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::fmt::Debug;
 use std::hash::{Hash, BuildHasher};
-use std::iter::repeat;
 use std::panic;
 use std::env;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use std::sync::mpsc::{Sender};
@@ -42,14 +39,14 @@ pub struct ErrorReported;
 thread_local!(static TIME_DEPTH: Cell<usize> = Cell::new(0));
 
 lazy_static! {
-    static ref DEFAULT_HOOK: Box<dyn Fn(&panic::PanicInfo) + Sync + Send + 'static> = {
+    static ref DEFAULT_HOOK: Box<dyn Fn(&panic::PanicInfo<'_>) + Sync + Send + 'static> = {
         let hook = panic::take_hook();
         panic::set_hook(Box::new(panic_hook));
         hook
     };
 }
 
-fn panic_hook(info: &panic::PanicInfo) {
+fn panic_hook(info: &panic::PanicInfo<'_>) {
     if !proc_macro::__internal::in_sess() {
         (*DEFAULT_HOOK)(info);
 
@@ -87,7 +84,7 @@ pub struct ProfQDumpParams {
     pub dump_profq_msg_log:bool,
 }
 
-#[allow(bad_style)]
+#[allow(nonstandard_style)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryMsg {
     pub query: &'static str,
@@ -216,10 +213,10 @@ fn print_time_passes_entry_internal(what: &str, dur: Duration) {
             let mb = n as f64 / 1_000_000.0;
             format!("; rss: {}MB", mb.round() as usize)
         }
-        None => "".to_owned(),
+        None => String::new(),
     };
     println!("{}time: {}{}\t{}",
-             repeat("  ").take(indentation).collect::<String>(),
+             "  ".repeat(indentation),
              duration_to_secs_str(dur),
              mem_string,
              what);
@@ -243,7 +240,7 @@ pub fn to_readable_str(mut val: usize) -> String {
         val /= 1000;
 
         if val == 0 {
-            groups.push(format!("{}", group));
+            groups.push(group.to_string());
             break;
         } else {
             groups.push(format!("{:03}", group));
@@ -376,19 +373,6 @@ impl<K, V, S> MemoizationMap for RefCell<HashMap<K,V,S>>
         }
     }
 }
-
-#[cfg(unix)]
-pub fn path2cstr(p: &Path) -> CString {
-    use std::os::unix::prelude::*;
-    use std::ffi::OsStr;
-    let p: &OsStr = p.as_ref();
-    CString::new(p.as_bytes()).unwrap()
-}
-#[cfg(windows)]
-pub fn path2cstr(p: &Path) -> CString {
-    CString::new(p.to_str().unwrap()).unwrap()
-}
-
 
 #[test]
 fn test_to_readable_str() {

@@ -10,8 +10,7 @@
 
 //! See docs in build/expr/mod.rs
 
-use build::{BlockAnd, BlockAndExtension, Builder};
-use build::expr::category::Category;
+use build::{BlockAnd, BlockAndExtension, BlockFrame, Builder};
 use hair::*;
 use rustc::middle::region;
 use rustc::mir::*;
@@ -19,67 +18,93 @@ use rustc::mir::*;
 impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     /// Compile `expr` into a fresh temporary. This is used when building
     /// up rvalues so as to freeze the value that will be consumed.
-    pub fn as_temp<M>(&mut self,
-                      block: BasicBlock,
-                      temp_lifetime: Option<region::Scope>,
-                      expr: M)
-                      -> BlockAnd<Local>
-        where M: Mirror<'tcx, Output = Expr<'tcx>>
+    pub fn as_temp<M>(
+        &mut self,
+        block: BasicBlock,
+        temp_lifetime: Option<region::Scope>,
+        expr: M,
+        mutability: Mutability,
+    ) -> BlockAnd<Local>
+    where
+        M: Mirror<'tcx, Output = Expr<'tcx>>,
     {
         let expr = self.hir.mirror(expr);
-        self.expr_as_temp(block, temp_lifetime, expr)
+        self.expr_as_temp(block, temp_lifetime, expr, mutability)
     }
 
-    fn expr_as_temp(&mut self,
-                    mut block: BasicBlock,
-                    temp_lifetime: Option<region::Scope>,
-                    expr: Expr<'tcx>)
-                    -> BlockAnd<Local> {
-        debug!("expr_as_temp(block={:?}, temp_lifetime={:?}, expr={:?})",
-               block, temp_lifetime, expr);
+    fn expr_as_temp(
+        &mut self,
+        mut block: BasicBlock,
+        temp_lifetime: Option<region::Scope>,
+        expr: Expr<'tcx>,
+        mutability: Mutability,
+    ) -> BlockAnd<Local> {
+        debug!(
+            "expr_as_temp(block={:?}, temp_lifetime={:?}, expr={:?}, mutability={:?})",
+            block, temp_lifetime, expr, mutability
+        );
         let this = self;
 
         let expr_span = expr.span;
         let source_info = this.source_info(expr_span);
-        if let ExprKind::Scope { region_scope, lint_level, value } = expr.kind {
+        if let ExprKind::Scope {
+            region_scope,
+            lint_level,
+            value,
+        } = expr.kind
+        {
             return this.in_scope((region_scope, source_info), lint_level, block, |this| {
-                this.as_temp(block, temp_lifetime, value)
+                this.as_temp(block, temp_lifetime, value, mutability)
             });
         }
 
         let expr_ty = expr.ty;
-        let temp = this.local_decls.push(LocalDecl::new_temp(expr_ty, expr_span));
+        let temp = {
+            let mut local_decl = LocalDecl::new_temp(expr_ty, expr_span);
+            if mutability == Mutability::Not {
+                local_decl = local_decl.immutable();
+            }
 
+            debug!("creating temp {:?} with block_context: {:?}", local_decl, this.block_context);
+            // Find out whether this temp is being created within the
+            // tail expression of a block whose result is ignored.
+            for bf in this.block_context.iter().rev() {
+                match bf {
+                    BlockFrame::SubExpr => continue,
+                    BlockFrame::Statement { .. } => break,
+                    &BlockFrame::TailExpr { tail_result_is_ignored } => {
+                        local_decl = local_decl.block_tail(BlockTailInfo {
+                            tail_result_is_ignored
+                        });
+                        break;
+                    }
+                }
+            }
+
+            this.local_decls.push(local_decl)
+        };
         if !expr_ty.is_never() {
-            this.cfg.push(block, Statement {
-                source_info,
-                kind: StatementKind::StorageLive(temp)
-            });
+            this.cfg.push(
+                block,
+                Statement {
+                    source_info,
+                    kind: StatementKind::StorageLive(temp),
+                },
+            );
         }
 
-        // Careful here not to cause an infinite cycle. If we always
-        // called `into`, then for places like `x.f`, it would
-        // eventually fallback to us, and we'd loop. There's a reason
-        // for this: `as_temp` is the point where we bridge the "by
-        // reference" semantics of `as_place` with the "by value"
-        // semantics of `into`, `as_operand`, `as_rvalue`, and (of
-        // course) `as_temp`.
-        match Category::of(&expr.kind).unwrap() {
-            Category::Place => {
-                let place = unpack!(block = this.as_place(block, expr));
-                let rvalue = Rvalue::Use(this.consume_by_copy_or_move(place));
-                this.cfg.push_assign(block, source_info, &Place::Local(temp), rvalue);
-            }
-            _ => {
-                unpack!(block = this.into(&Place::Local(temp), block, expr));
-            }
-        }
+        unpack!(block = this.into(&Place::Local(temp), block, expr));
 
         // In constants, temp_lifetime is None. We should not need to drop
         // anything because no values with a destructor can be created in
         // a constant at this time, even if the type may need dropping.
         if let Some(temp_lifetime) = temp_lifetime {
-            this.schedule_drop(expr_span, temp_lifetime, &Place::Local(temp), expr_ty);
+            this.schedule_drop_storage_and_value(
+                expr_span,
+                temp_lifetime,
+                &Place::Local(temp),
+                expr_ty,
+            );
         }
 
         block.and(temp)

@@ -103,10 +103,11 @@
 //! inlining, even when they are not marked #[inline].
 
 use monomorphize::collector::InliningMap;
-use rustc::dep_graph::WorkProductId;
-use rustc::hir::def_id::DefId;
+use rustc::dep_graph::{WorkProductId, WorkProduct, DepNode, DepConstructor};
+use rustc::hir::CodegenFnAttrFlags;
+use rustc::hir::def_id::{DefId, LOCAL_CRATE, CRATE_DEF_INDEX};
 use rustc::hir::map::DefPathData;
-use rustc::mir::mono::{Linkage, Visibility};
+use rustc::mir::mono::{Linkage, Visibility, CodegenUnitNameBuilder};
 use rustc::middle::exported_symbols::SymbolExportLevel;
 use rustc::ty::{self, TyCtxt, InstanceDef};
 use rustc::ty::item_path::characteristic_def_id_of_type;
@@ -114,7 +115,7 @@ use rustc::util::nodemap::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
 use std::cmp;
 use syntax::ast::NodeId;
-use syntax::symbol::{Symbol, InternedString};
+use syntax::symbol::InternedString;
 use rustc::mir::mono::MonoItem;
 use monomorphize::item::{MonoItemExt, InstantiationMode};
 
@@ -147,6 +148,15 @@ pub trait CodegenUnitExt<'tcx> {
 
     fn work_product_id(&self) -> WorkProductId {
         WorkProductId::from_cgu_name(&self.name().as_str())
+    }
+
+    fn work_product(&self, tcx: TyCtxt) -> WorkProduct {
+        let work_product_id = self.work_product_id();
+        tcx.dep_graph
+           .previous_work_product(&work_product_id)
+           .unwrap_or_else(|| {
+                panic!("Could not find work-product for CGU `{}`", self.name())
+            })
     }
 
     fn items_in_deterministic_order<'a>(&self,
@@ -193,6 +203,10 @@ pub trait CodegenUnitExt<'tcx> {
         items.sort_by_cached_key(|&(i, _)| item_sort_key(tcx, i));
         items
     }
+
+    fn codegen_dep_node(&self, tcx: TyCtxt<'_, 'tcx, 'tcx>) -> DepNode {
+        DepNode::new(tcx, DepConstructor::CompileCodegenUnit(self.name().clone()))
+    }
 }
 
 impl<'tcx> CodegenUnitExt<'tcx> for CodegenUnit<'tcx> {
@@ -202,16 +216,9 @@ impl<'tcx> CodegenUnitExt<'tcx> for CodegenUnit<'tcx> {
 }
 
 // Anything we can't find a proper codegen unit for goes into this.
-fn fallback_cgu_name(tcx: TyCtxt) -> InternedString {
-    const FALLBACK_CODEGEN_UNIT: &'static str = "__rustc_fallback_codegen_unit";
-
-    if tcx.sess.opts.debugging_opts.human_readable_cgu_names {
-        Symbol::intern(FALLBACK_CODEGEN_UNIT).as_interned_str()
-    } else {
-        Symbol::intern(&CodegenUnit::mangle_name(FALLBACK_CODEGEN_UNIT)).as_interned_str()
-    }
+fn fallback_cgu_name(name_builder: &mut CodegenUnitNameBuilder) -> InternedString {
+    name_builder.build_cgu_name(LOCAL_CRATE, &["fallback"], Some("cgu"))
 }
-
 
 pub fn partition<'a, 'tcx, I>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                               mono_items: I,
@@ -223,8 +230,7 @@ pub fn partition<'a, 'tcx, I>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // In the first step, we place all regular monomorphizations into their
     // respective 'home' codegen unit. Regular monomorphizations are all
     // functions and statics defined in the local crate.
-    let mut initial_partitioning = place_root_mono_items(tcx,
-                                                                mono_items);
+    let mut initial_partitioning = place_root_mono_items(tcx, mono_items);
 
     initial_partitioning.codegen_units.iter_mut().for_each(|cgu| cgu.estimate_size(&tcx));
 
@@ -233,7 +239,7 @@ pub fn partition<'a, 'tcx, I>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // If the partitioning should produce a fixed count of codegen units, merge
     // until that count is reached.
     if let PartitioningStrategy::FixedUnitCount(count) = strategy {
-        merge_codegen_units(&mut initial_partitioning, count, &tcx.crate_name.as_str());
+        merge_codegen_units(tcx, &mut initial_partitioning, count);
 
         debug_dump(tcx, "POST MERGING:", initial_partitioning.codegen_units.iter());
     }
@@ -304,8 +310,11 @@ fn place_root_mono_items<'a, 'tcx, I>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // available to downstream crates. This depends on whether we are in
     // share-generics mode and whether the current crate can even have
     // downstream crates.
-    let export_generics = tcx.share_generics() &&
+    let export_generics = tcx.sess.opts.share_generics() &&
                           tcx.local_crate_exports_generics();
+
+    let cgu_name_builder = &mut CodegenUnitNameBuilder::new(tcx);
+    let cgu_name_cache = &mut FxHashMap();
 
     for mono_item in mono_items {
         match mono_item.instantiation_mode(tcx) {
@@ -318,150 +327,24 @@ fn place_root_mono_items<'a, 'tcx, I>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                           mono_item.is_generic_fn();
 
         let codegen_unit_name = match characteristic_def_id {
-            Some(def_id) => compute_codegen_unit_name(tcx, def_id, is_volatile),
-            None => fallback_cgu_name(tcx),
-        };
-
-        let make_codegen_unit = || {
-            CodegenUnit::new(codegen_unit_name.clone())
+            Some(def_id) => compute_codegen_unit_name(tcx,
+                                                      cgu_name_builder,
+                                                      def_id,
+                                                      is_volatile,
+                                                      cgu_name_cache),
+            None => fallback_cgu_name(cgu_name_builder),
         };
 
         let codegen_unit = codegen_units.entry(codegen_unit_name.clone())
-                                            .or_insert_with(make_codegen_unit);
+            .or_insert_with(|| CodegenUnit::new(codegen_unit_name.clone()));
 
         let mut can_be_internalized = true;
-        let default_visibility = |id: DefId, is_generic: bool| {
-            if !tcx.sess.target.target.options.default_hidden_visibility {
-                return Visibility::Default
-            }
-
-            // Generic functions never have export level C
-            if is_generic {
-                return Visibility::Hidden
-            }
-
-            // Things with export level C don't get instantiated in downstream
-            // crates
-            if !id.is_local() {
-                return Visibility::Hidden
-            }
-
-            if let Some(&SymbolExportLevel::C) = tcx.reachable_non_generics(id.krate)
-                                                    .get(&id) {
-                Visibility::Default
-            } else {
-                Visibility::Hidden
-            }
-        };
-        let (linkage, mut visibility) = match mono_item.explicit_linkage(tcx) {
-            Some(explicit_linkage) => (explicit_linkage, Visibility::Default),
-            None => {
-                match mono_item {
-                    MonoItem::Fn(ref instance) => {
-                        let visibility = match instance.def {
-                            InstanceDef::Item(def_id) => {
-                                let is_generic = instance.substs
-                                                         .types()
-                                                         .next()
-                                                         .is_some();
-
-                                // The `start_fn` lang item is actually a
-                                // monomorphized instance of a function in the
-                                // standard library, used for the `main`
-                                // function. We don't want to export it so we
-                                // tag it with `Hidden` visibility but this
-                                // symbol is only referenced from the actual
-                                // `main` symbol which we unfortunately don't
-                                // know anything about during
-                                // partitioning/collection. As a result we
-                                // forcibly keep this symbol out of the
-                                // `internalization_candidates` set.
-                                //
-                                // FIXME: eventually we don't want to always
-                                // force this symbol to have hidden
-                                // visibility, it should indeed be a candidate
-                                // for internalization, but we have to
-                                // understand that it's referenced from the
-                                // `main` symbol we'll generate later.
-                                if tcx.lang_items().start_fn() == Some(def_id) {
-                                    can_be_internalized = false;
-                                    Visibility::Hidden
-                                } else if def_id.is_local() {
-                                    if is_generic {
-                                        if export_generics {
-                                            if tcx.is_unreachable_local_definition(def_id) {
-                                                // This instance cannot be used
-                                                // from another crate.
-                                                Visibility::Hidden
-                                            } else {
-                                                // This instance might be useful in
-                                                // a downstream crate.
-                                                can_be_internalized = false;
-                                                default_visibility(def_id, true)
-                                            }
-                                        } else {
-                                            // We are not exporting generics or
-                                            // the definition is not reachable
-                                            // for downstream crates, we can
-                                            // internalize its instantiations.
-                                            Visibility::Hidden
-                                        }
-                                    } else {
-                                        // This isn't a generic function.
-                                        if tcx.is_reachable_non_generic(def_id) {
-                                            can_be_internalized = false;
-                                            debug_assert!(!is_generic);
-                                            default_visibility(def_id, false)
-                                        } else {
-                                            Visibility::Hidden
-                                        }
-                                    }
-                                } else {
-                                    // This is an upstream DefId.
-                                    if export_generics && is_generic {
-                                        // If it is a upstream monomorphization
-                                        // and we export generics, we must make
-                                        // it available to downstream crates.
-                                        can_be_internalized = false;
-                                        default_visibility(def_id, true)
-                                    } else {
-                                        Visibility::Hidden
-                                    }
-                                }
-                            }
-                            InstanceDef::FnPtrShim(..) |
-                            InstanceDef::Virtual(..) |
-                            InstanceDef::Intrinsic(..) |
-                            InstanceDef::ClosureOnceShim { .. } |
-                            InstanceDef::DropGlue(..) |
-                            InstanceDef::CloneShim(..) => {
-                                Visibility::Hidden
-                            }
-                        };
-                        (Linkage::External, visibility)
-                    }
-                    MonoItem::Static(def_id) => {
-                        let visibility = if tcx.is_reachable_non_generic(def_id) {
-                            can_be_internalized = false;
-                            default_visibility(def_id, false)
-                        } else {
-                            Visibility::Hidden
-                        };
-                        (Linkage::External, visibility)
-                    }
-                    MonoItem::GlobalAsm(node_id) => {
-                        let def_id = tcx.hir.local_def_id(node_id);
-                        let visibility = if tcx.is_reachable_non_generic(def_id) {
-                            can_be_internalized = false;
-                            default_visibility(def_id, false)
-                        } else {
-                            Visibility::Hidden
-                        };
-                        (Linkage::External, visibility)
-                    }
-                }
-            }
-        };
+        let (linkage, visibility) = mono_item_linkage_and_visibility(
+            tcx,
+            &mono_item,
+            &mut can_be_internalized,
+            export_generics,
+        );
         if visibility == Visibility::Hidden && can_be_internalized {
             internalization_candidates.insert(mono_item);
         }
@@ -473,7 +356,7 @@ fn place_root_mono_items<'a, 'tcx, I>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // always ensure we have at least one CGU; otherwise, if we have a
     // crate with just types (for example), we could wind up with no CGU
     if codegen_units.is_empty() {
-        let codegen_unit_name = fallback_cgu_name(tcx);
+        let codegen_unit_name = fallback_cgu_name(cgu_name_builder);
         codegen_units.insert(codegen_unit_name.clone(),
                              CodegenUnit::new(codegen_unit_name.clone()));
     }
@@ -487,9 +370,201 @@ fn place_root_mono_items<'a, 'tcx, I>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     }
 }
 
-fn merge_codegen_units<'tcx>(initial_partitioning: &mut PreInliningPartitioning<'tcx>,
-                             target_cgu_count: usize,
-                             crate_name: &str) {
+fn mono_item_linkage_and_visibility(
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    mono_item: &MonoItem<'tcx>,
+    can_be_internalized: &mut bool,
+    export_generics: bool,
+) -> (Linkage, Visibility) {
+    if let Some(explicit_linkage) = mono_item.explicit_linkage(tcx) {
+        return (explicit_linkage, Visibility::Default)
+    }
+    let vis = mono_item_visibility(
+        tcx,
+        mono_item,
+        can_be_internalized,
+        export_generics,
+    );
+    (Linkage::External, vis)
+}
+
+fn mono_item_visibility(
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    mono_item: &MonoItem<'tcx>,
+    can_be_internalized: &mut bool,
+    export_generics: bool,
+) -> Visibility {
+    let instance = match mono_item {
+        // This is pretty complicated, go below
+        MonoItem::Fn(instance) => instance,
+
+        // Misc handling for generics and such, but otherwise
+        MonoItem::Static(def_id) => {
+            return if tcx.is_reachable_non_generic(*def_id) {
+                *can_be_internalized = false;
+                default_visibility(tcx, *def_id, false)
+            } else {
+                Visibility::Hidden
+            };
+        }
+        MonoItem::GlobalAsm(node_id) => {
+            let def_id = tcx.hir.local_def_id(*node_id);
+            return if tcx.is_reachable_non_generic(def_id) {
+                *can_be_internalized = false;
+                default_visibility(tcx, def_id, false)
+            } else {
+                Visibility::Hidden
+            };
+        }
+    };
+
+    let def_id = match instance.def {
+        InstanceDef::Item(def_id) => def_id,
+
+        // These are all compiler glue and such, never exported, always hidden.
+        InstanceDef::FnPtrShim(..) |
+        InstanceDef::Virtual(..) |
+        InstanceDef::Intrinsic(..) |
+        InstanceDef::ClosureOnceShim { .. } |
+        InstanceDef::DropGlue(..) |
+        InstanceDef::CloneShim(..) => {
+            return Visibility::Hidden
+        }
+    };
+
+    // The `start_fn` lang item is actually a monomorphized instance of a
+    // function in the standard library, used for the `main` function. We don't
+    // want to export it so we tag it with `Hidden` visibility but this symbol
+    // is only referenced from the actual `main` symbol which we unfortunately
+    // don't know anything about during partitioning/collection. As a result we
+    // forcibly keep this symbol out of the `internalization_candidates` set.
+    //
+    // FIXME: eventually we don't want to always force this symbol to have
+    //        hidden visibility, it should indeed be a candidate for
+    //        internalization, but we have to understand that it's referenced
+    //        from the `main` symbol we'll generate later.
+    //
+    //        This may be fixable with a new `InstanceDef` perhaps? Unsure!
+    if tcx.lang_items().start_fn() == Some(def_id) {
+        *can_be_internalized = false;
+        return Visibility::Hidden
+    }
+
+    let is_generic = instance.substs.types().next().is_some();
+
+    // Upstream `DefId` instances get different handling than local ones
+    if !def_id.is_local() {
+        return if export_generics && is_generic {
+            // If it is a upstream monomorphization
+            // and we export generics, we must make
+            // it available to downstream crates.
+            *can_be_internalized = false;
+            default_visibility(tcx, def_id, true)
+        } else {
+            Visibility::Hidden
+        }
+    }
+
+    if is_generic {
+        if export_generics {
+            if tcx.is_unreachable_local_definition(def_id) {
+                // This instance cannot be used
+                // from another crate.
+                Visibility::Hidden
+            } else {
+                // This instance might be useful in
+                // a downstream crate.
+                *can_be_internalized = false;
+                default_visibility(tcx, def_id, true)
+            }
+        } else {
+            // We are not exporting generics or
+            // the definition is not reachable
+            // for downstream crates, we can
+            // internalize its instantiations.
+            Visibility::Hidden
+        }
+    } else {
+
+        // If this isn't a generic function then we mark this a `Default` if
+        // this is a reachable item, meaning that it's a symbol other crates may
+        // access when they link to us.
+        if tcx.is_reachable_non_generic(def_id) {
+            *can_be_internalized = false;
+            debug_assert!(!is_generic);
+            return default_visibility(tcx, def_id, false)
+        }
+
+        // If this isn't reachable then we're gonna tag this with `Hidden`
+        // visibility. In some situations though we'll want to prevent this
+        // symbol from being internalized.
+        //
+        // There's two categories of items here:
+        //
+        // * First is weak lang items. These are basically mechanisms for
+        //   libcore to forward-reference symbols defined later in crates like
+        //   the standard library or `#[panic_implementation]` definitions. The
+        //   definition of these weak lang items needs to be referenceable by
+        //   libcore, so we're no longer a candidate for internalization.
+        //   Removal of these functions can't be done by LLVM but rather must be
+        //   done by the linker as it's a non-local decision.
+        //
+        // * Second is "std internal symbols". Currently this is primarily used
+        //   for allocator symbols. Allocators are a little weird in their
+        //   implementation, but the idea is that the compiler, at the last
+        //   minute, defines an allocator with an injected object file. The
+        //   `alloc` crate references these symbols (`__rust_alloc`) and the
+        //   definition doesn't get hooked up until a linked crate artifact is
+        //   generated.
+        //
+        //   The symbols synthesized by the compiler (`__rust_alloc`) are thin
+        //   veneers around the actual implementation, some other symbol which
+        //   implements the same ABI. These symbols (things like `__rg_alloc`,
+        //   `__rdl_alloc`, `__rde_alloc`, etc), are all tagged with "std
+        //   internal symbols".
+        //
+        //   The std-internal symbols here **should not show up in a dll as an
+        //   exported interface**, so they return `false` from
+        //   `is_reachable_non_generic` above and we'll give them `Hidden`
+        //   visibility below. Like the weak lang items, though, we can't let
+        //   LLVM internalize them as this decision is left up to the linker to
+        //   omit them, so prevent them from being internalized.
+        let attrs = tcx.codegen_fn_attrs(def_id);
+        if attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL) {
+            *can_be_internalized = false;
+        }
+
+        Visibility::Hidden
+    }
+}
+
+fn default_visibility(tcx: TyCtxt, id: DefId, is_generic: bool) -> Visibility {
+    if !tcx.sess.target.target.options.default_hidden_visibility {
+        return Visibility::Default
+    }
+
+    // Generic functions never have export level C
+    if is_generic {
+        return Visibility::Hidden
+    }
+
+    // Things with export level C don't get instantiated in
+    // downstream crates
+    if !id.is_local() {
+        return Visibility::Hidden
+    }
+
+    // C-export level items remain at `Default`, all other internal
+    // items become `Hidden`
+    match tcx.reachable_non_generics(id.krate).get(&id) {
+        Some(SymbolExportLevel::C) => Visibility::Default,
+        _ => Visibility::Hidden,
+    }
+}
+
+fn merge_codegen_units<'tcx>(tcx: TyCtxt<'_, 'tcx, 'tcx>,
+                             initial_partitioning: &mut PreInliningPartitioning<'tcx>,
+                             target_cgu_count: usize) {
     assert!(target_cgu_count >= 1);
     let codegen_units = &mut initial_partitioning.codegen_units;
 
@@ -517,14 +592,15 @@ fn merge_codegen_units<'tcx>(initial_partitioning: &mut PreInliningPartitioning<
         }
     }
 
+    let cgu_name_builder = &mut CodegenUnitNameBuilder::new(tcx);
     for (index, cgu) in codegen_units.iter_mut().enumerate() {
-        cgu.set_name(numbered_codegen_unit_name(crate_name, index));
+        cgu.set_name(numbered_codegen_unit_name(cgu_name_builder, index));
     }
 }
 
 fn place_inlined_mono_items<'tcx>(initial_partitioning: PreInliningPartitioning<'tcx>,
-                                         inlining_map: &InliningMap<'tcx>)
-                                         -> PostInliningPartitioning<'tcx> {
+                                  inlining_map: &InliningMap<'tcx>)
+                                  -> PostInliningPartitioning<'tcx> {
     let mut new_partitioning = Vec::new();
     let mut mono_item_placements = FxHashMap();
 
@@ -631,7 +707,7 @@ fn internalize_symbols<'a, 'tcx>(_tcx: TyCtxt<'a, 'tcx, 'tcx>,
     inlining_map.iter_accesses(|accessor, accessees| {
         for accessee in accessees {
             accessor_map.entry(*accessee)
-                        .or_insert(Vec::new())
+                        .or_default()
                         .push(accessor);
         }
     });
@@ -718,46 +794,72 @@ fn characteristic_def_id_of_mono_item<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     }
 }
 
-fn compute_codegen_unit_name<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                       def_id: DefId,
-                                       volatile: bool)
-                                       -> InternedString {
-    // Unfortunately we cannot just use the `ty::item_path` infrastructure here
-    // because we need paths to modules and the DefIds of those are not
-    // available anymore for external items.
-    let mut cgu_name = String::with_capacity(64);
+type CguNameCache = FxHashMap<(DefId, bool), InternedString>;
 
-    let def_path = tcx.def_path(def_id);
-    cgu_name.push_str(&tcx.crate_name(def_path.krate).as_str());
+fn compute_codegen_unit_name(tcx: TyCtxt,
+                             name_builder: &mut CodegenUnitNameBuilder,
+                             def_id: DefId,
+                             volatile: bool,
+                             cache: &mut CguNameCache)
+                             -> InternedString {
+    // Find the innermost module that is not nested within a function
+    let mut current_def_id = def_id;
+    let mut cgu_def_id = None;
+    // Walk backwards from the item we want to find the module for:
+    loop {
+        let def_key = tcx.def_key(current_def_id);
 
-    for part in tcx.def_path(def_id)
-                   .data
-                   .iter()
-                   .take_while(|part| {
-                        match part.data {
-                            DefPathData::Module(..) => true,
-                            _ => false,
-                        }
-                    }) {
-        cgu_name.push_str("-");
-        cgu_name.push_str(&part.data.as_interned_str().as_str());
+        match def_key.disambiguated_data.data {
+            DefPathData::Module(..) => {
+                if cgu_def_id.is_none() {
+                    cgu_def_id = Some(current_def_id);
+                }
+            }
+            DefPathData::CrateRoot { .. } => {
+                if cgu_def_id.is_none() {
+                    // If we have not found a module yet, take the crate root.
+                    cgu_def_id = Some(DefId {
+                        krate: def_id.krate,
+                        index: CRATE_DEF_INDEX,
+                    });
+                }
+                break
+            }
+            _ => {
+                // If we encounter something that is not a module, throw away
+                // any module that we've found so far because we now know that
+                // it is nested within something else.
+                cgu_def_id = None;
+            }
+        }
+
+        current_def_id.index = def_key.parent.unwrap();
     }
 
-    if volatile {
-        cgu_name.push_str(".volatile");
-    }
+    let cgu_def_id = cgu_def_id.unwrap();
 
-    let cgu_name = if tcx.sess.opts.debugging_opts.human_readable_cgu_names {
-        cgu_name
-    } else {
-        CodegenUnit::mangle_name(&cgu_name)
-    };
+    cache.entry((cgu_def_id, volatile)).or_insert_with(|| {
+        let def_path = tcx.def_path(cgu_def_id);
 
-    Symbol::intern(&cgu_name[..]).as_interned_str()
+        let components = def_path
+            .data
+            .iter()
+            .map(|part| part.data.as_interned_str());
+
+        let volatile_suffix = if volatile {
+            Some("volatile")
+        } else {
+            None
+        };
+
+        name_builder.build_cgu_name(def_path.krate, components, volatile_suffix)
+    }).clone()
 }
 
-fn numbered_codegen_unit_name(crate_name: &str, index: usize) -> InternedString {
-    Symbol::intern(&format!("{}{}", crate_name, index)).as_interned_str()
+fn numbered_codegen_unit_name(name_builder: &mut CodegenUnitNameBuilder,
+                              index: usize)
+                              -> InternedString {
+    name_builder.build_cgu_name_no_mangle(LOCAL_CRATE, &["cgu"], Some(index))
 }
 
 fn debug_dump<'a, 'b, 'tcx, I>(tcx: TyCtxt<'a, 'tcx, 'tcx>,

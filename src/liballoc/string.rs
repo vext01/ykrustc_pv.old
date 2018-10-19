@@ -66,7 +66,7 @@ use core::ptr;
 use core::str::pattern::Pattern;
 use core::str::lossy;
 
-use alloc::CollectionAllocErr;
+use collections::CollectionAllocErr;
 use borrow::{Cow, ToOwned};
 use boxed::Box;
 use str::{self, from_boxed_utf8_unchecked, FromStr, Utf8Error, Chars};
@@ -519,10 +519,11 @@ impl String {
     /// between the two. Not all byte slices are valid strings, however: strings
     /// are required to be valid UTF-8. During this conversion,
     /// `from_utf8_lossy()` will replace any invalid UTF-8 sequences with
-    /// `U+FFFD REPLACEMENT CHARACTER`, which looks like this: �
+    /// [`U+FFFD REPLACEMENT CHARACTER`][U+FFFD], which looks like this: �
     ///
     /// [`u8`]: ../../std/primitive.u8.html
     /// [byteslice]: ../../std/primitive.slice.html
+    /// [U+FFFD]: ../char/constant.REPLACEMENT_CHARACTER.html
     ///
     /// If you are sure that the byte slice is valid UTF-8, and you don't want
     /// to incur the overhead of the conversion, there is an unsafe version
@@ -621,7 +622,7 @@ impl String {
     }
 
     /// Decode a UTF-16 encoded slice `v` into a `String`, replacing
-    /// invalid data with the replacement character (U+FFFD).
+    /// invalid data with [the replacement character (`U+FFFD`)][U+FFFD].
     ///
     /// Unlike [`from_utf8_lossy`] which returns a [`Cow<'a, str>`],
     /// `from_utf16_lossy` returns a `String` since the UTF-16 to UTF-8
@@ -629,6 +630,7 @@ impl String {
     ///
     /// [`from_utf8_lossy`]: #method.from_utf8_lossy
     /// [`Cow<'a, str>`]: ../borrow/enum.Cow.html
+    /// [U+FFFD]: ../char/constant.REPLACEMENT_CHARACTER.html
     ///
     /// # Examples
     ///
@@ -750,7 +752,7 @@ impl String {
         self.vec
     }
 
-    /// Extracts a string slice containing the entire string.
+    /// Extracts a string slice containing the entire `String`.
     ///
     /// # Examples
     ///
@@ -1188,8 +1190,8 @@ impl String {
         let next = idx + ch.len_utf8();
         let len = self.len();
         unsafe {
-            ptr::copy(self.vec.as_ptr().offset(next as isize),
-                      self.vec.as_mut_ptr().offset(idx as isize),
+            ptr::copy(self.vec.as_ptr().add(next),
+                      self.vec.as_mut_ptr().add(idx),
                       len - next);
             self.vec.set_len(len - (next - idx));
         }
@@ -1222,7 +1224,7 @@ impl String {
 
         while idx < len {
             let ch = unsafe {
-                self.slice_unchecked(idx, len).chars().next().unwrap()
+                self.get_unchecked(idx..len).chars().next().unwrap()
             };
             let ch_len = ch.len_utf8();
 
@@ -1230,8 +1232,8 @@ impl String {
                 del_bytes += ch_len;
             } else if del_bytes > 0 {
                 unsafe {
-                    ptr::copy(self.vec.as_ptr().offset(idx as isize),
-                              self.vec.as_mut_ptr().offset((idx - del_bytes) as isize),
+                    ptr::copy(self.vec.as_ptr().add(idx),
+                              self.vec.as_mut_ptr().add(idx - del_bytes),
                               ch_len);
                 }
             }
@@ -1287,11 +1289,11 @@ impl String {
         let amt = bytes.len();
         self.vec.reserve(amt);
 
-        ptr::copy(self.vec.as_ptr().offset(idx as isize),
-                  self.vec.as_mut_ptr().offset((idx + amt) as isize),
+        ptr::copy(self.vec.as_ptr().add(idx),
+                  self.vec.as_mut_ptr().add(idx + amt),
                   len - idx);
         ptr::copy(bytes.as_ptr(),
-                  self.vec.as_mut_ptr().offset(idx as isize),
+                  self.vec.as_mut_ptr().add(idx),
                   amt);
         self.vec.set_len(len + amt);
     }
@@ -1452,8 +1454,8 @@ impl String {
         self.vec.clear()
     }
 
-    /// Creates a draining iterator that removes the specified range in the string
-    /// and yields the removed chars.
+    /// Creates a draining iterator that removes the specified range in the `String`
+    /// and yields the removed `chars`.
     ///
     /// Note: The element range is removed even if the iterator is not
     /// consumed until the end.
@@ -1925,9 +1927,7 @@ impl<'a> Add<&'a str> for String {
 
 /// Implements the `+=` operator for appending to a `String`.
 ///
-/// This has the same behavior as the [`push_str`] method.
-///
-/// [`push_str`]: struct.String.html#method.push_str
+/// This has the same behavior as the [`push_str`][String::push_str] method.
 #[stable(feature = "stringaddassign", since = "1.12.0")]
 impl<'a> AddAssign<&'a str> for String {
     #[inline]
@@ -2196,6 +2196,7 @@ impl AsRef<[u8]> for String {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a> From<&'a str> for String {
+    #[inline]
     fn from(s: &'a str) -> String {
         s.to_owned()
     }

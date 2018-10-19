@@ -11,8 +11,8 @@
 //! An analysis to determine which locals require allocas and
 //! which do not.
 
-use rustc_data_structures::bitvec::BitVector;
-use rustc_data_structures::control_flow_graph::dominators::Dominators;
+use rustc_data_structures::bit_set::BitSet;
+use rustc_data_structures::graph::dominators::Dominators;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 use rustc::mir::{self, Location, TerminatorKind};
 use rustc::mir::visit::{Visitor, PlaceContext};
@@ -22,7 +22,7 @@ use rustc::ty::layout::LayoutOf;
 use type_of::LayoutLlvmExt;
 use super::FunctionCx;
 
-pub fn non_ssa_locals<'a, 'tcx>(fx: &FunctionCx<'a, 'tcx>) -> BitVector {
+pub fn non_ssa_locals(fx: &FunctionCx<'a, 'll, 'tcx>) -> BitSet<mir::Local> {
     let mir = fx.mir;
     let mut analyzer = LocalAnalyzer::new(fx);
 
@@ -34,7 +34,7 @@ pub fn non_ssa_locals<'a, 'tcx>(fx: &FunctionCx<'a, 'tcx>) -> BitVector {
         let layout = fx.cx.layout_of(ty);
         if layout.is_llvm_immediate() {
             // These sorts of types are immediates that we can store
-            // in an ValueRef without an alloca.
+            // in an Value without an alloca.
         } else if layout.is_llvm_scalar_pair() {
             // We allow pairs and uses of any of their 2 fields.
         } else {
@@ -51,23 +51,23 @@ pub fn non_ssa_locals<'a, 'tcx>(fx: &FunctionCx<'a, 'tcx>) -> BitVector {
     analyzer.non_ssa_locals
 }
 
-struct LocalAnalyzer<'mir, 'a: 'mir, 'tcx: 'a> {
-    fx: &'mir FunctionCx<'a, 'tcx>,
+struct LocalAnalyzer<'mir, 'a: 'mir, 'll: 'a, 'tcx: 'll> {
+    fx: &'mir FunctionCx<'a, 'll, 'tcx>,
     dominators: Dominators<mir::BasicBlock>,
-    non_ssa_locals: BitVector,
+    non_ssa_locals: BitSet<mir::Local>,
     // The location of the first visited direct assignment to each
     // local, or an invalid location (out of bounds `block` index).
     first_assignment: IndexVec<mir::Local, Location>
 }
 
-impl<'mir, 'a, 'tcx> LocalAnalyzer<'mir, 'a, 'tcx> {
-    fn new(fx: &'mir FunctionCx<'a, 'tcx>) -> LocalAnalyzer<'mir, 'a, 'tcx> {
+impl LocalAnalyzer<'mir, 'a, 'll, 'tcx> {
+    fn new(fx: &'mir FunctionCx<'a, 'll, 'tcx>) -> Self {
         let invalid_location =
             mir::BasicBlock::new(fx.mir.basic_blocks().len()).start_location();
         let mut analyzer = LocalAnalyzer {
             fx,
             dominators: fx.mir.dominators(),
-            non_ssa_locals: BitVector::new(fx.mir.local_decls.len()),
+            non_ssa_locals: BitSet::new_empty(fx.mir.local_decls.len()),
             first_assignment: IndexVec::from_elem(invalid_location, &fx.mir.local_decls)
         };
 
@@ -90,7 +90,7 @@ impl<'mir, 'a, 'tcx> LocalAnalyzer<'mir, 'a, 'tcx> {
 
     fn not_ssa(&mut self, local: mir::Local) {
         debug!("marking {:?} as non-SSA", local);
-        self.non_ssa_locals.insert(local.index());
+        self.non_ssa_locals.insert(local);
     }
 
     fn assign(&mut self, local: mir::Local, location: Location) {
@@ -102,7 +102,7 @@ impl<'mir, 'a, 'tcx> LocalAnalyzer<'mir, 'a, 'tcx> {
     }
 }
 
-impl<'mir, 'a, 'tcx> Visitor<'tcx> for LocalAnalyzer<'mir, 'a, 'tcx> {
+impl Visitor<'tcx> for LocalAnalyzer<'mir, 'a, 'll, 'tcx> {
     fn visit_assign(&mut self,
                     block: mir::BasicBlock,
                     place: &mir::Place<'tcx>,
@@ -131,7 +131,7 @@ impl<'mir, 'a, 'tcx> Visitor<'tcx> for LocalAnalyzer<'mir, 'a, 'tcx> {
                 func: mir::Operand::Constant(ref c),
                 ref args, ..
             } => match c.ty.sty {
-                ty::TyFnDef(did, _) => Some((did, args)),
+                ty::FnDef(did, _) => Some((did, args)),
                 _ => None,
             },
             _ => None,
@@ -151,9 +151,9 @@ impl<'mir, 'a, 'tcx> Visitor<'tcx> for LocalAnalyzer<'mir, 'a, 'tcx> {
     }
 
     fn visit_place(&mut self,
-                    place: &mir::Place<'tcx>,
-                    context: PlaceContext<'tcx>,
-                    location: Location) {
+                   place: &mir::Place<'tcx>,
+                   context: PlaceContext<'tcx>,
+                   location: Location) {
         debug!("visit_place(place={:?}, context={:?})", place, context);
         let cx = self.fx.cx;
 

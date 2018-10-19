@@ -8,12 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(stable_features)]
+#![allow(unused_imports)]
 // Test that cleanup scope for temporaries created in a match
 // arm is confined to the match arm itself.
 
 // pretty-expanded FIXME #23616
 
-#![allow(unknown_features)]
 #![feature(box_syntax, os)]
 
 use std::os;

@@ -8,8 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-
-#![allow(unknown_features)]
+// run-pass
 #![feature(box_syntax)]
 
 pub fn main() {

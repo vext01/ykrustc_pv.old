@@ -14,8 +14,10 @@
 
 #![allow(non_camel_case_types)]
 
-#![feature(from_ref)]
+#![feature(nll)]
 #![feature(quote)]
+
+#![recursion_limit="256"]
 
 #[macro_use] extern crate log;
 extern crate syntax;
@@ -36,5 +38,7 @@ pub use borrowck::build_borrowck_dataflow_data_for_fn;
 mod borrowck;
 
 pub mod graphviz;
+
+mod dataflow;
 
 pub use borrowck::provide;

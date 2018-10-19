@@ -123,8 +123,8 @@ pub use core::slice::{from_raw_parts, from_raw_parts_mut};
 pub use core::slice::{from_ref, from_mut};
 #[stable(feature = "slice_get_slice", since = "1.28.0")]
 pub use core::slice::SliceIndex;
-#[unstable(feature = "exact_chunks", issue = "47115")]
-pub use core::slice::{ExactChunks, ExactChunksMut};
+#[unstable(feature = "chunks_exact", issue = "47115")]
+pub use core::slice::{ChunksExact, ChunksExactMut};
 
 ////////////////////////////////////////////////////////////////////////////////
 // Basic slice extension methods
@@ -392,6 +392,10 @@ impl<T> [T] {
 
     /// Creates a vector by repeating a slice `n` times.
     ///
+    /// # Panics
+    ///
+    /// This function will panic if the capacity would overflow.
+    ///
     /// # Examples
     ///
     /// Basic usage:
@@ -401,6 +405,16 @@ impl<T> [T] {
     ///
     /// fn main() {
     ///     assert_eq!([1, 2].repeat(3), vec![1, 2, 1, 2, 1, 2]);
+    /// }
+    /// ```
+    ///
+    /// A panic upon overflow:
+    ///
+    /// ```should_panic
+    /// #![feature(repeat_generic_slice)]
+    /// fn main() {
+    ///     // this will panic at runtime
+    ///     b"0123456789abcdef".repeat(usize::max_value());
     /// }
     /// ```
     #[unstable(feature = "repeat_generic_slice",
@@ -417,7 +431,7 @@ impl<T> [T] {
         // and `rem` is the remaining part of `n`.
 
         // Using `Vec` to access `set_len()`.
-        let mut buf = Vec::with_capacity(self.len() * n);
+        let mut buf = Vec::with_capacity(self.len().checked_mul(n).expect("capacity overflow"));
 
         // `2^expn` repetition is done by doubling `buf` `expn`-times.
         buf.extend(self);
@@ -715,8 +729,8 @@ unsafe fn merge<T, F>(v: &mut [T], mid: usize, buf: *mut T, is_less: &mut F)
 {
     let len = v.len();
     let v = v.as_mut_ptr();
-    let v_mid = v.offset(mid as isize);
-    let v_end = v.offset(len as isize);
+    let v_mid = v.add(mid);
+    let v_end = v.add(len);
 
     // The merge process first copies the shorter run into `buf`. Then it traces the newly copied
     // run and the longer run forwards (or backwards), comparing their next unconsumed elements and
@@ -742,7 +756,7 @@ unsafe fn merge<T, F>(v: &mut [T], mid: usize, buf: *mut T, is_less: &mut F)
         ptr::copy_nonoverlapping(v, buf, mid);
         hole = MergeHole {
             start: buf,
-            end: buf.offset(mid as isize),
+            end: buf.add(mid),
             dest: v,
         };
 
@@ -766,7 +780,7 @@ unsafe fn merge<T, F>(v: &mut [T], mid: usize, buf: *mut T, is_less: &mut F)
         ptr::copy_nonoverlapping(v_mid, buf, len - mid);
         hole = MergeHole {
             start: buf,
-            end: buf.offset((len - mid) as isize),
+            end: buf.add(len - mid),
             dest: v_mid,
         };
 

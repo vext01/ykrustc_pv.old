@@ -34,6 +34,7 @@ fn place_context<'a, 'tcx, D>(
 
     match *place {
         Local { .. } => (None, hir::MutMutable),
+        Promoted(_) |
         Static(_) => (None, hir::MutImmutable),
         Projection(ref proj) => {
             match proj.elem {
@@ -44,7 +45,7 @@ fn place_context<'a, 'tcx, D>(
                     // A Deref projection may restrict the context, this depends on the type
                     // being deref'd.
                     let context = match ty.sty {
-                        ty::TyRef(re, _, mutbl) => {
+                        ty::Ref(re, _, mutbl) => {
                             let re = match re {
                                 &RegionKind::ReScope(ce) => Some(ce),
                                 &RegionKind::ReErased =>
@@ -53,12 +54,12 @@ fn place_context<'a, 'tcx, D>(
                             };
                             (re, mutbl)
                         }
-                        ty::TyRawPtr(_) =>
+                        ty::RawPtr(_) =>
                             // There is no guarantee behind even a mutable raw pointer,
                             // no write locks are acquired there, so we also don't want to
                             // release any.
                             (None, hir::MutImmutable),
-                        ty::TyAdt(adt, _) if adt.is_box() => (None, hir::MutMutable),
+                        ty::Adt(adt, _) if adt.is_box() => (None, hir::MutMutable),
                         _ => bug!("Deref on a non-pointer type {:?}", ty),
                     };
                     // "Intersect" this restriction with proj.base.
@@ -84,7 +85,7 @@ fn place_context<'a, 'tcx, D>(
 fn fn_contains_unsafe<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, src: MirSource) -> bool {
     use rustc::hir::intravisit::{self, Visitor, FnKind};
     use rustc::hir::map::blocks::FnLikeNode;
-    use rustc::hir::map::Node;
+    use rustc::hir::Node;
 
     /// Decide if this is an unsafe block
     fn block_is_unsafe(block: &hir::Block) -> bool {
@@ -141,13 +142,13 @@ fn fn_contains_unsafe<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, src: MirSource) -> 
             }
             // Check if this is an unsafe block, or an item
             match node {
-                Node::NodeExpr(&hir::Expr { node: hir::ExprBlock(ref block, _), ..}) => {
+                Node::Expr(&hir::Expr { node: hir::ExprKind::Block(ref block, _), ..}) => {
                     if block_is_unsafe(&*block) {
                         // Found an unsafe block, we can bail out here.
                         return true;
                     }
                 }
-                Node::NodeItem(..) => {
+                Node::Item(..) => {
                     // No walking up beyond items.  This makes sure the loop always terminates.
                     break;
                 }
@@ -196,12 +197,13 @@ impl MirPass for AddValidation {
             return;
         }
         let restricted_validation = emit_validate == 1 && fn_contains_unsafe(tcx, src);
-        let local_decls = mir.local_decls.clone(); // FIXME: Find a way to get rid of this clone.
+        let (span, arg_count) = (mir.span, mir.arg_count);
+        let (basic_blocks, local_decls) = mir.basic_blocks_and_local_decls_mut();
 
         // Convert a place to a validation operand.
         let place_to_operand = |place: Place<'tcx>| -> ValidationOperand<'tcx, Place<'tcx>> {
-            let (re, mutbl) = place_context(&place, &local_decls, tcx);
-            let ty = place.ty(&local_decls, tcx).to_ty(tcx);
+            let (re, mutbl) = place_context(&place, local_decls, tcx);
+            let ty = place.ty(local_decls, tcx).to_ty(tcx);
             ValidationOperand { place, ty, re, mutbl }
         };
 
@@ -232,20 +234,20 @@ impl MirPass for AddValidation {
         {
             let source_info = SourceInfo {
                 scope: OUTERMOST_SOURCE_SCOPE,
-                span: mir.span, // FIXME: Consider using just the span covering the function
-                                // argument declaration.
+                span: span, // FIXME: Consider using just the span covering the function
+                            // argument declaration.
             };
             // Gather all arguments, skip return value.
-            let operands = mir.local_decls.iter_enumerated().skip(1).take(mir.arg_count)
+            let operands = local_decls.iter_enumerated().skip(1).take(arg_count)
                     .map(|(local, _)| place_to_operand(Place::Local(local))).collect();
-            emit_acquire(&mut mir.basic_blocks_mut()[START_BLOCK], source_info, operands);
+            emit_acquire(&mut basic_blocks[START_BLOCK], source_info, operands);
         }
 
         // PART 2
         // Add ReleaseValid/AcquireValid around function call terminators.  We don't use a visitor
         // because we need to access the block that a Call jumps to.
         let mut returns : Vec<(SourceInfo, Place<'tcx>, BasicBlock)> = Vec::new();
-        for block_data in mir.basic_blocks_mut() {
+        for block_data in basic_blocks.iter_mut() {
             match block_data.terminator {
                 Some(Terminator { kind: TerminatorKind::Call { ref args, ref destination, .. },
                                   source_info }) => {
@@ -298,7 +300,7 @@ impl MirPass for AddValidation {
         // Now we go over the returns we collected to acquire the return values.
         for (source_info, dest_place, dest_block) in returns {
             emit_acquire(
-                &mut mir.basic_blocks_mut()[dest_block],
+                &mut basic_blocks[dest_block],
                 source_info,
                 vec![place_to_operand(dest_place)]
             );
@@ -312,18 +314,18 @@ impl MirPass for AddValidation {
         // PART 3
         // Add ReleaseValid/AcquireValid around Ref and Cast.  Again an iterator does not seem very
         // suited as we need to add new statements before and after each Ref.
-        for block_data in mir.basic_blocks_mut() {
+        for block_data in basic_blocks {
             // We want to insert statements around Ref commands as we iterate.  To this end, we
             // iterate backwards using indices.
             for i in (0..block_data.statements.len()).rev() {
                 match block_data.statements[i].kind {
                     // When the borrow of this ref expires, we need to recover validation.
-                    StatementKind::Assign(_, Rvalue::Ref(_, _, _)) => {
+                    StatementKind::Assign(_, box Rvalue::Ref(_, _, _)) => {
                         // Due to a lack of NLL; we can't capture anything directly here.
                         // Instead, we have to re-match and clone there.
                         let (dest_place, re, src_place) = match block_data.statements[i].kind {
                             StatementKind::Assign(ref dest_place,
-                                                  Rvalue::Ref(re, _, ref src_place)) => {
+                                                  box Rvalue::Ref(re, _, ref src_place)) => {
                                 (dest_place.clone(), re, src_place.clone())
                             },
                             _ => bug!("We already matched this."),
@@ -352,17 +354,17 @@ impl MirPass for AddValidation {
                         block_data.statements.insert(i, release_stmt);
                     }
                     // Casts can change what validation does (e.g. unsizing)
-                    StatementKind::Assign(_, Rvalue::Cast(kind, Operand::Copy(_), _)) |
-                    StatementKind::Assign(_, Rvalue::Cast(kind, Operand::Move(_), _))
+                    StatementKind::Assign(_, box Rvalue::Cast(kind, Operand::Copy(_), _)) |
+                    StatementKind::Assign(_, box Rvalue::Cast(kind, Operand::Move(_), _))
                         if kind != CastKind::Misc =>
                     {
                         // Due to a lack of NLL; we can't capture anything directly here.
                         // Instead, we have to re-match and clone there.
                         let (dest_place, src_place) = match block_data.statements[i].kind {
                             StatementKind::Assign(ref dest_place,
-                                    Rvalue::Cast(_, Operand::Copy(ref src_place), _)) |
+                                    box Rvalue::Cast(_, Operand::Copy(ref src_place), _)) |
                             StatementKind::Assign(ref dest_place,
-                                    Rvalue::Cast(_, Operand::Move(ref src_place), _)) =>
+                                    box Rvalue::Cast(_, Operand::Move(ref src_place), _)) =>
                             {
                                 (dest_place.clone(), src_place.clone())
                             },

@@ -41,7 +41,7 @@ fn unpack_option_like<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                 ty: Ty<'tcx>)
                                 -> Ty<'tcx> {
     let (def, substs) = match ty.sty {
-        ty::TyAdt(def, substs) => (def, substs),
+        ty::Adt(def, substs) => (def, substs),
         _ => return ty
     };
 
@@ -83,7 +83,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
             // Special-case transmutting from `typeof(function)` and
             // `Option<typeof(function)>` to present a clearer error.
             let from = unpack_option_like(self.tcx.global_tcx(), from);
-            if let (&ty::TyFnDef(..), SizeSkeleton::Known(size_to)) = (&from.sty, sk_to) {
+            if let (&ty::FnDef(..), SizeSkeleton::Known(size_to)) = (&from.sty, sk_to) {
                 if size_to == Pointer.size(self.tcx) {
                     struct_span_err!(self.tcx.sess, span, E0591,
                                      "can't transmute zero-sized type")
@@ -107,7 +107,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
                 }
                 Err(LayoutError::Unknown(bad)) => {
                     if bad == ty {
-                        format!("this type's size can vary")
+                        "this type's size can vary".to_owned()
                     } else {
                         format!("size can vary because of {}", bad)
                     }
@@ -117,7 +117,7 @@ impl<'a, 'tcx> ExprVisitor<'a, 'tcx> {
         };
 
         struct_span_err!(self.tcx.sess, span, E0512,
-            "transmute called with types of different sizes")
+                         "transmute called with types of different sizes")
             .note(&format!("source type: {} ({})", from, skeleton_string(from, sk_from)))
             .note(&format!("target type: {} ({})", to, skeleton_string(to, sk_to)))
             .emit();
@@ -145,7 +145,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ExprVisitor<'a, 'tcx> {
     }
 
     fn visit_expr(&mut self, expr: &'tcx hir::Expr) {
-        let def = if let hir::ExprPath(ref qpath) = expr.node {
+        let def = if let hir::ExprKind::Path(ref qpath) = expr.node {
             self.tables.qpath_def(qpath, expr.hir_id)
         } else {
             Def::Err

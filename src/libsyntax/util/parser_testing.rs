@@ -9,8 +9,8 @@
 // except according to those terms.
 
 use ast::{self, Ident};
-use codemap::FilePathMapping;
-use parse::{ParseSess, PResult, filemap_to_stream};
+use source_map::FilePathMapping;
+use parse::{ParseSess, PResult, source_file_to_stream};
 use parse::{lexer, new_parser_from_source_str};
 use parse::parser::Parser;
 use ptr::P;
@@ -21,8 +21,8 @@ use std::path::PathBuf;
 /// Map a string to tts, using a made-up filename:
 pub fn string_to_stream(source_str: String) -> TokenStream {
     let ps = ParseSess::new(FilePathMapping::empty());
-    filemap_to_stream(&ps, ps.codemap()
-                             .new_filemap(PathBuf::from("bogofile").into(), source_str), None)
+    source_file_to_stream(&ps, ps.source_map()
+                             .new_source_file(PathBuf::from("bogofile").into(), source_str), None)
 }
 
 /// Map string to parser (via tts)
@@ -60,14 +60,6 @@ pub fn string_to_item (source_str : String) -> Option<P<ast::Item>> {
     let ps = ParseSess::new(FilePathMapping::empty());
     with_error_checking_parse(source_str, &ps, |p| {
         p.parse_item()
-    })
-}
-
-/// Parse a string, return a stmt
-pub fn string_to_stmt(source_str : String) -> Option<ast::Stmt> {
-    let ps = ParseSess::new(FilePathMapping::empty());
-    with_error_checking_parse(source_str, &ps, |p| {
-        p.parse_stmt()
     })
 }
 

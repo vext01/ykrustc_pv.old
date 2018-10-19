@@ -21,6 +21,12 @@
 # Indicates whether the LLVM build is a Release or Debug build
 #optimize = true
 
+# Indicates whether LLVM should be built with ThinLTO. Note that this will
+# only succeed if you use clang, lld, llvm-ar, and llvm-ranlib in your C/C++
+# toolchain (see the `cc`, `cxx`, `linker`, `ar`, and `ranlib` options below).
+# More info at: https://clang.llvm.org/docs/ThinLTO.html#clang-bootstrap
+#thin-lto = false
+
 # Indicates whether an LLVM Release build should include debug info
 #release-debuginfo = false
 
@@ -61,8 +67,8 @@
 # the same format as above, but since these targets are experimental, they are
 # not built by default and the experimental Rust compilation targets that depend
 # on them will not work unless the user opts in to building them. By default the
-# `WebAssembly` target is enabled when compiling LLVM from scratch.
-#experimental-targets = "WebAssembly"
+# `WebAssembly` and `RISCV` targets are enabled when compiling LLVM from scratch.
+#experimental-targets = "WebAssembly;RISCV"
 
 # Cap the number of parallel linker invocations when compiling LLVM.
 # This can be useful when building LLVM with debug info, which significantly
@@ -75,6 +81,10 @@
 # When invoking `llvm-config` this configures whether the `--shared` argument is
 # passed to prefer linking to shared libraries.
 #link-shared = false
+
+# When building llvm, this configures what is being appended to the version.
+# If absent, we let the version as-is.
+#version-suffix = "-rust"
 
 # On MSVC you can compile LLVM with clang-cl, but the test suite doesn't pass
 # with clang-cl, so this is special in that it only compiles LLVM with clang-cl
@@ -233,18 +243,35 @@
 # =============================================================================
 [rust]
 
-# Indicates that the build should be optimized for debugging Rust. Note that
-# this is typically not what you want as it takes an incredibly large amount of
-# time to have a debug-mode rustc compile any code (notably libstd). If this
-# value is set to `true` it will affect a number of configuration options below
-# as well, if unconfigured.
-#debug = false
-
-# Whether or not to optimize the compiler and standard library
+# Whether or not to optimize the compiler and standard library.
+#
 # Note: the slowness of the non optimized compiler compiling itself usually
 #       outweighs the time gains in not doing optimizations, therefore a
-#       full bootstrap takes much more time with optimize set to false.
+#       full bootstrap takes much more time with `optimize` set to false.
 #optimize = true
+
+# Indicates that the build should be configured for debugging Rust. A
+# `debug`-enabled compiler and standard library will be somewhat
+# slower (due to e.g. checking of debug assertions) but should remain
+# usable.
+#
+# Note: If this value is set to `true`, it will affect a number of
+#       configuration options below as well, if they have been left
+#       unconfigured in this file.
+#
+# Note: changes to the `debug` setting do *not* affect `optimize`
+#       above. In theory, a "maximally debuggable" environment would
+#       set `optimize` to `false` above to assist the introspection
+#       facilities of debuggers like lldb and gdb. To recreate such an
+#       environment, explicitly set `optimize` to `false` and `debug`
+#       to `true`. In practice, everyone leaves `optimize` set to
+#       `true`, because an unoptimized rustc with debugging
+#       enabled becomes *unusably slow* (e.g. rust-lang/rust#24840
+#       reported a 25x slowdown) and bootstrapping the supposed
+#       "maximally debuggable" environment (notably libstd) takes
+#       hours to build.
+#
+#debug = false
 
 # Number of codegen units to use for each compiler invocation. A value of 0
 # means "the number of cores on this machine", and 1+ is passed through to the
@@ -301,9 +328,9 @@
 # desired in distributions, for example.
 #rpath = true
 
-# Suppresses extraneous output from tests to ensure the output of the test
-# harness is relatively clean.
-#quiet-tests = false
+# Emits extraneous output from tests to ensure that failures of the test
+# harness are debuggable just from logfiles.
+#verbose-tests = false
 
 # Flag indicating whether tests are compiled with optimizations (the -O flag) or
 # with debuginfo (the -g flag)
@@ -312,6 +339,7 @@
 
 # Flag indicating whether codegen tests will be run or not. If you get an error
 # saying that the FileCheck executable is missing, you may want to disable this.
+# Also see the target's llvm-filecheck option.
 #codegen-tests = true
 
 # Flag indicating whether git info will be retrieved from .git automatically.
@@ -350,11 +378,26 @@
 # rustc to execute.
 #lld = false
 
+# Indicates whether some LLVM tools, like llvm-objdump, will be made available in the
+# sysroot.
+#llvm-tools = false
+
+# Indicates whether LLDB will be made available in the sysroot.
+# This is only built if LLVM is also being built.
+#lldb = false
+
 # Whether to deny warnings in crates
 #deny-warnings = true
 
 # Print backtrace on internal compiler errors during bootstrap
 #backtrace-on-ice = false
+
+# Whether to verify generated LLVM IR
+#verify-llvm-ir = false
+
+# Map all debuginfo paths for libstd and crates to `/rust/$sha/$crate/...`,
+# generally only set for releases
+#remap-debuginfo = false
 
 # =============================================================================
 # Options for specific targets
@@ -377,6 +420,10 @@
 # Note: an absolute path should be used, otherwise LLVM build will break.
 #ar = "ar"
 
+# Ranlib to be used to assemble static libraries compiled from C/C++ code.
+# Note: an absolute path should be used, otherwise LLVM build will break.
+#ranlib = "ranlib"
+
 # Linker to be used to link Rust code. Note that the
 # default value is platform specific, and if not specified it may also depend on
 # what platform is crossing to what platform.
@@ -386,6 +433,10 @@
 # against. Note that if this is specified we don't compile LLVM at all for this
 # target.
 #llvm-config = "../path/to/llvm/root/bin/llvm-config"
+
+# Normally the build system can find LLVM's FileCheck utility, but if
+# not, you can specify an explicit file name for it.
+#llvm-filecheck = "/path/to/FileCheck"
 
 # Path to the custom jemalloc static library to link into the standard library
 # by default. This is only used if jemalloc is still enabled above
@@ -447,3 +498,7 @@
 # as the one built on Windows will contain backslashes in paths causing problems
 # on linux
 #src-tarball = true
+#
+
+# Whether to allow failures when building tools
+#missing-tools = false

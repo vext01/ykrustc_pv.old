@@ -10,31 +10,36 @@
 
 use rustc::middle::allocator::AllocatorKind;
 use rustc_errors;
-use rustc_target::spec::abi::Abi;
-use syntax::ast::{Attribute, Crate, LitKind, StrStyle};
-use syntax::ast::{Arg, Constness, Generics, Mac, Mutability, Ty, Unsafety};
-use syntax::ast::{self, Expr, Ident, Item, ItemKind, TyKind, VisibilityKind};
-use syntax::attr;
-use syntax::codemap::{dummy_spanned, respan};
-use syntax::codemap::{ExpnInfo, MacroAttribute, NameAndSpan};
-use syntax::ext::base::ExtCtxt;
-use syntax::ext::base::Resolver;
-use syntax::ext::build::AstBuilder;
-use syntax::ext::expand::ExpansionConfig;
-use syntax::ext::hygiene::{self, Mark, SyntaxContext};
-use syntax::fold::{self, Folder};
-use syntax::parse::ParseSess;
-use syntax::ptr::P;
-use syntax::symbol::Symbol;
-use syntax::util::small_vector::SmallVector;
-use syntax_pos::{Span, DUMMY_SP};
+use smallvec::SmallVec;
+use syntax::{
+    ast::{
+        self, Arg, Attribute, Crate, Expr, FnHeader, Generics, Ident, Item, ItemKind,
+        Mac, Mod, Mutability, Ty, TyKind, Unsafety, VisibilityKind,
+    },
+    attr,
+    source_map::{
+        respan, ExpnInfo, MacroAttribute,
+    },
+    ext::{
+        base::{ExtCtxt, Resolver},
+        build::AstBuilder,
+        expand::ExpansionConfig,
+        hygiene::{self, Mark, SyntaxContext},
+    },
+    fold::{self, Folder},
+    parse::ParseSess,
+    ptr::P,
+    symbol::Symbol
+};
+use syntax_pos::Span;
 
 use {AllocatorMethod, AllocatorTy, ALLOCATOR_METHODS};
 
 pub fn modify(
     sess: &ParseSess,
-    resolver: &mut Resolver,
+    resolver: &mut dyn Resolver,
     krate: Crate,
+    crate_name: String,
     handler: &rustc_errors::Handler,
 ) -> ast::Crate {
     ExpandAllocatorDirectives {
@@ -42,6 +47,8 @@ pub fn modify(
         sess,
         resolver,
         found: false,
+        crate_name: Some(crate_name),
+        in_submod: -1, // -1 to account for the "root" module
     }.fold_crate(krate)
 }
 
@@ -49,11 +56,18 @@ struct ExpandAllocatorDirectives<'a> {
     found: bool,
     handler: &'a rustc_errors::Handler,
     sess: &'a ParseSess,
-    resolver: &'a mut Resolver,
+    resolver: &'a mut dyn Resolver,
+    crate_name: Option<String>,
+
+    // For now, we disallow `global_allocator` in submodules because hygiene is hard. Keep track of
+    // whether we are in a submodule or not. If `in_submod > 0` we are in a submodule.
+    in_submod: isize,
 }
 
 impl<'a> Folder for ExpandAllocatorDirectives<'a> {
-    fn fold_item(&mut self, item: P<Item>) -> SmallVector<P<Item>> {
+    fn fold_item(&mut self, item: P<Item>) -> SmallVec<[P<Item>; 1]> {
+        debug!("in submodule {}", self.in_submod);
+
         let name = if attr::contains_name(&item.attrs, "global_allocator") {
             "global_allocator"
         } else {
@@ -64,33 +78,42 @@ impl<'a> Folder for ExpandAllocatorDirectives<'a> {
             _ => {
                 self.handler
                     .span_err(item.span, "allocators must be statics");
-                return SmallVector::one(item);
+                return smallvec![item];
             }
         }
 
+        if self.in_submod > 0 {
+            self.handler
+                .span_err(item.span, "`global_allocator` cannot be used in submodules");
+            return smallvec![item];
+        }
+
         if self.found {
-            self.handler.span_err(
-                item.span,
-                "cannot define more than one \
-                 #[global_allocator]",
-            );
-            return SmallVector::one(item);
+            self.handler
+                .span_err(item.span, "cannot define more than one #[global_allocator]");
+            return smallvec![item];
         }
         self.found = true;
 
+        // Create a fresh Mark for the new macro expansion we are about to do
         let mark = Mark::fresh(Mark::root());
         mark.set_expn_info(ExpnInfo {
-            call_site: DUMMY_SP,
-            callee: NameAndSpan {
-                format: MacroAttribute(Symbol::intern(name)),
-                span: None,
-                allow_internal_unstable: true,
-                allow_internal_unsafe: false,
-                edition: hygiene::default_edition(),
-            },
+            call_site: item.span, // use the call site of the static
+            def_site: None,
+            format: MacroAttribute(Symbol::intern(name)),
+            allow_internal_unstable: true,
+            allow_internal_unsafe: false,
+            local_inner_macros: false,
+            edition: hygiene::default_edition(),
         });
+
+        // Tie the span to the macro expansion info we just created
         let span = item.span.with_ctxt(SyntaxContext::empty().apply_mark(mark));
-        let ecfg = ExpansionConfig::default(name.to_string());
+
+        // Create an expansion config
+        let ecfg = ExpansionConfig::default(self.crate_name.take().unwrap());
+
+        // Generate a bunch of new items using the AllocFnFactory
         let mut f = AllocFnFactory {
             span,
             kind: AllocatorKind::Global,
@@ -98,29 +121,51 @@ impl<'a> Folder for ExpandAllocatorDirectives<'a> {
             core: Ident::from_str("core"),
             cx: ExtCtxt::new(self.sess, ecfg, self.resolver),
         };
+
+        // We will generate a new submodule. To `use` the static from that module, we need to get
+        // the `super::...` path.
         let super_path = f.cx.path(f.span, vec![Ident::from_str("super"), f.global]);
+
+        // Generate the items in the submodule
         let mut items = vec![
+            // import `core` to use allocators
             f.cx.item_extern_crate(f.span, f.core),
+            // `use` the `global_allocator` in `super`
             f.cx.item_use_simple(
                 f.span,
                 respan(f.span.shrink_to_lo(), VisibilityKind::Inherited),
                 super_path,
             ),
         ];
-        for method in ALLOCATOR_METHODS {
-            items.push(f.allocator_fn(method));
-        }
+
+        // Add the allocator methods to the submodule
+        items.extend(
+            ALLOCATOR_METHODS
+                .iter()
+                .map(|method| f.allocator_fn(method)),
+        );
+
+        // Generate the submodule itself
         let name = f.kind.fn_name("allocator_abi");
         let allocator_abi = Ident::with_empty_ctxt(Symbol::gensym(&name));
         let module = f.cx.item_mod(span, span, allocator_abi, Vec::new(), items);
         let module = f.cx.monotonic_expander().fold_item(module).pop().unwrap();
 
-        let mut ret = SmallVector::new();
-        ret.push(item);
-        ret.push(module);
-        return ret;
+        // Return the item and new submodule
+        smallvec![item, module]
     }
 
+    // If we enter a submodule, take note.
+    fn fold_mod(&mut self, m: Mod) -> Mod {
+        debug!("enter submodule");
+        self.in_submod += 1;
+        let ret = fold::noop_fold_mod(m, self);
+        self.in_submod -= 1;
+        debug!("exit submodule");
+        ret
+    }
+
+    // `fold_mac` is disabled by default. Enable it here.
     fn fold_mac(&mut self, mac: Mac) -> Mac {
         fold::noop_fold_mac(mac, self)
     }
@@ -152,9 +197,10 @@ impl<'a> AllocFnFactory<'a> {
         let (output_ty, output_expr) = self.ret_ty(&method.output, result);
         let kind = ItemKind::Fn(
             self.cx.fn_decl(abi_args, ast::FunctionRetTy::Ty(output_ty)),
-            Unsafety::Unsafe,
-            dummy_spanned(Constness::NotConst),
-            Abi::Rust,
+            FnHeader {
+                unsafety: Unsafety::Unsafe,
+                ..FnHeader::default()
+            },
             Generics::default(),
             self.cx.block_expr(output_expr),
         );
@@ -186,27 +232,16 @@ impl<'a> AllocFnFactory<'a> {
     }
 
     fn attrs(&self) -> Vec<Attribute> {
-        let key = Symbol::intern("linkage");
-        let value = LitKind::Str(Symbol::intern("external"), StrStyle::Cooked);
-        let linkage = self.cx.meta_name_value(self.span, key, value);
-
-        let no_mangle = Symbol::intern("no_mangle");
-        let no_mangle = self.cx.meta_word(self.span, no_mangle);
-
         let special = Symbol::intern("rustc_std_internal_symbol");
         let special = self.cx.meta_word(self.span, special);
-        vec![
-            self.cx.attribute(self.span, linkage),
-            self.cx.attribute(self.span, no_mangle),
-            self.cx.attribute(self.span, special),
-        ]
+        vec![self.cx.attribute(self.span, special)]
     }
 
     fn arg_ty(
         &self,
         ty: &AllocatorTy,
         args: &mut Vec<Arg>,
-        ident: &mut FnMut() -> Ident,
+        ident: &mut dyn FnMut() -> Ident,
     ) -> P<Expr> {
         match *ty {
             AllocatorTy::Layout => {
@@ -237,7 +272,7 @@ impl<'a> AllocFnFactory<'a> {
                 let ident = ident();
                 args.push(self.cx.arg(self.span, ident, self.ptr_u8()));
                 let arg = self.cx.expr_ident(self.span, ident);
-                self.cx.expr_cast(self.span, arg, self.ptr_opaque())
+                self.cx.expr_cast(self.span, arg, self.ptr_u8())
             }
 
             AllocatorTy::Usize => {
@@ -280,18 +315,5 @@ impl<'a> AllocFnFactory<'a> {
         let u8 = self.cx.path_ident(self.span, Ident::from_str("u8"));
         let ty_u8 = self.cx.ty_path(u8);
         self.cx.ty_ptr(self.span, ty_u8, Mutability::Mutable)
-    }
-
-    fn ptr_opaque(&self) -> P<Ty> {
-        let opaque = self.cx.path(
-            self.span,
-            vec![
-                self.core,
-                Ident::from_str("alloc"),
-                Ident::from_str("Opaque"),
-            ],
-        );
-        let ty_opaque = self.cx.ty_path(opaque);
-        self.cx.ty_ptr(self.span, ty_opaque, Mutability::Mutable)
     }
 }

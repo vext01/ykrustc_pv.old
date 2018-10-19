@@ -104,7 +104,7 @@ impl<'a, 'gcx, 'tcx> TypeVisitor<'tcx> for UnresolvedTypeFinder<'a, 'gcx, 'tcx> 
     fn visit_ty(&mut self, t: Ty<'tcx>) -> bool {
         let t = self.infcx.shallow_resolve(t);
         if t.has_infer_types() {
-            if let ty::TyInfer(_) = t.sty {
+            if let ty::Infer(_) = t.sty {
                 // Since we called `shallow_resolve` above, this must
                 // be an (as yet...) unresolved inference variable.
                 true
@@ -153,24 +153,24 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for FullTypeResolver<'a, 'gcx, 'tcx>
     fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
         if !t.needs_infer() && !ty::keep_local(&t) {
             t // micro-optimize -- if there is nothing in this type that this fold affects...
-                // ^ we need to have the `keep_local` check to un-default
-                // defaulted tuples.
+              // ^ we need to have the `keep_local` check to un-default
+              // defaulted tuples.
         } else {
             let t = self.infcx.shallow_resolve(t);
             match t.sty {
-                ty::TyInfer(ty::TyVar(vid)) => {
+                ty::Infer(ty::TyVar(vid)) => {
                     self.err = Some(FixupError::UnresolvedTy(vid));
                     self.tcx().types.err
                 }
-                ty::TyInfer(ty::IntVar(vid)) => {
+                ty::Infer(ty::IntVar(vid)) => {
                     self.err = Some(FixupError::UnresolvedIntTy(vid));
                     self.tcx().types.err
                 }
-                ty::TyInfer(ty::FloatVar(vid)) => {
+                ty::Infer(ty::FloatVar(vid)) => {
                     self.err = Some(FixupError::UnresolvedFloatTy(vid));
                     self.tcx().types.err
                 }
-                ty::TyInfer(_) => {
+                ty::Infer(_) => {
                     bug!("Unexpected type in full type resolver: {:?}", t);
                 }
                 _ => {

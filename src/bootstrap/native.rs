@@ -33,6 +33,7 @@ use util::{self, exe};
 use build_helper::up_to_date;
 use builder::{Builder, RunConfig, ShouldRun, Step};
 use cache::Interned;
+use GitRepo;
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct Llvm {
@@ -145,14 +146,19 @@ impl Step for Llvm {
            .define("LLVM_INCLUDE_EXAMPLES", "OFF")
            .define("LLVM_INCLUDE_TESTS", "OFF")
            .define("LLVM_INCLUDE_DOCS", "OFF")
+           .define("LLVM_INCLUDE_BENCHMARKS", "OFF")
            .define("LLVM_ENABLE_ZLIB", "OFF")
            .define("WITH_POLLY", "OFF")
            .define("LLVM_ENABLE_TERMINFO", "OFF")
            .define("LLVM_ENABLE_LIBEDIT", "OFF")
-           .define("LLVM_ENABLE_LIBXML2", "OFF")
            .define("LLVM_PARALLEL_COMPILE_JOBS", builder.jobs().to_string())
            .define("LLVM_TARGET_ARCH", target.split('-').next().unwrap())
            .define("LLVM_DEFAULT_TARGET_TRIPLE", target);
+
+        if builder.config.llvm_thin_lto && !emscripten {
+            cfg.define("LLVM_ENABLE_LTO", "Thin")
+               .define("LLVM_ENABLE_LLD", "ON");
+        }
 
         // By default, LLVM will automatically find OCaml and, if it finds it,
         // install the LLVM bindings in LLVM_OCAML_INSTALL_PATH, which defaults
@@ -163,12 +169,25 @@ impl Step for Llvm {
         cfg.define("LLVM_OCAML_INSTALL_PATH",
             env::var_os("LLVM_OCAML_INSTALL_PATH").unwrap_or_else(|| "usr/lib/ocaml".into()));
 
+        let want_lldb = builder.config.lldb_enabled && !self.emscripten;
+
         // This setting makes the LLVM tools link to the dynamic LLVM library,
         // which saves both memory during parallel links and overall disk space
-        // for the tools.  We don't distribute any of those tools, so this is
-        // just a local concern.  However, it doesn't work well everywhere.
-        if target.contains("linux-gnu") || target.contains("apple-darwin") {
-           cfg.define("LLVM_LINK_LLVM_DYLIB", "ON");
+        // for the tools. We don't do this on every platform as it doesn't work
+        // equally well everywhere.
+        if builder.llvm_link_tools_dynamically(target) && !emscripten {
+            cfg.define("LLVM_LINK_LLVM_DYLIB", "ON");
+        }
+
+        // For distribution we want the LLVM tools to be *statically* linked to libstdc++
+        if builder.config.llvm_tools_enabled || want_lldb {
+            if !target.contains("windows") {
+                if target.contains("apple") {
+                    cfg.define("CMAKE_EXE_LINKER_FLAGS", "-static-libstdc++");
+                } else {
+                    cfg.define("CMAKE_EXE_LINKER_FLAGS", "-Wl,-Bsymbolic -static-libstdc++");
+                }
+            }
         }
 
         if target.contains("msvc") {
@@ -180,6 +199,17 @@ impl Step for Llvm {
 
         if target.starts_with("i686") {
             cfg.define("LLVM_BUILD_32_BITS", "ON");
+        }
+
+        if want_lldb {
+            cfg.define("LLVM_EXTERNAL_CLANG_SOURCE_DIR", builder.src.join("src/tools/clang"));
+            cfg.define("LLVM_EXTERNAL_LLDB_SOURCE_DIR", builder.src.join("src/tools/lldb"));
+            // For the time being, disable code signing.
+            cfg.define("LLDB_CODESIGN_IDENTITY", "");
+        } else {
+            // LLDB requires libxml2; but otherwise we want it to be disabled.
+            // See https://github.com/rust-lang/rust/pull/50104
+            cfg.define("LLVM_ENABLE_LIBXML2", "OFF");
         }
 
         if let Some(num_linkers) = builder.config.llvm_link_jobs {
@@ -208,6 +238,14 @@ impl Step for Llvm {
             }
 
             cfg.define("LLVM_NATIVE_BUILD", builder.llvm_out(builder.config.build).join("build"));
+        }
+
+        if let Some(ref suffix) = builder.config.llvm_version_suffix {
+            cfg.define("LLVM_VERSION_SUFFIX", suffix);
+        }
+
+        if let Some(ref python) = builder.config.python {
+            cfg.define("PYTHON_EXECUTABLE", python);
         }
 
         configure_cmake(builder, target, &mut cfg, false);
@@ -242,12 +280,12 @@ fn check_llvm_version(builder: &Builder, llvm_config: &Path) {
     let version = output(cmd.arg("--version"));
     let mut parts = version.split('.').take(2)
         .filter_map(|s| s.parse::<u32>().ok());
-    if let (Some(major), Some(minor)) = (parts.next(), parts.next()) {
-        if major > 3 || (major == 3 && minor >= 9) {
+    if let (Some(major), Some(_minor)) = (parts.next(), parts.next()) {
+        if major >= 5 {
             return
         }
     }
-    panic!("\n\nbad LLVM version: {}, need >=3.9\n\n", version)
+    panic!("\n\nbad LLVM version: {}, need >=5.0\n\n", version)
 }
 
 fn configure_cmake(builder: &Builder,
@@ -336,8 +374,8 @@ fn configure_cmake(builder: &Builder,
     }
 
     cfg.build_arg("-j").build_arg(builder.jobs().to_string());
-    cfg.define("CMAKE_C_FLAGS", builder.cflags(target).join(" "));
-    let mut cxxflags = builder.cflags(target).join(" ");
+    cfg.define("CMAKE_C_FLAGS", builder.cflags(target, GitRepo::Llvm).join(" "));
+    let mut cxxflags = builder.cflags(target, GitRepo::Llvm).join(" ");
     if building_dist_binaries {
         if builder.config.llvm_static_stdcpp && !target.contains("windows") {
             cxxflags.push_str(" -static-libstdc++");
@@ -349,6 +387,14 @@ fn configure_cmake(builder: &Builder,
             // LLVM build breaks if `CMAKE_AR` is a relative path, for some reason it
             // tries to resolve this path in the LLVM build directory.
             cfg.define("CMAKE_AR", sanitize_cc(ar));
+        }
+    }
+
+    if let Some(ranlib) = builder.ranlib(target) {
+        if ranlib.is_absolute() {
+            // LLVM build breaks if `CMAKE_RANLIB` is a relative path, for some reason it
+            // tries to resolve this path in the LLVM build directory.
+            cfg.define("CMAKE_RANLIB", sanitize_cc(ranlib));
         }
     }
 
@@ -460,7 +506,7 @@ impl Step for TestHelpers {
         }
 
         let _folder = builder.fold_output(|| "build_test_helpers");
-        builder.info(&format!("Building test helpers"));
+        builder.info("Building test helpers");
         t!(fs::create_dir_all(&dst));
         let mut cfg = cc::Build::new();
 
@@ -593,6 +639,7 @@ impl Step for Openssl {
             "aarch64-linux-android" => "linux-aarch64",
             "aarch64-unknown-linux-gnu" => "linux-aarch64",
             "aarch64-unknown-linux-musl" => "linux-aarch64",
+            "aarch64-unknown-netbsd" => "BSD-generic64",
             "arm-linux-androideabi" => "android",
             "arm-unknown-linux-gnueabi" => "linux-armv4",
             "arm-unknown-linux-gnueabihf" => "linux-armv4",
@@ -617,6 +664,7 @@ impl Step for Openssl {
             "powerpc-unknown-netbsd" => "BSD-generic32",
             "powerpc64-unknown-linux-gnu" => "linux-ppc64",
             "powerpc64le-unknown-linux-gnu" => "linux-ppc64le",
+            "powerpc64le-unknown-linux-musl" => "linux-ppc64le",
             "s390x-unknown-linux-gnu" => "linux64-s390x",
             "sparc-unknown-linux-gnu" => "linux-sparcv9",
             "sparc64-unknown-linux-gnu" => "linux64-sparcv9",
@@ -633,7 +681,7 @@ impl Step for Openssl {
         };
         configure.arg(os);
         configure.env("CC", builder.cc(target));
-        for flag in builder.cflags(target) {
+        for flag in builder.cflags(target, GitRepo::Rustc) {
             configure.arg(flag);
         }
         // There is no specific os target for android aarch64 or x86_64,

@@ -8,10 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(unused_variables)]
 // compile-flags:-C panic=abort
 // no-prefer-dynamic
 // ignore-cloudabi no processes
 // ignore-emscripten no processes
+// ignore-macos
 
 use std::process::Command;
 use std::env;

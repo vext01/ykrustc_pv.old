@@ -14,11 +14,16 @@
             reason = "this library is unlikely to be stabilized in its current \
                       form or name",
             issue = "32838")]
-#![feature(global_allocator)]
+
 #![feature(allocator_api)]
 #![feature(core_intrinsics)]
+#![feature(nll)]
 #![feature(staged_api)]
 #![feature(rustc_attrs)]
+#![cfg_attr(
+    all(target_arch = "wasm32", not(target_os = "emscripten")),
+    feature(integer_atomics, stdsimd)
+)]
 #![cfg_attr(any(unix, target_os = "cloudabi", target_os = "redox"), feature(libc))]
 #![rustc_alloc_kind = "lib"]
 
@@ -41,54 +46,78 @@ const MIN_ALIGN: usize = 8;
 #[allow(dead_code)]
 const MIN_ALIGN: usize = 16;
 
-use core::alloc::{Alloc, GlobalAlloc, AllocErr, Layout, Opaque};
+use core::alloc::{Alloc, GlobalAlloc, AllocErr, Layout};
 use core::ptr::NonNull;
 
-#[unstable(feature = "allocator_api", issue = "32838")]
+/// The default memory allocator provided by the operating system.
+///
+/// This is based on `malloc` on Unix platforms and `HeapAlloc` on Windows,
+/// plus related functions.
+///
+/// This type can be used in a `static` item
+/// with the `#[global_allocator]` attribute
+/// to force the global allocator to be the system’s one.
+/// (The default is jemalloc for executables, on some platforms.)
+///
+/// ```rust
+/// use std::alloc::System;
+///
+/// #[global_allocator]
+/// static A: System = System;
+///
+/// fn main() {
+///     let a = Box::new(4); // Allocates from the system allocator.
+///     println!("{}", a);
+/// }
+/// ```
+///
+/// It can also be used directly to allocate memory
+/// independently of the standard library’s global allocator.
+#[stable(feature = "alloc_system_type", since = "1.28.0")]
 pub struct System;
 
 #[unstable(feature = "allocator_api", issue = "32838")]
 unsafe impl Alloc for System {
     #[inline]
-    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<Opaque>, AllocErr> {
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
         NonNull::new(GlobalAlloc::alloc(self, layout)).ok_or(AllocErr)
     }
 
     #[inline]
-    unsafe fn alloc_zeroed(&mut self, layout: Layout) -> Result<NonNull<Opaque>, AllocErr> {
+    unsafe fn alloc_zeroed(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
         NonNull::new(GlobalAlloc::alloc_zeroed(self, layout)).ok_or(AllocErr)
     }
 
     #[inline]
-    unsafe fn dealloc(&mut self, ptr: NonNull<Opaque>, layout: Layout) {
+    unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
         GlobalAlloc::dealloc(self, ptr.as_ptr(), layout)
     }
 
     #[inline]
     unsafe fn realloc(&mut self,
-                      ptr: NonNull<Opaque>,
+                      ptr: NonNull<u8>,
                       layout: Layout,
-                      new_size: usize) -> Result<NonNull<Opaque>, AllocErr> {
+                      new_size: usize) -> Result<NonNull<u8>, AllocErr> {
         NonNull::new(GlobalAlloc::realloc(self, ptr.as_ptr(), layout, new_size)).ok_or(AllocErr)
     }
 }
 
 #[cfg(any(windows, unix, target_os = "cloudabi", target_os = "redox"))]
 mod realloc_fallback {
-    use core::alloc::{GlobalAlloc, Opaque, Layout};
+    use core::alloc::{GlobalAlloc, Layout};
     use core::cmp;
     use core::ptr;
 
     impl super::System {
-        pub(crate) unsafe fn realloc_fallback(&self, ptr: *mut Opaque, old_layout: Layout,
-                                              new_size: usize) -> *mut Opaque {
+        pub(crate) unsafe fn realloc_fallback(&self, ptr: *mut u8, old_layout: Layout,
+                                              new_size: usize) -> *mut u8 {
             // Docs for GlobalAlloc::realloc require this to be valid:
             let new_layout = Layout::from_size_align_unchecked(new_size, old_layout.align());
 
             let new_ptr = GlobalAlloc::alloc(self, new_layout);
             if !new_ptr.is_null() {
                 let size = cmp::min(old_layout.size(), new_size);
-                ptr::copy_nonoverlapping(ptr as *mut u8, new_ptr as *mut u8, size);
+                ptr::copy_nonoverlapping(ptr, new_ptr, size);
                 GlobalAlloc::dealloc(self, ptr, old_layout);
             }
             new_ptr
@@ -104,21 +133,19 @@ mod platform {
 
     use MIN_ALIGN;
     use System;
-    use core::alloc::{GlobalAlloc, Layout, Opaque};
+    use core::alloc::{GlobalAlloc, Layout};
 
-    #[unstable(feature = "allocator_api", issue = "32838")]
+    #[stable(feature = "alloc_system_type", since = "1.28.0")]
     unsafe impl GlobalAlloc for System {
         #[inline]
-        unsafe fn alloc(&self, layout: Layout) -> *mut Opaque {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             if layout.align() <= MIN_ALIGN && layout.align() <= layout.size() {
-                libc::malloc(layout.size()) as *mut Opaque
+                libc::malloc(layout.size()) as *mut u8
             } else {
                 #[cfg(target_os = "macos")]
                 {
                     if layout.align() > (1 << 31) {
-                        // FIXME: use Opaque::null_mut
-                        // https://github.com/rust-lang/rust/issues/49659
-                        return 0 as *mut Opaque
+                        return ptr::null_mut()
                     }
                 }
                 aligned_malloc(&layout)
@@ -126,36 +153,39 @@ mod platform {
         }
 
         #[inline]
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut Opaque {
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
             if layout.align() <= MIN_ALIGN && layout.align() <= layout.size() {
-                libc::calloc(layout.size(), 1) as *mut Opaque
+                libc::calloc(layout.size(), 1) as *mut u8
             } else {
                 let ptr = self.alloc(layout.clone());
                 if !ptr.is_null() {
-                    ptr::write_bytes(ptr as *mut u8, 0, layout.size());
+                    ptr::write_bytes(ptr, 0, layout.size());
                 }
                 ptr
             }
         }
 
         #[inline]
-        unsafe fn dealloc(&self, ptr: *mut Opaque, _layout: Layout) {
+        unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
             libc::free(ptr as *mut libc::c_void)
         }
 
         #[inline]
-        unsafe fn realloc(&self, ptr: *mut Opaque, layout: Layout, new_size: usize) -> *mut Opaque {
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
             if layout.align() <= MIN_ALIGN && layout.align() <= new_size {
-                libc::realloc(ptr as *mut libc::c_void, new_size) as *mut Opaque
+                libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8
             } else {
                 self.realloc_fallback(ptr, layout, new_size)
             }
         }
     }
 
-    #[cfg(any(target_os = "android", target_os = "redox", target_os = "solaris"))]
+    #[cfg(any(target_os = "android",
+              target_os = "hermit",
+              target_os = "redox",
+              target_os = "solaris"))]
     #[inline]
-    unsafe fn aligned_malloc(layout: &Layout) -> *mut Opaque {
+    unsafe fn aligned_malloc(layout: &Layout) -> *mut u8 {
         // On android we currently target API level 9 which unfortunately
         // doesn't have the `posix_memalign` API used below. Instead we use
         // `memalign`, but this unfortunately has the property on some systems
@@ -173,29 +203,31 @@ mod platform {
         // [3]: https://bugs.chromium.org/p/chromium/issues/detail?id=138579
         // [4]: https://chromium.googlesource.com/chromium/src/base/+/master/
         //                                       /memory/aligned_memory.cc
-        libc::memalign(layout.align(), layout.size()) as *mut Opaque
+        libc::memalign(layout.align(), layout.size()) as *mut u8
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "redox", target_os = "solaris")))]
+    #[cfg(not(any(target_os = "android",
+                  target_os = "hermit",
+                  target_os = "redox",
+                  target_os = "solaris")))]
     #[inline]
-    unsafe fn aligned_malloc(layout: &Layout) -> *mut Opaque {
+    unsafe fn aligned_malloc(layout: &Layout) -> *mut u8 {
         let mut out = ptr::null_mut();
         let ret = libc::posix_memalign(&mut out, layout.align(), layout.size());
         if ret != 0 {
-            // FIXME: use Opaque::null_mut https://github.com/rust-lang/rust/issues/49659
-            0 as *mut Opaque
+            ptr::null_mut()
         } else {
-            out as *mut Opaque
+            out as *mut u8
         }
     }
 }
 
 #[cfg(windows)]
-#[allow(bad_style)]
+#[allow(nonstandard_style)]
 mod platform {
     use MIN_ALIGN;
     use System;
-    use core::alloc::{GlobalAlloc, Opaque, Layout};
+    use core::alloc::{GlobalAlloc, Layout};
 
     type LPVOID = *mut u8;
     type HANDLE = LPVOID;
@@ -221,13 +253,13 @@ mod platform {
     }
 
     unsafe fn align_ptr(ptr: *mut u8, align: usize) -> *mut u8 {
-        let aligned = ptr.offset((align - (ptr as usize & (align - 1))) as isize);
+        let aligned = ptr.add(align - (ptr as usize & (align - 1)));
         *get_header(aligned) = Header(ptr);
         aligned
     }
 
     #[inline]
-    unsafe fn allocate_with_flags(layout: Layout, flags: DWORD) -> *mut Opaque {
+    unsafe fn allocate_with_flags(layout: Layout, flags: DWORD) -> *mut u8 {
         let ptr = if layout.align() <= MIN_ALIGN {
             HeapAlloc(GetProcessHeap(), flags, layout.size())
         } else {
@@ -239,29 +271,29 @@ mod platform {
                 align_ptr(ptr, layout.align())
             }
         };
-        ptr as *mut Opaque
+        ptr as *mut u8
     }
 
-    #[unstable(feature = "allocator_api", issue = "32838")]
+    #[stable(feature = "alloc_system_type", since = "1.28.0")]
     unsafe impl GlobalAlloc for System {
         #[inline]
-        unsafe fn alloc(&self, layout: Layout) -> *mut Opaque {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             allocate_with_flags(layout, 0)
         }
 
         #[inline]
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut Opaque {
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
             allocate_with_flags(layout, HEAP_ZERO_MEMORY)
         }
 
         #[inline]
-        unsafe fn dealloc(&self, ptr: *mut Opaque, layout: Layout) {
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
             if layout.align() <= MIN_ALIGN {
                 let err = HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
                 debug_assert!(err != 0, "Failed to free heap memory: {}",
                               GetLastError());
             } else {
-                let header = get_header(ptr as *mut u8);
+                let header = get_header(ptr);
                 let err = HeapFree(GetProcessHeap(), 0, header.0 as LPVOID);
                 debug_assert!(err != 0, "Failed to free heap memory: {}",
                               GetLastError());
@@ -269,9 +301,9 @@ mod platform {
         }
 
         #[inline]
-        unsafe fn realloc(&self, ptr: *mut Opaque, layout: Layout, new_size: usize) -> *mut Opaque {
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
             if layout.align() <= MIN_ALIGN {
-                HeapReAlloc(GetProcessHeap(), 0, ptr as LPVOID, new_size) as *mut Opaque
+                HeapReAlloc(GetProcessHeap(), 0, ptr as LPVOID, new_size) as *mut u8
             } else {
                 self.realloc_fallback(ptr, layout, new_size)
             }
@@ -300,32 +332,79 @@ mod platform {
 mod platform {
     extern crate dlmalloc;
 
-    use core::alloc::{GlobalAlloc, Layout, Opaque};
+    use core::alloc::{GlobalAlloc, Layout};
     use System;
 
-    // No need for synchronization here as wasm is currently single-threaded
     static mut DLMALLOC: dlmalloc::Dlmalloc = dlmalloc::DLMALLOC_INIT;
 
-    #[unstable(feature = "allocator_api", issue = "32838")]
+    #[stable(feature = "alloc_system_type", since = "1.28.0")]
     unsafe impl GlobalAlloc for System {
         #[inline]
-        unsafe fn alloc(&self, layout: Layout) -> *mut Opaque {
-            DLMALLOC.malloc(layout.size(), layout.align()) as *mut Opaque
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let _lock = lock::lock();
+            DLMALLOC.malloc(layout.size(), layout.align())
         }
 
         #[inline]
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut Opaque {
-            DLMALLOC.calloc(layout.size(), layout.align()) as *mut Opaque
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let _lock = lock::lock();
+            DLMALLOC.calloc(layout.size(), layout.align())
         }
 
         #[inline]
-        unsafe fn dealloc(&self, ptr: *mut Opaque, layout: Layout) {
-            DLMALLOC.free(ptr as *mut u8, layout.size(), layout.align())
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            let _lock = lock::lock();
+            DLMALLOC.free(ptr, layout.size(), layout.align())
         }
 
         #[inline]
-        unsafe fn realloc(&self, ptr: *mut Opaque, layout: Layout, new_size: usize) -> *mut Opaque {
-            DLMALLOC.realloc(ptr as *mut u8, layout.size(), layout.align(), new_size) as *mut Opaque
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let _lock = lock::lock();
+            DLMALLOC.realloc(ptr, layout.size(), layout.align(), new_size)
         }
+    }
+
+    #[cfg(target_feature = "atomics")]
+    mod lock {
+        use core::arch::wasm32;
+        use core::sync::atomic::{AtomicI32, Ordering::SeqCst};
+
+        static LOCKED: AtomicI32 = AtomicI32::new(0);
+
+        pub struct DropLock;
+
+        pub fn lock() -> DropLock {
+            loop {
+                if LOCKED.swap(1, SeqCst) == 0 {
+                    return DropLock
+                }
+                unsafe {
+                    let r = wasm32::atomic::wait_i32(
+                        &LOCKED as *const AtomicI32 as *mut i32,
+                        1,  // expected value
+                        -1, // timeout
+                    );
+                    debug_assert!(r == 0 || r == 1);
+                }
+            }
+        }
+
+        impl Drop for DropLock {
+            fn drop(&mut self) {
+                let r = LOCKED.swap(0, SeqCst);
+                debug_assert_eq!(r, 1);
+                unsafe {
+                    wasm32::atomic::wake(
+                        &LOCKED as *const AtomicI32 as *mut i32,
+                        1, // only one thread
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_feature = "atomics"))]
+    mod lock {
+        pub fn lock() {} // no atomics, no threads, that's easy!
     }
 }

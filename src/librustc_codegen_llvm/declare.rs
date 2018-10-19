@@ -16,15 +16,16 @@
 //! Some useful guidelines:
 //!
 //! * Use declare_* family of methods if you are declaring, but are not
-//!   interested in defining the ValueRef they return.
-//! * Use define_* family of methods when you might be defining the ValueRef.
+//!   interested in defining the Value they return.
+//! * Use define_* family of methods when you might be defining the Value.
 //! * When in doubt, define.
 
-use llvm::{self, ValueRef};
+use llvm;
 use llvm::AttributePlace::Function;
 use rustc::ty::{self, Ty};
-use rustc::ty::layout::{self, LayoutOf};
+use rustc::ty::layout::LayoutOf;
 use rustc::session::config::Sanitizer;
+use rustc_data_structures::small_c_str::SmallCStr;
 use rustc_target::spec::PanicStrategy;
 use abi::{Abi, FnType, FnTypeExt};
 use attributes;
@@ -33,20 +34,16 @@ use common;
 use type_::Type;
 use value::Value;
 
-use std::ffi::CString;
-
 
 /// Declare a global value.
 ///
 /// If there’s a value with the same name already declared, the function will
-/// return its ValueRef instead.
-pub fn declare_global(cx: &CodegenCx, name: &str, ty: Type) -> llvm::ValueRef {
+/// return its Value instead.
+pub fn declare_global(cx: &CodegenCx<'ll, '_>, name: &str, ty: &'ll Type) -> &'ll Value {
     debug!("declare_global(name={:?})", name);
-    let namebuf = CString::new(name).unwrap_or_else(|_|{
-        bug!("name {:?} contains an interior null byte", name)
-    });
+    let namebuf = SmallCStr::new(name);
     unsafe {
-        llvm::LLVMRustGetOrInsertGlobal(cx.llmod, namebuf.as_ptr(), ty.to_ref())
+        llvm::LLVMRustGetOrInsertGlobal(cx.llmod, namebuf.as_ptr(), ty)
     }
 }
 
@@ -54,14 +51,17 @@ pub fn declare_global(cx: &CodegenCx, name: &str, ty: Type) -> llvm::ValueRef {
 /// Declare a function.
 ///
 /// If there’s a value with the same name already declared, the function will
-/// update the declaration and return existing ValueRef instead.
-fn declare_raw_fn(cx: &CodegenCx, name: &str, callconv: llvm::CallConv, ty: Type) -> ValueRef {
+/// update the declaration and return existing Value instead.
+fn declare_raw_fn(
+    cx: &CodegenCx<'ll, '_>,
+    name: &str,
+    callconv: llvm::CallConv,
+    ty: &'ll Type,
+) -> &'ll Value {
     debug!("declare_raw_fn(name={:?}, ty={:?})", name, ty);
-    let namebuf = CString::new(name).unwrap_or_else(|_|{
-        bug!("name {:?} contains an interior null byte", name)
-    });
+    let namebuf = SmallCStr::new(name);
     let llfn = unsafe {
-        llvm::LLVMRustGetOrInsertFunction(cx.llmod, namebuf.as_ptr(), ty.to_ref())
+        llvm::LLVMRustGetOrInsertFunction(cx.llmod, namebuf.as_ptr(), ty)
     };
 
     llvm::SetFunctionCallConv(llfn, callconv);
@@ -104,6 +104,8 @@ fn declare_raw_fn(cx: &CodegenCx, name: &str, callconv: llvm::CallConv, ty: Type
         attributes::unwind(llfn, false);
     }
 
+    attributes::non_lazy_bind(cx.sess(), llfn);
+
     llfn
 }
 
@@ -114,8 +116,8 @@ fn declare_raw_fn(cx: &CodegenCx, name: &str, callconv: llvm::CallConv, ty: Type
 /// `declare_fn` instead.
 ///
 /// If there’s a value with the same name already declared, the function will
-/// update the declaration and return existing ValueRef instead.
-pub fn declare_cfn(cx: &CodegenCx, name: &str, fn_type: Type) -> ValueRef {
+/// update the declaration and return existing Value instead.
+pub fn declare_cfn(cx: &CodegenCx<'ll, '_>, name: &str, fn_type: &'ll Type) -> &'ll Value {
     declare_raw_fn(cx, name, llvm::CCallConv, fn_type)
 }
 
@@ -123,9 +125,12 @@ pub fn declare_cfn(cx: &CodegenCx, name: &str, fn_type: Type) -> ValueRef {
 /// Declare a Rust function.
 ///
 /// If there’s a value with the same name already declared, the function will
-/// update the declaration and return existing ValueRef instead.
-pub fn declare_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>, name: &str,
-                            fn_type: Ty<'tcx>) -> ValueRef {
+/// update the declaration and return existing Value instead.
+pub fn declare_fn(
+    cx: &CodegenCx<'ll, 'tcx>,
+    name: &str,
+    fn_type: Ty<'tcx>,
+) -> &'ll Value {
     debug!("declare_rust_fn(name={:?}, fn_type={:?})", name, fn_type);
     let sig = common::ty_fn_sig(cx, fn_type);
     let sig = cx.tcx.normalize_erasing_late_bound_regions(ty::ParamEnv::reveal_all(), &sig);
@@ -134,7 +139,7 @@ pub fn declare_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>, name: &str,
     let fty = FnType::new(cx, sig, &[]);
     let llfn = declare_raw_fn(cx, name, fty.llvm_cconv(), fty.llvm_type(cx));
 
-    if cx.layout_of(sig.output()).abi == layout::Abi::Uninhabited {
+    if cx.layout_of(sig.output()).abi.is_uninhabited() {
         llvm::Attribute::NoReturn.apply_llfn(Function, llfn);
     }
 
@@ -154,11 +159,20 @@ pub fn declare_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>, name: &str,
 /// return None if the name already has a definition associated with it. In that
 /// case an error should be reported to the user, because it usually happens due
 /// to user’s fault (e.g. misuse of #[no_mangle] or #[export_name] attributes).
-pub fn define_global(cx: &CodegenCx, name: &str, ty: Type) -> Option<ValueRef> {
+pub fn define_global(cx: &CodegenCx<'ll, '_>, name: &str, ty: &'ll Type) -> Option<&'ll Value> {
     if get_defined_value(cx, name).is_some() {
         None
     } else {
         Some(declare_global(cx, name, ty))
+    }
+}
+
+/// Declare a private global
+///
+/// Use this function when you intend to define a global without a name.
+pub fn define_private_global(cx: &CodegenCx<'ll, '_>, ty: &'ll Type) -> &'ll Value {
+    unsafe {
+        llvm::LLVMRustInsertPrivateGlobal(cx.llmod, ty)
     }
 }
 
@@ -167,9 +181,11 @@ pub fn define_global(cx: &CodegenCx, name: &str, ty: Type) -> Option<ValueRef> {
 /// Use this function when you intend to define a function. This function will
 /// return panic if the name already has a definition associated with it. This
 /// can happen with #[no_mangle] or #[export_name], for example.
-pub fn define_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
-                           name: &str,
-                           fn_type: Ty<'tcx>) -> ValueRef {
+pub fn define_fn(
+    cx: &CodegenCx<'ll, 'tcx>,
+    name: &str,
+    fn_type: Ty<'tcx>,
+) -> &'ll Value {
     if get_defined_value(cx, name).is_some() {
         cx.sess().fatal(&format!("symbol `{}` already defined", name))
     } else {
@@ -182,9 +198,11 @@ pub fn define_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
 /// Use this function when you intend to define a function. This function will
 /// return panic if the name already has a definition associated with it. This
 /// can happen with #[no_mangle] or #[export_name], for example.
-pub fn define_internal_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
-                                    name: &str,
-                                    fn_type: Ty<'tcx>) -> ValueRef {
+pub fn define_internal_fn(
+    cx: &CodegenCx<'ll, 'tcx>,
+    name: &str,
+    fn_type: Ty<'tcx>,
+) -> &'ll Value {
     let llfn = define_fn(cx, name, fn_type);
     unsafe { llvm::LLVMRustSetLinkage(llfn, llvm::Linkage::InternalLinkage) };
     llfn
@@ -192,24 +210,15 @@ pub fn define_internal_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
 
 
 /// Get declared value by name.
-pub fn get_declared_value(cx: &CodegenCx, name: &str) -> Option<ValueRef> {
+pub fn get_declared_value(cx: &CodegenCx<'ll, '_>, name: &str) -> Option<&'ll Value> {
     debug!("get_declared_value(name={:?})", name);
-    let namebuf = CString::new(name).unwrap_or_else(|_|{
-        bug!("name {:?} contains an interior null byte", name)
-    });
-    let val = unsafe { llvm::LLVMRustGetNamedValue(cx.llmod, namebuf.as_ptr()) };
-    if val.is_null() {
-        debug!("get_declared_value: {:?} value is null", name);
-        None
-    } else {
-        debug!("get_declared_value: {:?} => {:?}", name, Value(val));
-        Some(val)
-    }
+    let namebuf = SmallCStr::new(name);
+    unsafe { llvm::LLVMRustGetNamedValue(cx.llmod, namebuf.as_ptr()) }
 }
 
 /// Get defined or externally defined (AvailableExternally linkage) value by
 /// name.
-pub fn get_defined_value(cx: &CodegenCx, name: &str) -> Option<ValueRef> {
+pub fn get_defined_value(cx: &CodegenCx<'ll, '_>, name: &str) -> Option<&'ll Value> {
     get_declared_value(cx, name).and_then(|val|{
         let declaration = unsafe {
             llvm::LLVMIsDeclaration(val) != 0

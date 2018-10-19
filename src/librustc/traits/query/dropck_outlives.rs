@@ -9,13 +9,12 @@
 // except according to those terms.
 
 use infer::at::At;
-use infer::canonical::{Canonical, Canonicalize, QueryResult};
 use infer::InferOk;
+use infer::canonical::OriginalQueryValues;
 use std::iter::FromIterator;
-use traits::query::CanonicalTyGoal;
-use ty::{self, Ty, TyCtxt};
+use syntax::source_map::Span;
 use ty::subst::Kind;
-use rustc_data_structures::sync::Lrc;
+use ty::{self, Ty, TyCtxt};
 
 impl<'cx, 'gcx, 'tcx> At<'cx, 'gcx, 'tcx> {
     /// Given a type `ty` of some value being dropped, computes a set
@@ -45,44 +44,32 @@ impl<'cx, 'gcx, 'tcx> At<'cx, 'gcx, 'tcx> {
         // any destructor.
         let tcx = self.infcx.tcx;
         if trivial_dropck_outlives(tcx, ty) {
-            return InferOk { value: vec![], obligations: vec![] };
+            return InferOk {
+                value: vec![],
+                obligations: vec![],
+            };
         }
 
         let gcx = tcx.global_tcx();
-        let (c_ty, orig_values) = self.infcx.canonicalize_query(&self.param_env.and(ty));
+        let mut orig_values = OriginalQueryValues::default();
+        let c_ty = self.infcx.canonicalize_query(&self.param_env.and(ty), &mut orig_values);
         let span = self.cause.span;
         debug!("c_ty = {:?}", c_ty);
         match &gcx.dropck_outlives(c_ty) {
             Ok(result) if result.is_proven() => {
-                match self.infcx.instantiate_query_result(
+                if let Ok(InferOk { value, obligations }) =
+                    self.infcx.instantiate_query_response_and_region_obligations(
                     self.cause,
                     self.param_env,
                     &orig_values,
-                    result,
-                ) {
-                    Ok(InferOk {
-                        value: DropckOutlivesResult { kinds, overflows },
+                    result)
+                {
+                    let ty = self.infcx.resolve_type_vars_if_possible(&ty);
+                    let kinds = value.into_kinds_reporting_overflows(tcx, span, ty);
+                    return InferOk {
+                        value: kinds,
                         obligations,
-                    }) => {
-                        for overflow_ty in overflows.into_iter().take(1) {
-                            let mut err = struct_span_err!(
-                                tcx.sess,
-                                span,
-                                E0320,
-                                "overflow while adding drop-check rules for {}",
-                                self.infcx.resolve_type_vars_if_possible(&ty),
-                            );
-                            err.note(&format!("overflowed on {}", overflow_ty));
-                            err.emit();
-                        }
-
-                        return InferOk {
-                            value: kinds,
-                            obligations,
-                        };
-                    }
-
-                    Err(_) => { /* fallthrough to error-handling code below */ }
+                    };
                 }
             }
 
@@ -92,7 +79,7 @@ impl<'cx, 'gcx, 'tcx> At<'cx, 'gcx, 'tcx> {
         // Errors and ambiuity in dropck occur in two cases:
         // - unresolved inference variables at the end of typeck
         // - non well-formed types where projections cannot be resolved
-        // Either of these should hvae created an error before.
+        // Either of these should have created an error before.
         tcx.sess
             .delay_span_bug(span, "dtorck encountered internal error");
         return InferOk {
@@ -102,10 +89,42 @@ impl<'cx, 'gcx, 'tcx> At<'cx, 'gcx, 'tcx> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DropckOutlivesResult<'tcx> {
     pub kinds: Vec<Kind<'tcx>>,
     pub overflows: Vec<Ty<'tcx>>,
+}
+
+impl<'tcx> DropckOutlivesResult<'tcx> {
+    pub fn report_overflows(
+        &self,
+        tcx: TyCtxt<'_, '_, 'tcx>,
+        span: Span,
+        ty: Ty<'tcx>,
+    ) {
+        for overflow_ty in self.overflows.iter().take(1) {
+            let mut err = struct_span_err!(
+                tcx.sess,
+                span,
+                E0320,
+                "overflow while adding drop-check rules for {}",
+                ty,
+            );
+            err.note(&format!("overflowed on {}", overflow_ty));
+            err.emit();
+        }
+    }
+
+    pub fn into_kinds_reporting_overflows(
+        self,
+        tcx: TyCtxt<'_, '_, 'tcx>,
+        span: Span,
+        ty: Ty<'tcx>,
+    ) -> Vec<Kind<'tcx>> {
+        self.report_overflows(tcx, span, ty);
+        let DropckOutlivesResult { kinds, overflows: _ } = self;
+        kinds
+    }
 }
 
 /// A set of constraints that need to be satisfied in order for
@@ -139,12 +158,7 @@ impl<'tcx> FromIterator<DtorckConstraint<'tcx>> for DtorckConstraint<'tcx> {
     fn from_iter<I: IntoIterator<Item = DtorckConstraint<'tcx>>>(iter: I) -> Self {
         let mut result = Self::empty();
 
-        for DtorckConstraint {
-            outlives,
-            dtorck_types,
-            overflows,
-        } in iter
-        {
+        for DtorckConstraint { outlives, dtorck_types, overflows } in iter {
             result.outlives.extend(outlives);
             result.dtorck_types.extend(dtorck_types);
             result.overflows.extend(overflows);
@@ -153,17 +167,6 @@ impl<'tcx> FromIterator<DtorckConstraint<'tcx>> for DtorckConstraint<'tcx> {
         result
     }
 }
-impl<'gcx: 'tcx, 'tcx> Canonicalize<'gcx, 'tcx> for ty::ParamEnvAnd<'tcx, Ty<'tcx>> {
-    type Canonicalized = CanonicalTyGoal<'gcx>;
-
-    fn intern(
-        _gcx: TyCtxt<'_, 'gcx, 'gcx>,
-        value: Canonical<'gcx, Self::Lifted>,
-    ) -> Self::Canonicalized {
-        value
-    }
-}
-
 BraceStructTypeFoldableImpl! {
     impl<'tcx> TypeFoldable<'tcx> for DropckOutlivesResult<'tcx> {
         kinds, overflows
@@ -180,18 +183,6 @@ BraceStructLiftImpl! {
 impl_stable_hash_for!(struct DropckOutlivesResult<'tcx> {
     kinds, overflows
 });
-
-impl<'gcx: 'tcx, 'tcx> Canonicalize<'gcx, 'tcx> for QueryResult<'tcx, DropckOutlivesResult<'tcx>> {
-    // we ought to intern this, but I'm too lazy just now
-    type Canonicalized = Lrc<Canonical<'gcx, QueryResult<'gcx, DropckOutlivesResult<'gcx>>>>;
-
-    fn intern(
-        _gcx: TyCtxt<'_, 'gcx, 'gcx>,
-        value: Canonical<'gcx, Self::Lifted>,
-    ) -> Self::Canonicalized {
-        Lrc::new(value)
-    }
-}
 
 impl_stable_hash_for!(struct DtorckConstraint<'tcx> {
     outlives,
@@ -210,56 +201,59 @@ impl_stable_hash_for!(struct DtorckConstraint<'tcx> {
 ///
 /// Note also that `needs_drop` requires a "global" type (i.e., one
 /// with erased regions), but this funtcion does not.
-fn trivial_dropck_outlives<'cx, 'tcx>(tcx: TyCtxt<'cx, '_, 'tcx>, ty: Ty<'tcx>) -> bool {
+pub fn trivial_dropck_outlives<'tcx>(tcx: TyCtxt<'_, '_, 'tcx>, ty: Ty<'tcx>) -> bool {
     match ty.sty {
         // None of these types have a destructor and hence they do not
         // require anything in particular to outlive the dtor's
         // execution.
-        ty::TyInfer(ty::FreshIntTy(_))
-        | ty::TyInfer(ty::FreshFloatTy(_))
-        | ty::TyBool
-        | ty::TyInt(_)
-        | ty::TyUint(_)
-        | ty::TyFloat(_)
-        | ty::TyNever
-        | ty::TyFnDef(..)
-        | ty::TyFnPtr(_)
-        | ty::TyChar
-        | ty::TyGeneratorWitness(..)
-        | ty::TyRawPtr(_)
-        | ty::TyRef(..)
-        | ty::TyStr
-        | ty::TyForeign(..)
-        | ty::TyError => true,
+        ty::Infer(ty::FreshIntTy(_))
+        | ty::Infer(ty::FreshFloatTy(_))
+        | ty::Bool
+        | ty::Int(_)
+        | ty::Uint(_)
+        | ty::Float(_)
+        | ty::Never
+        | ty::FnDef(..)
+        | ty::FnPtr(_)
+        | ty::Char
+        | ty::GeneratorWitness(..)
+        | ty::RawPtr(_)
+        | ty::Ref(..)
+        | ty::Str
+        | ty::Foreign(..)
+        | ty::Error => true,
 
         // [T; N] and [T] have same properties as T.
-        ty::TyArray(ty, _) | ty::TySlice(ty) => trivial_dropck_outlives(tcx, ty),
+        ty::Array(ty, _) | ty::Slice(ty) => trivial_dropck_outlives(tcx, ty),
 
         // (T1..Tn) and closures have same properties as T1..Tn --
         // check if *any* of those are trivial.
-        ty::TyTuple(ref tys) => tys.iter().cloned().all(|t| trivial_dropck_outlives(tcx, t)),
-        ty::TyClosure(def_id, ref substs) => substs
+        ty::Tuple(ref tys) => tys.iter().cloned().all(|t| trivial_dropck_outlives(tcx, t)),
+        ty::Closure(def_id, ref substs) => substs
             .upvar_tys(def_id, tcx)
             .all(|t| trivial_dropck_outlives(tcx, t)),
 
-        ty::TyAdt(def, _) => {
-            if def.is_union() {
-                // Unions never run have a dtor.
+        ty::Adt(def, _) => {
+            if Some(def.did) == tcx.lang_items().manually_drop() {
+                // `ManuallyDrop` never has a dtor.
                 true
             } else {
                 // Other types might. Moreover, PhantomData doesn't
                 // have a dtor, but it is considered to own its
-                // content, so it is non-trivial.
+                // content, so it is non-trivial. Unions can have `impl Drop`,
+                // and hence are non-trivial as well.
                 false
             }
         }
 
-        // The following *might* require a destructor: it would deeper inspection to tell.
-        ty::TyDynamic(..)
-        | ty::TyProjection(..)
-        | ty::TyParam(_)
-        | ty::TyAnon(..)
-        | ty::TyInfer(_)
-        | ty::TyGenerator(..) => false,
+        // The following *might* require a destructor: needs deeper inspection.
+        ty::Dynamic(..)
+        | ty::Projection(..)
+        | ty::Param(_)
+        | ty::Opaque(..)
+        | ty::Infer(_)
+        | ty::Generator(..) => false,
+
+        ty::UnnormalizedProjection(..) => bug!("only used with chalk-engine"),
     }
 }

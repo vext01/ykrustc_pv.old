@@ -13,9 +13,10 @@
 // FIXME: https://github.com/rust-lang/rust/issues/41430
 // This is a temporary regression test for the ICE reported in #41211
 
-#![feature(proc_macro)]
+#![feature(custom_inner_attributes)]
+
 #![emit_unchanged]
-//~^ ERROR: cannot find attribute macro `emit_unchanged` in this scope
+//~^ ERROR attribute `emit_unchanged` is currently unknown to the compiler
 extern crate issue_41211;
 use issue_41211::emit_unchanged;
 

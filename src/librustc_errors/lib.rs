@@ -16,12 +16,15 @@
 #![allow(unused_attributes)]
 #![feature(range_contains)]
 #![cfg_attr(unix, feature(libc))]
+#![feature(nll)]
 #![feature(optin_builtin_traits)]
 
 extern crate atty;
 extern crate termcolor;
 #[cfg(unix)]
 extern crate libc;
+#[macro_use]
+extern crate log;
 extern crate rustc_data_structures;
 extern crate serialize as rustc_serialize;
 extern crate syntax_pos;
@@ -54,7 +57,14 @@ pub mod registry;
 mod styled_buffer;
 mod lock;
 
-use syntax_pos::{BytePos, Loc, FileLinesResult, FileMap, FileName, MultiSpan, Span, NO_EXPANSION};
+use syntax_pos::{BytePos,
+                 Loc,
+                 FileLinesResult,
+                 SourceFile,
+                 FileName,
+                 MultiSpan,
+                 Span,
+                 NO_EXPANSION};
 
 #[derive(Copy, Clone, Debug, PartialEq, Hash, RustcEncodable, RustcDecodable)]
 pub enum Applicability {
@@ -110,22 +120,22 @@ pub struct SubstitutionPart {
     pub snippet: String,
 }
 
-pub type CodeMapperDyn = CodeMapper + sync::Send + sync::Sync;
+pub type SourceMapperDyn = dyn SourceMapper + sync::Send + sync::Sync;
 
-pub trait CodeMapper {
+pub trait SourceMapper {
     fn lookup_char_pos(&self, pos: BytePos) -> Loc;
     fn span_to_lines(&self, sp: Span) -> FileLinesResult;
     fn span_to_string(&self, sp: Span) -> String;
     fn span_to_filename(&self, sp: Span) -> FileName;
     fn merge_spans(&self, sp_lhs: Span, sp_rhs: Span) -> Option<Span>;
     fn call_span_if_macro(&self, sp: Span) -> Span;
-    fn ensure_filemap_source_present(&self, file_map: Lrc<FileMap>) -> bool;
+    fn ensure_source_file_source_present(&self, file_map: Lrc<SourceFile>) -> bool;
     fn doctest_offset_line(&self, line: usize) -> usize;
 }
 
 impl CodeSuggestion {
     /// Returns the assembled code suggestions and whether they should be shown with an underline.
-    pub fn splice_lines(&self, cm: &CodeMapperDyn)
+    pub fn splice_lines(&self, cm: &SourceMapperDyn)
                         -> Vec<(String, Vec<SubstitutionPart>)> {
         use syntax_pos::{CharPos, Loc, Pos};
 
@@ -270,9 +280,9 @@ pub struct Handler {
     pub flags: HandlerFlags,
 
     err_count: AtomicUsize,
-    emitter: Lock<Box<Emitter + sync::Send>>,
+    emitter: Lock<Box<dyn Emitter + sync::Send>>,
     continue_after_error: LockCell<bool>,
-    delayed_span_bug: Lock<Option<Diagnostic>>,
+    delayed_span_bugs: Lock<Vec<Diagnostic>>,
 
     // This set contains the `DiagnosticId` of all emitted diagnostics to avoid
     // emitting the same diagnostic with extended help (`--teach`) twice, which
@@ -295,16 +305,43 @@ thread_local!(pub static TRACK_DIAGNOSTICS: Cell<fn(&Diagnostic)> =
 
 #[derive(Default)]
 pub struct HandlerFlags {
+    /// If false, warning-level lints are suppressed.
+    /// (rustc: see `--allow warnings` and `--cap-lints`)
     pub can_emit_warnings: bool,
+    /// If true, error-level diagnostics are upgraded to bug-level.
+    /// (rustc: see `-Z treat-err-as-bug`)
     pub treat_err_as_bug: bool,
+    /// If true, immediately emit diagnostics that would otherwise be buffered.
+    /// (rustc: see `-Z dont-buffer-diagnostics` and `-Z treat-err-as-bug`)
+    pub dont_buffer_diagnostics: bool,
+    /// If true, immediately print bugs registered with `delay_span_bug`.
+    /// (rustc: see `-Z report-delayed-bugs`)
+    pub report_delayed_bugs: bool,
+    /// show macro backtraces even for non-local macros.
+    /// (rustc: see `-Z external-macro-backtrace`)
     pub external_macro_backtrace: bool,
+}
+
+impl Drop for Handler {
+    fn drop(&mut self) {
+        if self.err_count() == 0 {
+            let mut bugs = self.delayed_span_bugs.borrow_mut();
+            let has_bugs = !bugs.is_empty();
+            for bug in bugs.drain(..) {
+                DiagnosticBuilder::new_diagnostic(self, bug).emit();
+            }
+            if has_bugs {
+                panic!("no errors encountered even though `delay_span_bug` issued");
+            }
+        }
+    }
 }
 
 impl Handler {
     pub fn with_tty_emitter(color_config: ColorConfig,
                             can_emit_warnings: bool,
                             treat_err_as_bug: bool,
-                            cm: Option<Lrc<CodeMapperDyn>>)
+                            cm: Option<Lrc<SourceMapperDyn>>)
                             -> Handler {
         Handler::with_tty_emitter_and_flags(
             color_config,
@@ -317,7 +354,7 @@ impl Handler {
     }
 
     pub fn with_tty_emitter_and_flags(color_config: ColorConfig,
-                                      cm: Option<Lrc<CodeMapperDyn>>,
+                                      cm: Option<Lrc<SourceMapperDyn>>,
                                       flags: HandlerFlags)
                                       -> Handler {
         let emitter = Box::new(EmitterWriter::stderr(color_config, cm, false, false));
@@ -326,7 +363,7 @@ impl Handler {
 
     pub fn with_emitter(can_emit_warnings: bool,
                         treat_err_as_bug: bool,
-                        e: Box<Emitter + sync::Send>)
+                        e: Box<dyn Emitter + sync::Send>)
                         -> Handler {
         Handler::with_emitter_and_flags(
             e,
@@ -337,13 +374,14 @@ impl Handler {
             })
     }
 
-    pub fn with_emitter_and_flags(e: Box<Emitter + sync::Send>, flags: HandlerFlags) -> Handler {
+    pub fn with_emitter_and_flags(e: Box<dyn Emitter + sync::Send>, flags: HandlerFlags) -> Handler
+    {
         Handler {
             flags,
             err_count: AtomicUsize::new(0),
             emitter: Lock::new(e),
             continue_after_error: LockCell::new(true),
-            delayed_span_bug: Lock::new(None),
+            delayed_span_bugs: Lock::new(Vec::new()),
             taught_diagnostics: Lock::new(FxHashSet()),
             emitted_diagnostic_codes: Lock::new(FxHashSet()),
             emitted_diagnostics: Lock::new(FxHashSet()),
@@ -500,11 +538,18 @@ impl Handler {
     }
     pub fn delay_span_bug<S: Into<MultiSpan>>(&self, sp: S, msg: &str) {
         if self.flags.treat_err_as_bug {
+            // FIXME: don't abort here if report_delayed_bugs is off
             self.span_bug(sp, msg);
         }
         let mut diagnostic = Diagnostic::new(Level::Bug, msg);
         diagnostic.set_span(sp.into());
-        *self.delayed_span_bug.borrow_mut() = Some(diagnostic);
+        self.delay_as_bug(diagnostic);
+    }
+    fn delay_as_bug(&self, diagnostic: Diagnostic) {
+        if self.flags.report_delayed_bugs {
+            DiagnosticBuilder::new_diagnostic(self, diagnostic.clone()).emit();
+        }
+        self.delayed_span_bugs.borrow_mut().push(diagnostic);
     }
     pub fn span_bug_no_panic<S: Into<MultiSpan>>(&self, sp: S, msg: &str) {
         self.emit(&sp.into(), msg, Bug);
@@ -584,9 +629,8 @@ impl Handler {
         if can_show_explain && are_there_diagnostics {
             let mut error_codes =
                 self.emitted_diagnostic_codes.borrow()
-                                             .clone()
-                                             .into_iter()
-                                             .filter_map(|x| match x {
+                                             .iter()
+                                             .filter_map(|x| match *x {
                                                  DiagnosticId::Error(ref s) => Some(s.clone()),
                                                  _ => None,
                                              })
@@ -612,9 +656,6 @@ impl Handler {
 
     pub fn abort_if_errors(&self) {
         if self.err_count() == 0 {
-            if let Some(bug) = self.delayed_span_bug.borrow_mut().take() {
-                DiagnosticBuilder::new_diagnostic(self, bug).emit();
-            }
             return;
         }
         FatalError.raise();

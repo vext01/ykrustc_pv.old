@@ -369,7 +369,9 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
             });
         }
 
-        let contents_drop = if adt.is_union() {
+        let skip_contents =
+            adt.is_union() || Some(adt.did) == self.tcx().lang_items().manually_drop();
+        let contents_drop = if skip_contents {
             (self.succ, self.unwind)
         } else {
             self.open_drop_for_adt_contents(adt, substs)
@@ -527,7 +529,7 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
             mutbl: hir::Mutability::MutMutable
         });
         let ref_place = self.new_temp(ref_ty);
-        let unit_temp = Place::Local(self.new_temp(tcx.mk_nil()));
+        let unit_temp = Place::Local(self.new_temp(tcx.mk_unit()));
 
         let result = BasicBlockData {
             statements: vec![self.assign(
@@ -543,8 +545,9 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
                     args: vec![Operand::Move(Place::Local(ref_place))],
                     destination: Some((unit_temp, succ)),
                     cleanup: unwind.into_option(),
+                    from_hir_call: true,
                 },
-                source_info: self.source_info
+                source_info: self.source_info,
             }),
             is_cleanup: unwind.is_cleanup(),
         };
@@ -560,7 +563,7 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
     ///    if can_go then succ else drop-block
     /// drop-block:
     ///    if ptr_based {
-    ///        ptr = cur
+    ///        ptr = &mut *cur
     ///        cur = cur.offset(1)
     ///    } else {
     ///        ptr = &mut P[cur]
@@ -589,7 +592,14 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
 
         let one = self.constant_usize(1);
         let (ptr_next, cur_next) = if ptr_based {
-            (Rvalue::Use(copy(&Place::Local(cur))),
+            (Rvalue::Ref(
+                tcx.types.re_erased,
+                BorrowKind::Mut { allow_two_phase_borrow: false },
+                Place::Projection(Box::new(Projection {
+                    base: Place::Local(cur),
+                    elem: ProjectionElem::Deref,
+                }))
+             ),
              Rvalue::BinaryOp(BinOp::Offset, copy(&Place::Local(cur)), one))
         } else {
             (Rvalue::Ref(
@@ -734,7 +744,7 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
         if ptr_based {
             let tmp_ty = tcx.mk_mut_ptr(self.place_ty(self.place));
             let tmp = Place::Local(self.new_temp(tmp_ty));
-            // tmp = &P;
+            // tmp = &mut P;
             // cur = tmp as *mut T;
             // end = Offset(cur, len);
             drop_block_stmts.push(self.assign(&tmp, Rvalue::Ref(
@@ -778,7 +788,7 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
     fn open_drop<'a>(&mut self) -> BasicBlock {
         let ty = self.place_ty(self.place);
         match ty.sty {
-            ty::TyClosure(def_id, substs) => {
+            ty::Closure(def_id, substs) => {
                 let tys : Vec<_> = substs.upvar_tys(def_id, self.tcx()).collect();
                 self.open_drop_for_tuple(&tys)
             }
@@ -788,30 +798,30 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
             // This should only happen for the self argument on the resume function.
             // It effetively only contains upvars until the generator transformation runs.
             // See librustc_mir/transform/generator.rs for more details.
-            ty::TyGenerator(def_id, substs, _) => {
+            ty::Generator(def_id, substs, _) => {
                 let tys : Vec<_> = substs.upvar_tys(def_id, self.tcx()).collect();
                 self.open_drop_for_tuple(&tys)
             }
-            ty::TyTuple(tys) => {
+            ty::Tuple(tys) => {
                 self.open_drop_for_tuple(tys)
             }
-            ty::TyAdt(def, substs) => {
+            ty::Adt(def, substs) => {
                 if def.is_box() {
                     self.open_drop_for_box(def, substs)
                 } else {
                     self.open_drop_for_adt(def, substs)
                 }
             }
-            ty::TyDynamic(..) => {
+            ty::Dynamic(..) => {
                 let unwind = self.unwind; // FIXME(#43234)
                 let succ = self.succ;
                 self.complete_drop(Some(DropFlagMode::Deep), succ, unwind)
             }
-            ty::TyArray(ety, size) => {
+            ty::Array(ety, size) => {
                 let size = size.assert_usize(self.tcx());
                 self.open_drop_for_array(ety, size)
             },
-            ty::TySlice(ety) => self.open_drop_for_array(ety, None),
+            ty::Slice(ety) => self.open_drop_for_array(ety, None),
 
             _ => bug!("open drop from non-ADT `{:?}`", ty)
         }
@@ -882,7 +892,7 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
         unwind: Unwind
     ) -> BasicBlock {
         let tcx = self.tcx();
-        let unit_temp = Place::Local(self.new_temp(tcx.mk_nil()));
+        let unit_temp = Place::Local(self.new_temp(tcx.mk_unit()));
         let free_func = tcx.require_lang_item(lang_items::BoxFreeFnLangItem);
         let args = adt.variants[0].fields.iter().enumerate().map(|(i, f)| {
             let field = Field::new(i);
@@ -894,7 +904,8 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
             func: Operand::function_handle(tcx, free_func, substs, self.source_info.span),
             args: args,
             destination: Some((unit_temp, target)),
-            cleanup: None
+            cleanup: None,
+            from_hir_call: false,
         }; // FIXME(#43234)
         let free_block = self.new_block(unwind, call);
 
@@ -960,16 +971,15 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
         Operand::Constant(box Constant {
             span: self.source_info.span,
             ty: self.tcx().types.usize,
-            literal: Literal::Value {
-                value: ty::Const::from_usize(self.tcx(), val.into())
-            }
+            user_ty: None,
+            literal: ty::Const::from_usize(self.tcx(), val.into()),
         })
     }
 
     fn assign(&self, lhs: &Place<'tcx>, rhs: Rvalue<'tcx>) -> Statement<'tcx> {
         Statement {
             source_info: self.source_info,
-            kind: StatementKind::Assign(lhs.clone(), rhs)
+            kind: StatementKind::Assign(lhs.clone(), box rhs)
         }
     }
 }

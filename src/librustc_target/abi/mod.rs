@@ -92,18 +92,18 @@ impl TargetDataLayout {
 
         let mut dl = TargetDataLayout::default();
         let mut i128_align_src = 64;
-        for spec in target.data_layout.split("-") {
-            match &spec.split(":").collect::<Vec<_>>()[..] {
-                &["e"] => dl.endian = Endian::Little,
-                &["E"] => dl.endian = Endian::Big,
-                &["a", ref a..] => dl.aggregate_align = align(a, "a")?,
-                &["f32", ref a..] => dl.f32_align = align(a, "f32")?,
-                &["f64", ref a..] => dl.f64_align = align(a, "f64")?,
-                &[p @ "p", s, ref a..] | &[p @ "p0", s, ref a..] => {
+        for spec in target.data_layout.split('-') {
+            match spec.split(':').collect::<Vec<_>>()[..] {
+                ["e"] => dl.endian = Endian::Little,
+                ["E"] => dl.endian = Endian::Big,
+                ["a", ref a..] => dl.aggregate_align = align(a, "a")?,
+                ["f32", ref a..] => dl.f32_align = align(a, "f32")?,
+                ["f64", ref a..] => dl.f64_align = align(a, "f64")?,
+                [p @ "p", s, ref a..] | [p @ "p0", s, ref a..] => {
                     dl.pointer_size = size(s, p)?;
                     dl.pointer_align = align(a, p)?;
                 }
-                &[s, ref a..] if s.starts_with("i") => {
+                [s, ref a..] if s.starts_with("i") => {
                     let bits = match s[1..].parse::<u64>() {
                         Ok(bits) => bits,
                         Err(_) => {
@@ -127,7 +127,7 @@ impl TargetDataLayout {
                         dl.i128_align = a;
                     }
                 }
-                &[s, ref a..] if s.starts_with("v") => {
+                [s, ref a..] if s.starts_with("v") => {
                     let v_size = size(&s[1..], "v")?;
                     let a = align(a, s)?;
                     if let Some(v) = dl.vector_align.iter_mut().find(|v| v.0 == v_size) {
@@ -229,37 +229,44 @@ pub struct Size {
 impl Size {
     pub const ZERO: Size = Self::from_bytes(0);
 
+    #[inline]
     pub fn from_bits(bits: u64) -> Size {
         // Avoid potential overflow from `bits + 7`.
         Size::from_bytes(bits / 8 + ((bits % 8) + 7) / 8)
     }
 
+    #[inline]
     pub const fn from_bytes(bytes: u64) -> Size {
         Size {
             raw: bytes
         }
     }
 
+    #[inline]
     pub fn bytes(self) -> u64 {
         self.raw
     }
 
+    #[inline]
     pub fn bits(self) -> u64 {
         self.bytes().checked_mul(8).unwrap_or_else(|| {
             panic!("Size::bits: {} bytes in bits doesn't fit in u64", self.bytes())
         })
     }
 
+    #[inline]
     pub fn abi_align(self, align: Align) -> Size {
         let mask = align.abi() - 1;
         Size::from_bytes((self.bytes() + mask) & !mask)
     }
 
+    #[inline]
     pub fn is_abi_aligned(self, align: Align) -> bool {
         let mask = align.abi() - 1;
         self.bytes() & mask == 0
     }
 
+    #[inline]
     pub fn checked_add<C: HasDataLayout>(self, offset: Size, cx: C) -> Option<Size> {
         let dl = cx.data_layout();
 
@@ -272,6 +279,7 @@ impl Size {
         }
     }
 
+    #[inline]
     pub fn checked_mul<C: HasDataLayout>(self, count: u64, cx: C) -> Option<Size> {
         let dl = cx.data_layout();
 
@@ -289,6 +297,7 @@ impl Size {
 
 impl Add for Size {
     type Output = Size;
+    #[inline]
     fn add(self, other: Size) -> Size {
         Size::from_bytes(self.bytes().checked_add(other.bytes()).unwrap_or_else(|| {
             panic!("Size::add: {} + {} doesn't fit in u64", self.bytes(), other.bytes())
@@ -298,6 +307,7 @@ impl Add for Size {
 
 impl Sub for Size {
     type Output = Size;
+    #[inline]
     fn sub(self, other: Size) -> Size {
         Size::from_bytes(self.bytes().checked_sub(other.bytes()).unwrap_or_else(|| {
             panic!("Size::sub: {} - {} would result in negative size", self.bytes(), other.bytes())
@@ -307,6 +317,7 @@ impl Sub for Size {
 
 impl Mul<Size> for u64 {
     type Output = Size;
+    #[inline]
     fn mul(self, size: Size) -> Size {
         size * self
     }
@@ -314,6 +325,7 @@ impl Mul<Size> for u64 {
 
 impl Mul<u64> for Size {
     type Output = Size;
+    #[inline]
     fn mul(self, count: u64) -> Size {
         match self.bytes().checked_mul(count) {
             Some(bytes) => Size::from_bytes(bytes),
@@ -325,6 +337,7 @@ impl Mul<u64> for Size {
 }
 
 impl AddAssign for Size {
+    #[inline]
     fn add_assign(&mut self, other: Size) {
         *self = *self + other;
     }
@@ -403,6 +416,24 @@ impl Align {
             pref_pow2: cmp::max(self.pref_pow2, other.pref_pow2),
         }
     }
+
+    /// Compute the best alignment possible for the given offset
+    /// (the largest power of two that the offset is a multiple of).
+    ///
+    /// NB: for an offset of `0`, this happens to return `2^64`.
+    pub fn max_for_offset(offset: Size) -> Align {
+        let pow2 = offset.bytes().trailing_zeros() as u8;
+        Align {
+            abi_pow2: pow2,
+            pref_pow2: pow2,
+        }
+    }
+
+    /// Lower the alignment, if necessary, such that the given offset
+    /// is aligned to it (the offset is a multiple of the aligment).
+    pub fn restrict_for_offset(self, offset: Size) -> Align {
+        self.min(Align::max_for_offset(offset))
+    }
 }
 
 /// Integers, also used for enum discriminants.
@@ -416,8 +447,8 @@ pub enum Integer {
 }
 
 impl Integer {
-    pub fn size(&self) -> Size {
-        match *self {
+    pub fn size(self) -> Size {
+        match self {
             I8 => Size::from_bytes(1),
             I16 => Size::from_bytes(2),
             I32 => Size::from_bytes(4),
@@ -426,10 +457,10 @@ impl Integer {
         }
     }
 
-    pub fn align<C: HasDataLayout>(&self, cx: C) -> Align {
+    pub fn align<C: HasDataLayout>(self, cx: C) -> Align {
         let dl = cx.data_layout();
 
-        match *self {
+        match self {
             I8 => dl.i8_align,
             I16 => dl.i16_align,
             I32 => dl.i32_align,
@@ -441,10 +472,10 @@ impl Integer {
     /// Find the smallest Integer type which can represent the signed value.
     pub fn fit_signed(x: i128) -> Integer {
         match x {
-            -0x0000_0000_0000_0080...0x0000_0000_0000_007f => I8,
-            -0x0000_0000_0000_8000...0x0000_0000_0000_7fff => I16,
-            -0x0000_0000_8000_0000...0x0000_0000_7fff_ffff => I32,
-            -0x8000_0000_0000_0000...0x7fff_ffff_ffff_ffff => I64,
+            -0x0000_0000_0000_0080..=0x0000_0000_0000_007f => I8,
+            -0x0000_0000_0000_8000..=0x0000_0000_0000_7fff => I16,
+            -0x0000_0000_8000_0000..=0x0000_0000_7fff_ffff => I32,
+            -0x8000_0000_0000_0000..=0x7fff_ffff_ffff_ffff => I64,
             _ => I128
         }
     }
@@ -452,10 +483,10 @@ impl Integer {
     /// Find the smallest Integer type which can represent the unsigned value.
     pub fn fit_unsigned(x: u128) -> Integer {
         match x {
-            0...0x0000_0000_0000_00ff => I8,
-            0...0x0000_0000_0000_ffff => I16,
-            0...0x0000_0000_ffff_ffff => I32,
-            0...0xffff_ffff_ffff_ffff => I64,
+            0..=0x0000_0000_0000_00ff => I8,
+            0..=0x0000_0000_0000_ffff => I16,
+            0..=0x0000_0000_ffff_ffff => I32,
+            0..=0xffff_ffff_ffff_ffff => I64,
             _ => I128,
         }
     }
@@ -509,15 +540,15 @@ impl fmt::Display for FloatTy {
 }
 
 impl FloatTy {
-    pub fn ty_to_string(&self) -> &'static str {
-        match *self {
+    pub fn ty_to_string(self) -> &'static str {
+        match self {
             FloatTy::F32 => "f32",
             FloatTy::F64 => "f64",
         }
     }
 
-    pub fn bit_width(&self) -> usize {
-        match *self {
+    pub fn bit_width(self) -> usize {
+        match self {
             FloatTy::F32 => 32,
             FloatTy::F64 => 64,
         }
@@ -583,7 +614,16 @@ pub struct Scalar {
     pub value: Primitive,
 
     /// Inclusive wrap-around range of valid values, that is, if
-    /// min > max, it represents min..=u128::MAX followed by 0..=max.
+    /// start > end, it represents `start..=max_value()`,
+    /// followed by `0..=end`.
+    ///
+    /// That is, for an i8 primitive, a range of `254..=2` means following
+    /// sequence:
+    ///
+    ///    254 (-2), 255 (-1), 0, 1, 2
+    ///
+    /// This is intended specifically to mirror LLVM’s `!range` metadata,
+    /// semantics.
     // FIXME(eddyb) always use the shortest range, e.g. by finding
     // the largest space between two consecutive valid values and
     // taking everything else as the (shortest) valid range.
@@ -621,6 +661,8 @@ impl Scalar {
 #[derive(PartialEq, Eq, Hash, Debug)]
 pub enum FieldPlacement {
     /// All fields start at no offset. The `usize` is the field count.
+    ///
+    /// In the case of primitives the number of fields is `0`.
     Union(usize),
 
     /// Array/vector-like placement, with all fields of identical types.
@@ -760,6 +802,14 @@ impl Abi {
             _ => false,
         }
     }
+
+    /// Returns true if this is an uninhabited type
+    pub fn is_uninhabited(&self) -> bool {
+        match *self {
+            Abi::Uninhabited => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Hash, Debug)]
@@ -824,7 +874,7 @@ impl LayoutDetails {
 /// to those obtained from `layout_of(ty)`, as we need to produce
 /// layouts for which Rust types do not exist, such as enum variants
 /// or synthetic fields of enums (i.e. discriminants) and fat pointers.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TyLayout<'a, Ty> {
     pub ty: Ty,
     pub details: &'a LayoutDetails

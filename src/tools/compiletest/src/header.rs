@@ -14,8 +14,7 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use common;
-use common::Config;
+use common::{self, CompareMode, Config, Mode};
 use util;
 
 use extract_gdb_version;
@@ -134,6 +133,8 @@ impl EarlyProps {
                     // Ignore if actual version is smaller the minimum required
                     // version
                     lldb_version_to_int(actual_version) < lldb_version_to_int(min_version)
+                } else if line.starts_with("rust-lldb") && !config.lldb_native_rust {
+                    true
                 } else {
                     false
                 }
@@ -200,6 +201,10 @@ pub struct TestProps {
     pub force_host: bool,
     // Check stdout for error-pattern output as well as stderr
     pub check_stdout: bool,
+    // For UI tests, allows compiler to generate arbitrary output to stdout
+    pub dont_check_compiler_stdout: bool,
+    // For UI tests, allows compiler to generate arbitrary output to stderr
+    pub dont_check_compiler_stderr: bool,
     // Don't force a --crate-type=dylib flag on the command line
     pub no_prefer_dynamic: bool,
     // Run --pretty expanded when running pretty printing tests
@@ -232,6 +237,7 @@ pub struct TestProps {
     pub normalize_stderr: Vec<(String, String)>,
     pub failure_status: i32,
     pub run_rustfix: bool,
+    pub rustfix_only_machine_applicable: bool,
 }
 
 impl TestProps {
@@ -249,6 +255,8 @@ impl TestProps {
             build_aux_docs: false,
             force_host: false,
             check_stdout: false,
+            dont_check_compiler_stdout: false,
+            dont_check_compiler_stderr: false,
             no_prefer_dynamic: false,
             pretty_expanded: false,
             pretty_mode: "normal".to_string(),
@@ -262,8 +270,9 @@ impl TestProps {
             disable_ui_testing_normalization: false,
             normalize_stdout: vec![],
             normalize_stderr: vec![],
-            failure_status: 101,
+            failure_status: -1,
             run_rustfix: false,
+            rustfix_only_machine_applicable: false,
         }
     }
 
@@ -298,6 +307,10 @@ impl TestProps {
                     .extend(flags.split_whitespace().map(|s| s.to_owned()));
             }
 
+            if let Some(edition) = config.parse_edition(ln) {
+                self.compile_flags.push(format!("--edition={}", edition));
+            }
+
             if let Some(r) = config.parse_revisions(ln) {
                 self.revisions.extend(r);
             }
@@ -320,6 +333,14 @@ impl TestProps {
 
             if !self.check_stdout {
                 self.check_stdout = config.parse_check_stdout(ln);
+            }
+
+            if !self.dont_check_compiler_stdout {
+                self.dont_check_compiler_stdout = config.parse_dont_check_compiler_stdout(ln);
+            }
+
+            if !self.dont_check_compiler_stderr {
+                self.dont_check_compiler_stderr = config.parse_dont_check_compiler_stderr(ln);
             }
 
             if !self.no_prefer_dynamic {
@@ -371,9 +392,9 @@ impl TestProps {
                 self.compile_pass = config.parse_compile_pass(ln) || self.run_pass;
             }
 
-                        if !self.skip_codegen {
-                            self.skip_codegen = config.parse_skip_codegen(ln);
-                        }
+            if !self.skip_codegen {
+                self.skip_codegen = config.parse_skip_codegen(ln);
+            }
 
             if !self.disable_ui_testing_normalization {
                 self.disable_ui_testing_normalization =
@@ -394,7 +415,19 @@ impl TestProps {
             if !self.run_rustfix {
                 self.run_rustfix = config.parse_run_rustfix(ln);
             }
+
+            if !self.rustfix_only_machine_applicable {
+                self.rustfix_only_machine_applicable =
+                    config.parse_rustfix_only_machine_applicable(ln);
+            }
         });
+
+        if self.failure_status == -1 {
+            self.failure_status = match config.mode {
+                Mode::RunFail => 101,
+                _ => 1,
+            };
+        }
 
         for key in &["RUST_TEST_NOCAPTURE", "RUST_TEST_THREADS"] {
             if let Ok(val) = env::var(key) {
@@ -406,7 +439,7 @@ impl TestProps {
     }
 }
 
-fn iter_header(testfile: &Path, cfg: Option<&str>, it: &mut FnMut(&str)) {
+fn iter_header(testfile: &Path, cfg: Option<&str>, it: &mut dyn FnMut(&str)) {
     if testfile.is_dir() {
         return;
     }
@@ -493,6 +526,14 @@ impl Config {
         self.parse_name_directive(line, "check-stdout")
     }
 
+    fn parse_dont_check_compiler_stdout(&self, line: &str) -> bool {
+        self.parse_name_directive(line, "dont-check-compiler-stdout")
+    }
+
+    fn parse_dont_check_compiler_stderr(&self, line: &str) -> bool {
+        self.parse_name_directive(line, "dont-check-compiler-stderr")
+    }
+
     fn parse_no_prefer_dynamic(&self, line: &str) -> bool {
         self.parse_name_directive(line, "no-prefer-dynamic")
     }
@@ -542,7 +583,7 @@ impl Config {
             let mut strs: Vec<String> = nv.splitn(2, '=').map(str::to_owned).collect();
 
             match strs.len() {
-                1 => (strs.pop().unwrap(), "".to_owned()),
+                1 => (strs.pop().unwrap(), String::new()),
                 2 => {
                     let end = strs.pop().unwrap();
                     (strs.pop().unwrap(), end)
@@ -598,7 +639,14 @@ impl Config {
                     common::DebugInfoLldb => name == "lldb",
                     common::Pretty => name == "pretty",
                     _ => false,
-                } || (self.target != self.host && name == "cross-compile")
+                } ||
+                (self.target != self.host && name == "cross-compile") ||
+                match self.compare_mode {
+                    Some(CompareMode::Nll) => name == "compare-mode-nll",
+                    Some(CompareMode::Polonius) => name == "compare-mode-polonius",
+                    None => false,
+                } ||
+                (cfg!(debug_assertions) && name == "debug")
         } else {
             false
         }
@@ -646,6 +694,14 @@ impl Config {
 
     fn parse_run_rustfix(&self, line: &str) -> bool {
         self.parse_name_directive(line, "run-rustfix")
+    }
+
+    fn parse_rustfix_only_machine_applicable(&self, line: &str) -> bool {
+        self.parse_name_directive(line, "rustfix-only-machine-applicable")
+    }
+
+    fn parse_edition(&self, line: &str) -> Option<String> {
+        self.parse_name_value_directive(line, "edition")
     }
 }
 

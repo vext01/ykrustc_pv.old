@@ -62,6 +62,7 @@ mod cloudabi_base;
 mod dragonfly_base;
 mod freebsd_base;
 mod haiku_base;
+mod hermit_base;
 mod linux_base;
 mod linux_musl_base;
 mod openbsd_base;
@@ -73,6 +74,7 @@ mod thumb_base;
 mod l4re_base;
 mod fuchsia_base;
 mod redox_base;
+mod riscv_base;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash,
          RustcEncodable, RustcDecodable)]
@@ -91,6 +93,29 @@ pub enum LldFlavor {
     Ld64,
     Ld,
     Link,
+}
+
+impl LldFlavor {
+    fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "darwin" => LldFlavor::Ld64,
+            "gnu" => LldFlavor::Ld,
+            "link" => LldFlavor::Link,
+            "wasm" => LldFlavor::Wasm,
+            _ => return None,
+        })
+    }
+}
+
+impl ToJson for LldFlavor {
+    fn to_json(&self) -> Json {
+        match *self {
+            LldFlavor::Ld64 => "darwin",
+            LldFlavor::Ld => "gnu",
+            LldFlavor::Link => "link",
+            LldFlavor::Wasm => "wasm",
+        }.to_json()
+    }
 }
 
 impl ToJson for LinkerFlavor {
@@ -229,7 +254,7 @@ macro_rules! supported_targets {
             }
         }
 
-        pub fn get_targets() -> Box<Iterator<Item=String>> {
+        pub fn get_targets() -> Box<dyn Iterator<Item=String>> {
             Box::new(TARGETS.iter().filter_map(|t| -> Option<String> {
                 load_specific(t)
                     .and(Ok(t.to_string()))
@@ -274,6 +299,7 @@ supported_targets! {
     ("powerpc-unknown-linux-gnuspe", powerpc_unknown_linux_gnuspe),
     ("powerpc64-unknown-linux-gnu", powerpc64_unknown_linux_gnu),
     ("powerpc64le-unknown-linux-gnu", powerpc64le_unknown_linux_gnu),
+    ("powerpc64le-unknown-linux-musl", powerpc64le_unknown_linux_musl),
     ("s390x-unknown-linux-gnu", s390x_unknown_linux_gnu),
     ("sparc-unknown-linux-gnu", sparc_unknown_linux_gnu),
     ("sparc64-unknown-linux-gnu", sparc64_unknown_linux_gnu),
@@ -317,6 +343,7 @@ supported_targets! {
     ("i686-unknown-openbsd", i686_unknown_openbsd),
     ("x86_64-unknown-openbsd", x86_64_unknown_openbsd),
 
+    ("aarch64-unknown-netbsd", aarch64_unknown_netbsd),
     ("armv6-unknown-netbsd-eabihf", armv6_unknown_netbsd_eabihf),
     ("armv7-unknown-netbsd-eabihf", armv7_unknown_netbsd_eabihf),
     ("i686-unknown-netbsd", i686_unknown_netbsd),
@@ -331,8 +358,8 @@ supported_targets! {
     ("x86_64-apple-darwin", x86_64_apple_darwin),
     ("i686-apple-darwin", i686_apple_darwin),
 
-    ("aarch64-unknown-fuchsia", aarch64_unknown_fuchsia),
-    ("x86_64-unknown-fuchsia", x86_64_unknown_fuchsia),
+    ("aarch64-fuchsia", aarch64_fuchsia),
+    ("x86_64-fuchsia", x86_64_fuchsia),
 
     ("x86_64-unknown-l4re-uclibc", x86_64_unknown_l4re_uclibc),
 
@@ -344,7 +371,10 @@ supported_targets! {
     ("armv7-apple-ios", armv7_apple_ios),
     ("armv7s-apple-ios", armv7s_apple_ios),
 
+    ("armebv7r-none-eabi", armebv7r_none_eabi),
     ("armebv7r-none-eabihf", armebv7r_none_eabihf),
+    ("armv7r-none-eabi", armv7r_none_eabi),
+    ("armv7r-none-eabihf", armv7r_none_eabihf),
 
     ("x86_64-sun-solaris", x86_64_sun_solaris),
     ("sparcv9-sun-solaris", sparcv9_sun_solaris),
@@ -352,9 +382,11 @@ supported_targets! {
     ("x86_64-pc-windows-gnu", x86_64_pc_windows_gnu),
     ("i686-pc-windows-gnu", i686_pc_windows_gnu),
 
+    ("aarch64-pc-windows-msvc", aarch64_pc_windows_msvc),
     ("x86_64-pc-windows-msvc", x86_64_pc_windows_msvc),
     ("i686-pc-windows-msvc", i686_pc_windows_msvc),
     ("i586-pc-windows-msvc", i586_pc_windows_msvc),
+    ("thumbv7a-pc-windows-msvc", thumbv7a_pc_windows_msvc),
 
     ("asmjs-unknown-emscripten", asmjs_unknown_emscripten),
     ("wasm32-unknown-emscripten", wasm32_unknown_emscripten),
@@ -372,6 +404,14 @@ supported_targets! {
     ("armv7-unknown-cloudabi-eabihf", armv7_unknown_cloudabi_eabihf),
     ("i686-unknown-cloudabi", i686_unknown_cloudabi),
     ("x86_64-unknown-cloudabi", x86_64_unknown_cloudabi),
+
+    ("aarch64-unknown-hermit", aarch64_unknown_hermit),
+    ("x86_64-unknown-hermit", x86_64_unknown_hermit),
+
+    ("riscv32imc-unknown-none-elf", riscv32imc_unknown_none_elf),
+    ("riscv32imac-unknown-none-elf", riscv32imac_unknown_none_elf),
+
+    ("aarch64-unknown-none", aarch64_unknown_none),
 }
 
 /// Everything `rustc` knows about how to compile for a specific target.
@@ -425,6 +465,9 @@ pub struct TargetOptions {
 
     /// Linker to invoke
     pub linker: Option<String>,
+
+    /// LLD flavor
+    pub lld_flavor: LldFlavor,
 
     /// Linker arguments that are passed *before* any user-defined libraries.
     pub pre_link_args: LinkArgs, // ... unconditionally
@@ -533,6 +576,9 @@ pub struct TargetOptions {
     /// the functions in the executable are not randomized and can be used
     /// during an exploit of a vulnerability in any code.
     pub position_independent_executables: bool,
+    /// Determines if the target always requires using the PLT for indirect
+    /// library calls or not. This controls the default value of the `-Z plt` flag.
+    pub needs_plt: bool,
     /// Either partial, full, or off. Full RELRO makes the dynamic linker
     /// resolve all symbols at startup and marks the GOT read-only before
     /// starting the program, preventing overwriting the GOT.
@@ -571,6 +617,9 @@ pub struct TargetOptions {
 
     /// Don't use this field; instead use the `.max_atomic_width()` method.
     pub max_atomic_width: Option<u64>,
+
+    /// Whether the target supports atomic CAS operations natively
+    pub atomic_cas: bool,
 
     /// Panic strategy: "unwind" or "abort"
     pub panic_strategy: PanicStrategy,
@@ -631,6 +680,12 @@ pub struct TargetOptions {
     /// typically because the platform needs to unwind for things like stack
     /// unwinders.
     pub requires_uwtable: bool,
+
+    /// Whether or not SIMD types are passed by reference in the Rust ABI,
+    /// typically required if a target can be compiled with a mixed set of
+    /// target features. This is `true` by default, and `false` for targets like
+    /// wasm32 where the whole program either has simd or not.
+    pub simd_types_indirect: bool,
 }
 
 impl Default for TargetOptions {
@@ -640,12 +695,13 @@ impl Default for TargetOptions {
         TargetOptions {
             is_builtin: false,
             linker: option_env!("CFG_DEFAULT_LINKER").map(|s| s.to_string()),
+            lld_flavor: LldFlavor::Ld,
             pre_link_args: LinkArgs::new(),
             pre_link_args_crt: LinkArgs::new(),
             post_link_args: LinkArgs::new(),
             asm_args: Vec::new(),
             cpu: "generic".to_string(),
-            features: "".to_string(),
+            features: String::new(),
             dynamic_linking: false,
             only_cdylib: false,
             executables: false,
@@ -657,7 +713,7 @@ impl Default for TargetOptions {
             function_sections: true,
             dll_prefix: "lib".to_string(),
             dll_suffix: ".so".to_string(),
-            exe_suffix: "".to_string(),
+            exe_suffix: String::new(),
             staticlib_prefix: "lib".to_string(),
             staticlib_suffix: ".a".to_string(),
             target_family: None,
@@ -673,6 +729,7 @@ impl Default for TargetOptions {
             has_rpath: false,
             no_default_libraries: true,
             position_independent_executables: false,
+            needs_plt: false,
             relro_level: RelroLevel::None,
             pre_link_objects_exe: Vec::new(),
             pre_link_objects_exe_crt: Vec::new(),
@@ -690,6 +747,7 @@ impl Default for TargetOptions {
             no_integrated_as: false,
             min_atomic_width: None,
             max_atomic_width: None,
+            atomic_cas: true,
             panic_strategy: PanicStrategy::Unwind,
             abi_blacklist: vec![],
             crt_static_allows_dylibs: false,
@@ -708,12 +766,13 @@ impl Default for TargetOptions {
             embed_bitcode: false,
             emit_debug_gdb_scripts: true,
             requires_uwtable: false,
+            simd_types_indirect: true,
         }
     }
 }
 
 impl Target {
-    /// Given a function ABI, turn "System" into the correct ABI for this target.
+    /// Given a function ABI, turn it into the correct ABI for this target.
     pub fn adjust_abi(&self, abi: Abi) -> Abi {
         match abi {
             Abi::System => {
@@ -721,6 +780,16 @@ impl Target {
                     Abi::Stdcall
                 } else {
                     Abi::C
+                }
+            },
+            // These ABI kinds are ignored on non-x86 Windows targets.
+            // See https://docs.microsoft.com/en-us/cpp/cpp/argument-passing-and-naming-conventions
+            // and the individual pages for __stdcall et al.
+            Abi::Stdcall | Abi::Fastcall | Abi::Vectorcall | Abi::Thiscall => {
+                if self.options.is_like_windows && self.arch != "x86" {
+                    Abi::C
+                } else {
+                    abi
                 }
             },
             abi => abi
@@ -736,7 +805,7 @@ impl Target {
     /// Maximum integer size in bits that this target can perform atomic
     /// operations on.
     pub fn max_atomic_width(&self) -> u64 {
-        self.options.max_atomic_width.unwrap_or(self.target_pointer_width.parse().unwrap())
+        self.options.max_atomic_width.unwrap_or_else(|| self.target_pointer_width.parse().unwrap())
     }
 
     pub fn is_abi_supported(&self, abi: Abi) -> bool {
@@ -753,20 +822,16 @@ impl Target {
         // the JSON parser is not updated to match the structs.
 
         let get_req_field = |name: &str| {
-            match obj.find(name)
-                     .map(|s| s.as_string())
-                     .and_then(|os| os.map(|s| s.to_string())) {
-                Some(val) => Ok(val),
-                None => {
-                    return Err(format!("Field {} in target specification is required", name))
-                }
-            }
+            obj.find(name)
+               .map(|s| s.as_string())
+               .and_then(|os| os.map(|s| s.to_string()))
+               .ok_or_else(|| format!("Field {} in target specification is required", name))
         };
 
         let get_opt_field = |name: &str, default: &str| {
             obj.find(name).and_then(|s| s.as_string())
                .map(|s| s.to_string())
-               .unwrap_or(default.to_string())
+               .unwrap_or_else(|| default.to_string())
         };
 
         let mut base = Target {
@@ -845,6 +910,20 @@ impl Target {
                         .map(|s| s.to_string() );
                 }
             } );
+            ($key_name:ident, LldFlavor) => ( {
+                let name = (stringify!($key_name)).replace("_", "-");
+                obj.find(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                    if let Some(flavor) = LldFlavor::from_str(&s) {
+                        base.options.$key_name = flavor;
+                    } else {
+                        return Some(Err(format!(
+                            "'{}' is not a valid value for lld-flavor. \
+                             Use 'darwin', 'gnu', 'link' or 'wasm.",
+                            s)))
+                    }
+                    Some(Ok(()))
+                })).unwrap_or(Ok(()))
+            } );
             ($key_name:ident, LinkerFlavor) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
                 obj.find(&name[..]).and_then(|o| o.as_string().map(|s| {
@@ -856,23 +935,27 @@ impl Target {
             } );
             ($key_name:ident, link_args) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(obj) = obj.find(&name[..]).and_then(|o| o.as_object()) {
+                if let Some(val) = obj.find(&name[..]) {
+                    let obj = val.as_object().ok_or_else(|| format!("{}: expected a \
+                        JSON object with fields per linker-flavor.", name))?;
                     let mut args = LinkArgs::new();
                     for (k, v) in obj {
-                        let k = LinkerFlavor::from_str(&k).ok_or_else(|| {
+                        let flavor = LinkerFlavor::from_str(&k).ok_or_else(|| {
                             format!("{}: '{}' is not a valid value for linker-flavor. \
                                      Use 'em', 'gcc', 'ld' or 'msvc'", name, k)
                         })?;
 
-                        let v = v.as_array().map(|a| {
-                            a
-                                .iter()
-                                .filter_map(|o| o.as_string())
-                                .map(|s| s.to_owned())
-                                .collect::<Vec<_>>()
-                        }).unwrap_or(vec![]);
+                        let v = v.as_array().ok_or_else(||
+                            format!("{}.{}: expected a JSON array", name, k)
+                        )?.iter().enumerate()
+                            .map(|(i,s)| {
+                                let s = s.as_string().ok_or_else(||
+                                    format!("{}.{}[{}]: expected a JSON string", name, k, i))?;
+                                Ok(s.to_owned())
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
 
-                        args.insert(k, v);
+                        args.insert(flavor, v);
                     }
                     base.options.$key_name = args;
                 }
@@ -896,6 +979,7 @@ impl Target {
 
         key!(is_builtin, bool);
         key!(linker, optional);
+        try!(key!(lld_flavor, LldFlavor));
         key!(pre_link_args, link_args);
         key!(pre_link_args_crt, link_args);
         key!(pre_link_objects_exe, list);
@@ -936,6 +1020,7 @@ impl Target {
         key!(has_rpath, bool);
         key!(no_default_libraries, bool);
         key!(position_independent_executables, bool);
+        key!(needs_plt, bool);
         try!(key!(relro_level, RelroLevel));
         key!(archive_format);
         key!(allow_asm, bool);
@@ -946,6 +1031,7 @@ impl Target {
         key!(no_integrated_as, bool);
         key!(max_atomic_width, Option<u64>);
         key!(min_atomic_width, Option<u64>);
+        key!(atomic_cas, bool);
         try!(key!(panic_strategy, PanicStrategy));
         key!(crt_static_allows_dylibs, bool);
         key!(crt_static_default, bool);
@@ -962,6 +1048,7 @@ impl Target {
         key!(embed_bitcode, bool);
         key!(emit_debug_gdb_scripts, bool);
         key!(requires_uwtable, bool);
+        key!(simd_types_indirect, bool);
 
         if let Some(array) = obj.find("abi-blacklist").and_then(Json::as_array) {
             for name in array.iter().filter_map(|abi| abi.as_string()) {
@@ -991,7 +1078,6 @@ impl Target {
     /// filesystem access and JSON decoding.
     pub fn search(target_triple: &TargetTriple) -> Result<Target, String> {
         use std::env;
-        use std::ffi::OsString;
         use std::fs;
         use serialize::json;
 
@@ -1002,8 +1088,8 @@ impl Target {
             Target::from_json(obj)
         }
 
-        match target_triple {
-            &TargetTriple::TargetTriple(ref target_triple) => {
+        match *target_triple {
+            TargetTriple::TargetTriple(ref target_triple) => {
                 // check if triple is in list of supported targets
                 if let Ok(t) = load_specific(target_triple) {
                     return Ok(t)
@@ -1016,8 +1102,7 @@ impl Target {
                     PathBuf::from(target)
                 };
 
-                let target_path = env::var_os("RUST_TARGET_PATH")
-                                    .unwrap_or(OsString::new());
+                let target_path = env::var_os("RUST_TARGET_PATH").unwrap_or_default();
 
                 // FIXME 16351: add a sane default search path?
 
@@ -1029,7 +1114,7 @@ impl Target {
                 }
                 Err(format!("Could not find specification for target {:?}", target_triple))
             }
-            &TargetTriple::TargetPath(ref target_path) => {
+            TargetTriple::TargetPath(ref target_path) => {
                 if target_path.is_file() {
                     return load_file(&target_path);
                 }
@@ -1104,6 +1189,7 @@ impl ToJson for Target {
 
         target_option_val!(is_builtin);
         target_option_val!(linker);
+        target_option_val!(lld_flavor);
         target_option_val!(link_args - pre_link_args);
         target_option_val!(link_args - pre_link_args_crt);
         target_option_val!(pre_link_objects_exe);
@@ -1144,6 +1230,7 @@ impl ToJson for Target {
         target_option_val!(has_rpath);
         target_option_val!(no_default_libraries);
         target_option_val!(position_independent_executables);
+        target_option_val!(needs_plt);
         target_option_val!(relro_level);
         target_option_val!(archive_format);
         target_option_val!(allow_asm);
@@ -1154,6 +1241,7 @@ impl ToJson for Target {
         target_option_val!(no_integrated_as);
         target_option_val!(min_atomic_width);
         target_option_val!(max_atomic_width);
+        target_option_val!(atomic_cas);
         target_option_val!(panic_strategy);
         target_option_val!(crt_static_allows_dylibs);
         target_option_val!(crt_static_default);
@@ -1170,10 +1258,11 @@ impl ToJson for Target {
         target_option_val!(embed_bitcode);
         target_option_val!(emit_debug_gdb_scripts);
         target_option_val!(requires_uwtable);
+        target_option_val!(simd_types_indirect);
 
         if default.abi_blacklist != self.options.abi_blacklist {
             d.insert("abi-blacklist".to_string(), self.options.abi_blacklist.iter()
-                .map(Abi::name).map(|name| name.to_json())
+                .map(|&name| Abi::name(name).to_json())
                 .collect::<Vec<_>>().to_json());
         }
 
@@ -1212,9 +1301,9 @@ impl TargetTriple {
     ///
     /// If this target is a path, the file name (without extension) is returned.
     pub fn triple(&self) -> &str {
-        match self {
-            &TargetTriple::TargetTriple(ref triple) => triple,
-            &TargetTriple::TargetPath(ref path) => {
+        match *self {
+            TargetTriple::TargetTriple(ref triple) => triple,
+            TargetTriple::TargetPath(ref path) => {
                 path.file_stem().expect("target path must not be empty").to_str()
                     .expect("target path must be valid unicode")
             }
@@ -1230,7 +1319,7 @@ impl TargetTriple {
         use std::collections::hash_map::DefaultHasher;
 
         let triple = self.triple();
-        if let &TargetTriple::TargetPath(ref path) = self {
+        if let TargetTriple::TargetPath(ref path) = *self {
             let mut hasher = DefaultHasher::new();
             path.hash(&mut hasher);
             let hash = hasher.finish();

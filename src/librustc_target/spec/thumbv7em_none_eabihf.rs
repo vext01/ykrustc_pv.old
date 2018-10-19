@@ -18,7 +18,7 @@
 //
 // To opt into double precision hardware support, use the `-C target-feature=-fp-only-sp` flag.
 
-use spec::{LinkerFlavor, Target, TargetOptions, TargetResult};
+use spec::{LinkerFlavor, LldFlavor, Target, TargetOptions, TargetResult};
 
 pub fn target() -> TargetResult {
     Ok(Target {
@@ -29,9 +29,9 @@ pub fn target() -> TargetResult {
         data_layout: "e-m:e-p:32:32-i64:64-v128:64:128-a:0:32-n32-S64".to_string(),
         arch: "arm".to_string(),
         target_os: "none".to_string(),
-        target_env: "".to_string(),
-        target_vendor: "".to_string(),
-        linker_flavor: LinkerFlavor::Gcc,
+        target_env: String::new(),
+        target_vendor: String::new(),
+        linker_flavor: LinkerFlavor::Lld(LldFlavor::Ld),
 
         options: TargetOptions {
             // `+vfp4` is the lowest common denominator between the Cortex-M4 (vfp4-16) and the

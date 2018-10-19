@@ -8,6 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(dead_code)]
+#![allow(illegal_floating_point_literal_pattern)]
+
 #[repr(u32)]
 enum Tag { I, F }
 

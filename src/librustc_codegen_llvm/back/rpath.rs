@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::collections::HashSet;
+use rustc_data_structures::fx::FxHashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -22,7 +22,7 @@ pub struct RPathConfig<'a> {
     pub is_like_osx: bool,
     pub has_rpath: bool,
     pub linker_is_gnu: bool,
-    pub get_install_prefix_lib_path: &'a mut FnMut() -> PathBuf,
+    pub get_install_prefix_lib_path: &'a mut dyn FnMut() -> PathBuf,
 }
 
 pub fn get_rpath_flags(config: &mut RPathConfig) -> Vec<String> {
@@ -114,8 +114,8 @@ fn get_rpath_relative_to_output(config: &mut RPathConfig, lib: &Path) -> String 
     let mut output = cwd.join(&config.out_filename);
     output.pop();
     let output = fs::canonicalize(&output).unwrap_or(output);
-    let relative = path_relative_from(&lib, &output)
-        .expect(&format!("couldn't create relative path from {:?} to {:?}", output, lib));
+    let relative = path_relative_from(&lib, &output).unwrap_or_else(||
+        panic!("couldn't create relative path from {:?} to {:?}", output, lib));
     // FIXME (#9639): This needs to handle non-utf8 paths
     format!("{}/{}", prefix,
             relative.to_str().expect("non-utf8 component in path"))
@@ -152,9 +152,7 @@ fn path_relative_from(path: &Path, base: &Path) -> Option<PathBuf> {
                 (Some(_), Some(b)) if b == Component::ParentDir => return None,
                 (Some(a), Some(_)) => {
                     comps.push(Component::ParentDir);
-                    for _ in itb {
-                        comps.push(Component::ParentDir);
-                    }
+                    comps.extend(itb.map(|_| Component::ParentDir));
                     comps.push(a);
                     comps.extend(ita.by_ref());
                     break;
@@ -174,7 +172,7 @@ fn get_install_prefix_rpath(config: &mut RPathConfig) -> String {
 }
 
 fn minimize_rpaths(rpaths: &[String]) -> Vec<String> {
-    let mut set = HashSet::new();
+    let mut set = FxHashSet::default();
     let mut minimized = Vec::new();
     for rpath in rpaths {
         if set.insert(rpath) {

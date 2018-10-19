@@ -16,7 +16,9 @@ pub fn target() -> Result<Target, String> {
                 vec!["-s".to_string(),
                      "ERROR_ON_UNDEFINED_SYMBOLS=1".to_string(),
                      "-s".to_string(),
-                     "ABORTING_MALLOC=0".to_string()]);
+                     "ABORTING_MALLOC=0".to_string(),
+                     "-s".to_string(),
+                     "WASM=0".to_string()]);
 
     let opts = TargetOptions {
         dynamic_linking: false,
@@ -38,7 +40,7 @@ pub fn target() -> Result<Target, String> {
         target_pointer_width: "32".to_string(),
         target_c_int_width: "32".to_string(),
         target_os: "emscripten".to_string(),
-        target_env: "".to_string(),
+        target_env: String::new(),
         target_vendor: "unknown".to_string(),
         data_layout: "e-p:32:32-i64:64-v128:32:128-n32-S128".to_string(),
         arch: "asmjs".to_string(),

@@ -21,7 +21,7 @@ use rustc_data_structures::stable_hasher::{HashStable, ToStableHashKey,
 use session::Session;
 use syntax::ast;
 use syntax::attr;
-use syntax::codemap::MultiSpan;
+use syntax::source_map::MultiSpan;
 use syntax::symbol::Symbol;
 use util::nodemap::FxHashMap;
 
@@ -53,7 +53,7 @@ impl LintLevelSets {
         return me
     }
 
-    pub fn builder(sess: &Session) -> LintLevelsBuilder {
+    pub fn builder(sess: &Session) -> LintLevelsBuilder<'_> {
         LintLevelsBuilder::new(sess, LintLevelSets::new(sess))
     }
 
@@ -117,6 +117,11 @@ impl LintLevelSets {
 
         // Ensure that we never exceed the `--cap-lints` argument.
         level = cmp::min(level, self.lint_cap);
+
+        if let Some(driver_level) = sess.driver_lint_caps.get(&LintId::of(lint)) {
+            // Ensure that we never exceed driver level.
+            level = cmp::min(*driver_level, level);
+        }
 
         return (level, src)
     }
@@ -221,8 +226,24 @@ impl<'a> LintLevelsBuilder<'a> {
                         continue
                     }
                 };
+                let tool_name = if let Some(lint_tool) = word.is_scoped() {
+                    if !attr::is_known_lint_tool(lint_tool) {
+                        span_err!(
+                            sess,
+                            lint_tool.span,
+                            E0710,
+                            "an unknown tool name found in scoped lint: `{}`",
+                            word.ident
+                        );
+                        continue;
+                    }
+
+                    Some(lint_tool.as_str())
+                } else {
+                    None
+                };
                 let name = word.name();
-                match store.check_lint_name(&name.as_str()) {
+                match store.check_lint_name(&name.as_str(), tool_name) {
                     CheckLintNameResult::Ok(ids) => {
                         let src = LintSource::Node(name, li.span);
                         for id in ids {
@@ -230,21 +251,78 @@ impl<'a> LintLevelsBuilder<'a> {
                         }
                     }
 
+                    CheckLintNameResult::Tool(result) => {
+                        match result {
+                            Ok(ids) => {
+                                let complete_name = &format!("{}::{}", tool_name.unwrap(), name);
+                                let src = LintSource::Node(Symbol::intern(complete_name), li.span);
+                                for id in ids {
+                                    specs.insert(*id, (level, src));
+                                }
+                            }
+                            Err((Some(ids), new_lint_name)) => {
+                                let lint = builtin::RENAMED_AND_REMOVED_LINTS;
+                                let (lvl, src) =
+                                    self.sets
+                                        .get_lint_level(lint, self.cur, Some(&specs), &sess);
+                                let msg = format!(
+                                    "lint name `{}` is deprecated \
+                                     and may not have an effect in the future. \
+                                     Also `cfg_attr(cargo-clippy)` won't be necessary anymore",
+                                    name
+                                );
+                                let mut err = lint::struct_lint_level(
+                                    self.sess,
+                                    lint,
+                                    lvl,
+                                    src,
+                                    Some(li.span.into()),
+                                    &msg,
+                                );
+                                err.span_suggestion_with_applicability(
+                                    li.span,
+                                    "change it to",
+                                    new_lint_name.to_string(),
+                                    Applicability::MachineApplicable,
+                                ).emit();
+
+                                let src = LintSource::Node(Symbol::intern(&new_lint_name), li.span);
+                                for id in ids {
+                                    specs.insert(*id, (level, src));
+                                }
+                            }
+                            Err((None, _)) => {
+                                // If Tool(Err(None, _)) is returned, then either the lint does not
+                                // exist in the tool or the code was not compiled with the tool and
+                                // therefore the lint was never added to the `LintStore`. To detect
+                                // this is the responsibility of the lint tool.
+                            }
+                        }
+                    }
+
                     _ if !self.warn_about_weird_lints => {}
 
-                    CheckLintNameResult::Warning(ref msg) => {
+                    CheckLintNameResult::Warning(msg, renamed) => {
                         let lint = builtin::RENAMED_AND_REMOVED_LINTS;
                         let (level, src) = self.sets.get_lint_level(lint,
                                                                     self.cur,
                                                                     Some(&specs),
                                                                     &sess);
-                        lint::struct_lint_level(self.sess,
-                                                lint,
-                                                level,
-                                                src,
-                                                Some(li.span.into()),
-                                                msg)
-                            .emit();
+                        let mut err = lint::struct_lint_level(self.sess,
+                                                              lint,
+                                                              level,
+                                                              src,
+                                                              Some(li.span.into()),
+                                                              &msg);
+                        if let Some(new_name) = renamed {
+                            err.span_suggestion_with_applicability(
+                                li.span,
+                                "use the new name",
+                                new_name,
+                                Applicability::MachineApplicable
+                            );
+                        }
+                        err.emit();
                     }
                     CheckLintNameResult::NoLint => {
                         let lint = builtin::UNKNOWN_LINTS;
@@ -262,7 +340,7 @@ impl<'a> LintLevelsBuilder<'a> {
                         if name.as_str().chars().any(|c| c.is_uppercase()) {
                             let name_lower = name.as_str().to_lowercase().to_string();
                             if let CheckLintNameResult::NoLint =
-                                    store.check_lint_name(&name_lower) {
+                                    store.check_lint_name(&name_lower, tool_name) {
                                 db.emit();
                             } else {
                                 db.span_suggestion_with_applicability(

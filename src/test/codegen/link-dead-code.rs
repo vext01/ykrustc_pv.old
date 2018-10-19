@@ -10,7 +10,6 @@
 
 // compile-flags:-Clink-dead-code
 
-#![feature(const_fn)]
 #![crate_type = "rlib"]
 
 // This test makes sure that, when -Clink-dead-code is specified, we generate

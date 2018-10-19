@@ -8,14 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+
 // revisions: normal nll
 //[nll] compile-flags:-Zborrowck=mir
 
 #![feature(fn_traits,
            step_trait,
            unboxed_closures,
-           copy_closures,
-           clone_closures
 )]
 
 //! Derived from: <https://raw.githubusercontent.com/quickfur/dcal/master/dcal.d>.

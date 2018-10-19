@@ -8,6 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused_must_use)]
+#![allow(dead_code)]
+#![allow(unused_variables)]
 // Test cleanup of rvalue temporary that occurs while `box` construction
 // is in progress. This scenario revealed a rather terrible bug.  The
 // ingredients are:
@@ -26,7 +29,6 @@
 
 // ignore-emscripten no threads support
 
-#![allow(unknown_features)]
 #![feature(box_syntax)]
 
 use std::thread;

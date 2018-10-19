@@ -10,7 +10,7 @@
 
 use hir;
 use ty::{self, Region, TyCtxt};
-use hir::map as hir_map;
+use hir::Node;
 use middle::resolve_lifetime as rl;
 use hir::intravisit::{self, NestedVisitorMap, Visitor};
 use infer::error_reporting::nice_region_error::NiceRegionError;
@@ -36,19 +36,19 @@ impl<'a, 'gcx, 'tcx> NiceRegionError<'a, 'gcx, 'tcx> {
         region: Region<'tcx>,
         br: &ty::BoundRegion,
     ) -> Option<(&hir::Ty, &hir::FnDecl)> {
-        if let Some(anon_reg) = self.is_suitable_region(region) {
+        if let Some(anon_reg) = self.tcx.is_suitable_region(region) {
             let def_id = anon_reg.def_id;
             if let Some(node_id) = self.tcx.hir.as_local_node_id(def_id) {
                 let fndecl = match self.tcx.hir.get(node_id) {
-                    hir_map::NodeItem(&hir::Item {
-                        node: hir::ItemFn(ref fndecl, ..),
+                    Node::Item(&hir::Item {
+                        node: hir::ItemKind::Fn(ref fndecl, ..),
                         ..
                     }) => &fndecl,
-                    hir_map::NodeTraitItem(&hir::TraitItem {
+                    Node::TraitItem(&hir::TraitItem {
                         node: hir::TraitItemKind::Method(ref m, ..),
                         ..
                     })
-                    | hir_map::NodeImplItem(&hir::ImplItem {
+                    | Node::ImplItem(&hir::ImplItem {
                         node: hir::ImplItemKind::Method(ref m, ..),
                         ..
                     }) => &m.decl,
@@ -77,7 +77,7 @@ impl<'a, 'gcx, 'tcx> NiceRegionError<'a, 'gcx, 'tcx> {
             tcx: self.tcx,
             bound_region: *br,
             found_type: None,
-            current_index: ty::DebruijnIndex::INNERMOST,
+            current_index: ty::INNERMOST,
         };
         nested_visitor.visit_ty(arg);
         nested_visitor.found_type
@@ -109,20 +109,20 @@ impl<'a, 'gcx, 'tcx> Visitor<'gcx> for FindNestedTypeVisitor<'a, 'gcx, 'tcx> {
 
     fn visit_ty(&mut self, arg: &'gcx hir::Ty) {
         match arg.node {
-            hir::TyBareFn(_) => {
+            hir::TyKind::BareFn(_) => {
                 self.current_index.shift_in(1);
                 intravisit::walk_ty(self, arg);
                 self.current_index.shift_out(1);
                 return;
             }
 
-            hir::TyTraitObject(ref bounds, _) => for bound in bounds {
+            hir::TyKind::TraitObject(ref bounds, _) => for bound in bounds {
                 self.current_index.shift_in(1);
                 self.visit_poly_trait_ref(bound, hir::TraitBoundModifier::None);
                 self.current_index.shift_out(1);
             },
 
-            hir::TyRptr(ref lifetime, _) => {
+            hir::TyKind::Rptr(ref lifetime, _) => {
                 // the lifetime of the TyRptr
                 let hir_id = self.tcx.hir.node_to_hir_id(lifetime.id);
                 match (self.tcx.named_region(hir_id), self.bound_region) {
@@ -190,8 +190,8 @@ impl<'a, 'gcx, 'tcx> Visitor<'gcx> for FindNestedTypeVisitor<'a, 'gcx, 'tcx> {
                     }
                 }
             }
-            // Checks if it is of type `hir::TyPath` which corresponds to a struct.
-            hir::TyPath(_) => {
+            // Checks if it is of type `hir::TyKind::Path` which corresponds to a struct.
+            hir::TyKind::Path(_) => {
                 let subvisitor = &mut TyPathVisitor {
                     tcx: self.tcx,
                     found_it: false,
@@ -213,7 +213,7 @@ impl<'a, 'gcx, 'tcx> Visitor<'gcx> for FindNestedTypeVisitor<'a, 'gcx, 'tcx> {
 }
 
 // The visitor captures the corresponding `hir::Ty` of the anonymous region
-// in the case of structs ie. `hir::TyPath`.
+// in the case of structs ie. `hir::TyKind::Path`.
 // This visitor would be invoked for each lifetime corresponding to a struct,
 // and would walk the types like Vec<Ref> in the above example and Ref looking for the HIR
 // where that lifetime appears. This allows us to highlight the

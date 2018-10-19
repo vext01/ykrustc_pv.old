@@ -19,12 +19,15 @@
        html_root_url = "https://doc.rust-lang.org/nightly/",
        test(attr(deny(warnings))))]
 
-#![feature(unicode_internals)]
+#![feature(crate_visibility_modifier)]
+#![feature(macro_at_most_once_rep)]
+#![feature(nll)]
+#![feature(rustc_attrs)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(slice_sort_by_cached_key)]
-#![feature(const_atomic_usize_new)]
-#![feature(rustc_attrs)]
 #![feature(str_escape)]
+#![feature(try_trait)]
+#![feature(unicode_internals)]
 
 #![recursion_limit="256"]
 
@@ -37,10 +40,15 @@ extern crate syntax_pos;
 extern crate rustc_data_structures;
 extern crate rustc_target;
 #[macro_use] extern crate scoped_tls;
+#[macro_use]
+extern crate smallvec;
 
 extern crate serialize as rustc_serialize; // used by deriving
 
 use rustc_data_structures::sync::Lock;
+use rustc_data_structures::bit_set::GrowableBitSet;
+pub use rustc_data_structures::thin_vec::ThinVec;
+use ast::AttrId;
 
 // A variant of 'try!' that panics on an Err. This is used as a crutch on the
 // way towards a non-panic!-prone parser. It should be used for fatal parsing
@@ -73,16 +81,18 @@ macro_rules! unwrap_or {
 }
 
 pub struct Globals {
-    used_attrs: Lock<Vec<u64>>,
-    known_attrs: Lock<Vec<u64>>,
+    used_attrs: Lock<GrowableBitSet<AttrId>>,
+    known_attrs: Lock<GrowableBitSet<AttrId>>,
     syntax_pos_globals: syntax_pos::Globals,
 }
 
 impl Globals {
     fn new() -> Globals {
         Globals {
-            used_attrs: Lock::new(Vec::new()),
-            known_attrs: Lock::new(Vec::new()),
+            // We have no idea how many attributes their will be, so just
+            // initiate the vectors with 0 bits. We'll grow them as necessary.
+            used_attrs: Lock::new(GrowableBitSet::new_empty()),
+            known_attrs: Lock::new(GrowableBitSet::new_empty()),
             syntax_pos_globals: syntax_pos::Globals::new(),
         }
     }
@@ -117,14 +127,13 @@ pub mod util {
     pub mod parser;
     #[cfg(test)]
     pub mod parser_testing;
-    pub mod small_vector;
     pub mod move_map;
-
-    mod thin_vec;
-    pub use self::thin_vec::ThinVec;
 
     mod rc_slice;
     pub use self::rc_slice::RcSlice;
+
+    mod rc_vec;
+    pub use self::rc_vec::RcVec;
 }
 
 pub mod json;
@@ -137,7 +146,7 @@ pub mod syntax {
 
 pub mod ast;
 pub mod attr;
-pub mod codemap;
+pub mod source_map;
 #[macro_use]
 pub mod config;
 pub mod entry;
@@ -176,6 +185,8 @@ pub mod ext {
         pub mod quoted;
     }
 }
+
+pub mod early_buffered_lints;
 
 #[cfg(test)]
 mod test_snippet;

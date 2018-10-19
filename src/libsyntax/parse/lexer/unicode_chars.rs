@@ -12,10 +12,10 @@
 // http://www.unicode.org/Public/security/10.0.0/confusables.txt
 
 use syntax_pos::{Span, NO_EXPANSION};
-use errors::DiagnosticBuilder;
+use errors::{Applicability, DiagnosticBuilder};
 use super::StringReader;
 
-const UNICODE_ARRAY: &'static [(char, &'static str, char)] = &[
+const UNICODE_ARRAY: &[(char, &str, char)] = &[
     (' ', "Line Separator", ' '),
     (' ', "Paragraph Separator", ' '),
     (' ', "Ogham Space mark", ' '),
@@ -333,7 +333,7 @@ const ASCII_ARRAY: &'static [(char, &'static str)] = &[
     ('=', "Equals Sign"),
     ('>', "Greater-Than Sign"), ];
 
-pub fn check_for_substitution<'a>(reader: &StringReader<'a>,
+crate fn check_for_substitution<'a>(reader: &StringReader<'a>,
                                   ch: char,
                                   err: &mut DiagnosticBuilder<'a>) -> bool {
     UNICODE_ARRAY
@@ -346,7 +346,11 @@ pub fn check_for_substitution<'a>(reader: &StringReader<'a>,
                 let msg =
                     format!("Unicode character '{}' ({}) looks like '{}' ({}), but it is not",
                             ch, u_name, ascii_char, ascii_name);
-                err.span_suggestion(span, &msg, ascii_char.to_string());
+                err.span_suggestion_with_applicability(
+                    span,
+                    &msg,
+                    ascii_char.to_string(),
+                    Applicability::MaybeIncorrect);
                 true
             },
             None => {

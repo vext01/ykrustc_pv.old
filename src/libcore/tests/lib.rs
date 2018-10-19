@@ -8,30 +8,24 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(ascii_ctype)]
 #![feature(box_syntax)]
 #![feature(cell_update)]
-#![feature(core_float)]
 #![feature(core_private_bignum)]
 #![feature(core_private_diy_float)]
 #![feature(dec2flt)]
-#![feature(decode_utf8)]
 #![feature(euclidean_division)]
 #![feature(exact_size_is_empty)]
 #![feature(fixed_size_array)]
-#![feature(float_internals)]
 #![feature(flt2dec)]
 #![feature(fmt_internals)]
 #![feature(hashmap_internals)]
-#![feature(iterator_step_by)]
-#![feature(iterator_flatten)]
-#![feature(iterator_repeat_with)]
+#![feature(impl_header_lifetime_elision)]
 #![feature(pattern)]
 #![feature(range_is_empty)]
 #![feature(raw)]
+#![feature(refcell_map_split)]
 #![feature(refcell_replace_swap)]
 #![feature(slice_patterns)]
-#![feature(slice_rotate)]
 #![feature(sort_internals)]
 #![feature(specialization)]
 #![feature(step_trait)]
@@ -40,12 +34,13 @@
 #![feature(trusted_len)]
 #![feature(try_from)]
 #![feature(try_trait)]
-#![feature(exact_chunks)]
-#![feature(slice_align_to)]
+#![feature(chunks_exact)]
 #![feature(align_offset)]
 #![feature(reverse_bits)]
-#![feature(iterator_find_map)]
+#![feature(inner_deref)]
 #![feature(slice_internals)]
+#![feature(slice_partition_dedup)]
+#![feature(copy_within)]
 
 extern crate core;
 extern crate test;
@@ -63,6 +58,7 @@ mod fmt;
 mod hash;
 mod intrinsics;
 mod iter;
+mod manually_drop;
 mod mem;
 mod nonzero;
 mod num;

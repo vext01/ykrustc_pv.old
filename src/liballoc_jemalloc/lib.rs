@@ -11,12 +11,12 @@
 #![no_std]
 #![allow(unused_attributes)]
 #![unstable(feature = "alloc_jemalloc",
-            reason = "this library is unlikely to be stabilized in its current \
-                      form or name",
-            issue = "27783")]
+            reason = "implementation detail of std, does not provide any public API",
+            issue = "0")]
 #![feature(core_intrinsics)]
 #![feature(libc)]
 #![feature(linkage)]
+#![feature(nll)]
 #![feature(staged_api)]
 #![feature(rustc_attrs)]
 #![cfg_attr(dummy_jemalloc, allow(dead_code, unused_extern_crates))]
@@ -89,7 +89,6 @@ mod contents {
     // linkage directives are provided as part of the current compiler allocator
     // ABI
 
-    #[no_mangle]
     #[rustc_std_internal_symbol]
     pub unsafe extern fn __rde_alloc(size: usize, align: usize) -> *mut u8 {
         let flags = align_to_flags(align, size);
@@ -97,7 +96,6 @@ mod contents {
         ptr
     }
 
-    #[no_mangle]
     #[rustc_std_internal_symbol]
     pub unsafe extern fn __rde_dealloc(ptr: *mut u8,
                                        size: usize,
@@ -106,7 +104,6 @@ mod contents {
         sdallocx(ptr as *mut c_void, size, flags);
     }
 
-    #[no_mangle]
     #[rustc_std_internal_symbol]
     pub unsafe extern fn __rde_realloc(ptr: *mut u8,
                                        _old_size: usize,
@@ -117,7 +114,6 @@ mod contents {
         ptr
     }
 
-    #[no_mangle]
     #[rustc_std_internal_symbol]
     pub unsafe extern fn __rde_alloc_zeroed(size: usize, align: usize) -> *mut u8 {
         let ptr = if align <= MIN_ALIGN && align <= size {

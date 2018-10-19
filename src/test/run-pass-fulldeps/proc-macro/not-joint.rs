@@ -10,8 +10,6 @@
 
 // aux-build:not-joint.rs
 
-#![feature(proc_macro)]
-
 extern crate not_joint as bar;
 use bar::{tokens, nothing};
 

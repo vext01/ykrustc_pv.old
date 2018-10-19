@@ -14,12 +14,12 @@ use rustc::hir;
 use rustc::hir::CodegenFnAttrFlags;
 use rustc::hir::def_id::DefId;
 
-use rustc_data_structures::bitvec::BitVector;
+use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 
 use rustc::mir::*;
 use rustc::mir::visit::*;
-use rustc::ty::{self, Instance, Ty, TyCtxt};
+use rustc::ty::{self, Instance, InstanceDef, Ty, TyCtxt};
 use rustc::ty::subst::{Subst,Substs};
 
 use std::collections::VecDeque;
@@ -94,18 +94,27 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
                 // Only consider direct calls to functions
                 let terminator = bb_data.terminator();
                 if let TerminatorKind::Call {
-                    func: Operand::Constant(ref f), .. } = terminator.kind {
-                        if let ty::TyFnDef(callee_def_id, substs) = f.ty.sty {
+                    func: ref op, .. } = terminator.kind {
+                        if let ty::FnDef(callee_def_id, substs) = op.ty(caller_mir, self.tcx).sty {
                             if let Some(instance) = Instance::resolve(self.tcx,
                                                                       param_env,
                                                                       callee_def_id,
                                                                       substs) {
-                                callsites.push_back(CallSite {
-                                    callee: instance.def_id(),
-                                    substs: instance.substs,
-                                    bb,
-                                    location: terminator.source_info
-                                });
+                                let is_virtual =
+                                    if let InstanceDef::Virtual(..) = instance.def {
+                                        true
+                                    } else {
+                                        false
+                                    };
+
+                                if !is_virtual {
+                                    callsites.push_back(CallSite {
+                                        callee: instance.def_id(),
+                                        substs: instance.substs,
+                                        bb,
+                                        location: terminator.source_info
+                                    });
+                                }
                             }
                         }
                     }
@@ -126,9 +135,8 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
                     continue;
                 }
 
-                let callee_mir = match self.tcx.try_get_query::<ty::queries::optimized_mir>(
-                                                                           callsite.location.span,
-                                                                           callsite.callee) {
+                let callee_mir = match self.tcx.try_optimized_mir(callsite.location.span,
+                                                                  callsite.callee) {
                     Ok(callee_mir) if self.should_inline(callsite, callee_mir) => {
                         self.tcx.subst_and_normalize_erasing_regions(
                             &callsite.substs,
@@ -159,7 +167,7 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
                     let terminator = bb_data.terminator();
                     if let TerminatorKind::Call {
                         func: Operand::Constant(ref f), .. } = terminator.kind {
-                        if let ty::TyFnDef(callee_def_id, substs) = f.ty.sty {
+                        if let ty::FnDef(callee_def_id, substs) = f.ty.sty {
                             // Don't inline the same function multiple times.
                             if callsite.callee != callee_def_id {
                                 callsites.push_back(CallSite {
@@ -272,7 +280,7 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
         // Traverse the MIR manually so we can account for the effects of
         // inlining on the CFG.
         let mut work_list = vec![START_BLOCK];
-        let mut visited = BitVector::new(callee_mir.basic_blocks().len());
+        let mut visited = BitSet::new_empty(callee_mir.basic_blocks().len());
         while let Some(bb) = work_list.pop() {
             if !visited.insert(bb.index()) { continue; }
             let blk = &callee_mir.basic_blocks()[bb];
@@ -315,7 +323,7 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
                 }
 
                 TerminatorKind::Call {func: Operand::Constant(ref f), .. } => {
-                    if let ty::TyFnDef(def_id, _) = f.ty.sty {
+                    if let ty::FnDef(def_id, _) = f.ty.sty {
                         // Don't give intrinsics the extra penalty for calls
                         let f = tcx.fn_sig(def_id);
                         if f.abi() == Abi::RustIntrinsic || f.abi() == Abi::PlatformIntrinsic {
@@ -407,10 +415,9 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
                     local_map.push(idx);
                 }
 
-                for p in callee_mir.promoted.iter().cloned() {
-                    let idx = caller_mir.promoted.push(p);
-                    promoted_map.push(idx);
-                }
+                promoted_map.extend(
+                    callee_mir.promoted.iter().cloned().map(|p| caller_mir.promoted.push(p))
+                );
 
                 // If the call is something like `a[*i] = f(i)`, where
                 // `i : &mut usize`, then just duplicating the `a[*i]`
@@ -449,7 +456,7 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
 
                     let stmt = Statement {
                         source_info: callsite.location,
-                        kind: StatementKind::Assign(tmp.clone(), dest)
+                        kind: StatementKind::Assign(tmp.clone(), box dest)
                     };
                     caller_mir[callsite.bb]
                         .statements.push(stmt);
@@ -540,7 +547,7 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
             assert!(args.next().is_none());
 
             let tuple = Place::Local(tuple);
-            let tuple_tys = if let ty::TyTuple(s) = tuple.ty(caller_mir, tcx).to_ty(tcx).sty {
+            let tuple_tys = if let ty::Tuple(s) = tuple.ty(caller_mir, tcx).to_ty(tcx).sty {
                 s
             } else {
                 bug!("Closure arguments are not passed as a tuple");
@@ -596,7 +603,7 @@ impl<'a, 'tcx> Inliner<'a, 'tcx> {
 
         let stmt = Statement {
             source_info: callsite.location,
-            kind: StatementKind::Assign(Place::Local(arg_tmp), arg),
+            kind: StatementKind::Assign(Place::Local(arg_tmp), box arg),
         };
         caller_mir[callsite.bb].statements.push(stmt);
         arg_tmp
@@ -663,11 +670,18 @@ impl<'a, 'tcx> MutVisitor<'tcx> for Integrator<'a, 'tcx> {
                     place: &mut Place<'tcx>,
                     _ctxt: PlaceContext<'tcx>,
                     _location: Location) {
-        if let Place::Local(RETURN_PLACE) = *place {
-            // Return pointer; update the place itself
-            *place = self.destination.clone();
-        } else {
-            self.super_place(place, _ctxt, _location);
+
+        match place {
+            Place::Local(RETURN_PLACE) => {
+                // Return pointer; update the place itself
+                *place = self.destination.clone();
+            },
+            Place::Promoted(ref mut promoted) => {
+                if let Some(p) = self.promoted_map.get(promoted.0).cloned() {
+                    promoted.0 = p;
+                }
+            },
+            _ => self.super_place(place, _ctxt, _location),
         }
     }
 
@@ -699,7 +713,7 @@ impl<'a, 'tcx> MutVisitor<'tcx> for Integrator<'a, 'tcx> {
                     *unwind = Some(self.update_target(tgt));
                 } else if !self.in_cleanup_block {
                     // Unless this drop is in a cleanup block, add an unwind edge to
-                    // the orignal call's cleanup block
+                    // the original call's cleanup block
                     *unwind = self.cleanup_block;
                 }
             }
@@ -711,7 +725,7 @@ impl<'a, 'tcx> MutVisitor<'tcx> for Integrator<'a, 'tcx> {
                     *cleanup = Some(self.update_target(tgt));
                 } else if !self.in_cleanup_block {
                     // Unless this call is in a cleanup block, add an unwind edge to
-                    // the orignal call's cleanup block
+                    // the original call's cleanup block
                     *cleanup = self.cleanup_block;
                 }
             }
@@ -721,7 +735,7 @@ impl<'a, 'tcx> MutVisitor<'tcx> for Integrator<'a, 'tcx> {
                     *cleanup = Some(self.update_target(tgt));
                 } else if !self.in_cleanup_block {
                     // Unless this assert is in a cleanup block, add an unwind edge to
-                    // the orignal call's cleanup block
+                    // the original call's cleanup block
                     *cleanup = self.cleanup_block;
                 }
             }
@@ -749,15 +763,5 @@ impl<'a, 'tcx> MutVisitor<'tcx> for Integrator<'a, 'tcx> {
 
     fn visit_source_scope(&mut self, scope: &mut SourceScope) {
         *scope = self.scope_map[*scope];
-    }
-
-    fn visit_literal(&mut self, literal: &mut Literal<'tcx>, loc: Location) {
-        if let Literal::Promoted { ref mut index } = *literal {
-            if let Some(p) = self.promoted_map.get(*index).cloned() {
-                *index = p;
-            }
-        } else {
-            self.super_literal(literal, loc);
-        }
     }
 }

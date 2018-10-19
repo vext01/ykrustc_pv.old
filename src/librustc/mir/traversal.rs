@@ -8,8 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use rustc_data_structures::bitvec::BitVector;
-use rustc_data_structures::indexed_vec::Idx;
+use rustc_data_structures::bit_set::BitSet;
 
 use super::*;
 
@@ -33,7 +32,7 @@ use super::*;
 #[derive(Clone)]
 pub struct Preorder<'a, 'tcx: 'a> {
     mir: &'a Mir<'tcx>,
-    visited: BitVector,
+    visited: BitSet<BasicBlock>,
     worklist: Vec<BasicBlock>,
 }
 
@@ -43,7 +42,7 @@ impl<'a, 'tcx> Preorder<'a, 'tcx> {
 
         Preorder {
             mir,
-            visited: BitVector::new(mir.basic_blocks().len()),
+            visited: BitSet::new_empty(mir.basic_blocks().len()),
             worklist,
         }
     }
@@ -58,16 +57,14 @@ impl<'a, 'tcx> Iterator for Preorder<'a, 'tcx> {
 
     fn next(&mut self) -> Option<(BasicBlock, &'a BasicBlockData<'tcx>)> {
         while let Some(idx) = self.worklist.pop() {
-            if !self.visited.insert(idx.index()) {
+            if !self.visited.insert(idx) {
                 continue;
             }
 
             let data = &self.mir[idx];
 
             if let Some(ref term) = data.terminator {
-                for &succ in term.successors() {
-                    self.worklist.push(succ);
-                }
+                self.worklist.extend(term.successors());
             }
 
             return Some((idx, data));
@@ -107,7 +104,7 @@ impl<'a, 'tcx> ExactSizeIterator for Preorder<'a, 'tcx> {}
 /// A Postorder traversal of this graph is `D B C A` or `D C B A`
 pub struct Postorder<'a, 'tcx: 'a> {
     mir: &'a Mir<'tcx>,
-    visited: BitVector,
+    visited: BitSet<BasicBlock>,
     visit_stack: Vec<(BasicBlock, Successors<'a>)>
 }
 
@@ -115,7 +112,7 @@ impl<'a, 'tcx> Postorder<'a, 'tcx> {
     pub fn new(mir: &'a Mir<'tcx>, root: BasicBlock) -> Postorder<'a, 'tcx> {
         let mut po = Postorder {
             mir,
-            visited: BitVector::new(mir.basic_blocks().len()),
+            visited: BitSet::new_empty(mir.basic_blocks().len()),
             visit_stack: Vec::new()
         };
 
@@ -123,7 +120,7 @@ impl<'a, 'tcx> Postorder<'a, 'tcx> {
         let data = &po.mir[root];
 
         if let Some(ref term) = data.terminator {
-            po.visited.insert(root.index());
+            po.visited.insert(root);
             po.visit_stack.push((root, term.successors()));
             po.traverse_successor();
         }
@@ -174,7 +171,7 @@ impl<'a, 'tcx> Postorder<'a, 'tcx> {
         //      (A, [C])]
         //
         // Now that the top of the stack has no successors we can traverse, each item will
-        // be popped off during iteration until we get back to `A`. This yeilds [E, D, B].
+        // be popped off during iteration until we get back to `A`. This yields [E, D, B].
         //
         // When we yield `B` and call `traverse_successor`, we push `C` to the stack, but
         // since we've already visited `E`, that child isn't added to the stack. The last
@@ -190,8 +187,8 @@ impl<'a, 'tcx> Postorder<'a, 'tcx> {
                 break;
             };
 
-            if self.visited.insert(bb.index()) {
-                if let Some(ref term) = self.mir[bb].terminator {
+            if self.visited.insert(bb) {
+                if let Some(term) = &self.mir[bb].terminator {
                     self.visit_stack.push((bb, term.successors()));
                 }
             }

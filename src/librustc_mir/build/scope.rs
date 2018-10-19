@@ -95,7 +95,6 @@ use rustc::hir;
 use rustc::hir::def_id::LOCAL_CRATE;
 use rustc::mir::*;
 use syntax_pos::{Span};
-use rustc_data_structures::indexed_vec::Idx;
 use rustc_data_structures::fx::FxHashMap;
 
 #[derive(Debug)]
@@ -144,12 +143,12 @@ struct DropData<'tcx> {
     /// place to drop
     location: Place<'tcx>,
 
-    /// Whether this is a full value Drop, or just a StorageDead.
-    kind: DropKind
+    /// Whether this is a value Drop or a StorageDead.
+    kind: DropKind,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct CachedBlock {
+pub(crate) struct CachedBlock {
     /// The cached block for the cleanups-on-diverge path. This block
     /// contains code to run the current drop and all the preceding
     /// drops (i.e. those having lower index in Drop’s Scope drop
@@ -166,7 +165,7 @@ struct CachedBlock {
 }
 
 #[derive(Debug)]
-enum DropKind {
+pub(crate) enum DropKind {
     Value {
         cached_block: CachedBlock,
     },
@@ -540,12 +539,12 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     // ==============
     /// Finds the breakable scope for a given label. This is used for
     /// resolving `break` and `continue`.
-    pub fn find_breakable_scope(&mut self,
-                           span: Span,
-                           label: region::Scope)
-                           -> &mut BreakableScope<'tcx> {
+    pub fn find_breakable_scope(&self,
+                                span: Span,
+                                label: region::Scope)
+                                -> &BreakableScope<'tcx> {
         // find the loop-scope with the correct id
-        self.breakable_scopes.iter_mut()
+        self.breakable_scopes.iter()
             .rev()
             .filter(|breakable_scope| breakable_scope.region_scope == label)
             .next()
@@ -566,8 +565,8 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
         // The outermost scope (`scopes[0]`) will be the `CallSiteScope`.
         // We want `scopes[1]`, which is the `ParameterScope`.
         assert!(self.scopes.len() >= 2);
-        assert!(match self.scopes[1].region_scope.data() {
-            region::ScopeData::Arguments(_) => true,
+        assert!(match self.scopes[1].region_scope.data {
+            region::ScopeData::Arguments => true,
             _ => false,
         });
         self.scopes[1].region_scope
@@ -622,25 +621,58 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
         abortblk
     }
 
+    pub fn schedule_drop_storage_and_value(
+        &mut self,
+        span: Span,
+        region_scope: region::Scope,
+        place: &Place<'tcx>,
+        place_ty: Ty<'tcx>,
+    ) {
+        self.schedule_drop(
+            span, region_scope, place, place_ty,
+            DropKind::Storage,
+        );
+        self.schedule_drop(
+            span, region_scope, place, place_ty,
+            DropKind::Value {
+                cached_block: CachedBlock::default(),
+            },
+        );
+    }
+
     // Scheduling drops
     // ================
     /// Indicates that `place` should be dropped on exit from
     /// `region_scope`.
-    pub fn schedule_drop(&mut self,
-                         span: Span,
-                         region_scope: region::Scope,
-                         place: &Place<'tcx>,
-                         place_ty: Ty<'tcx>) {
+    ///
+    /// When called with `DropKind::Storage`, `place` should be a local
+    /// with an index higher than the current `self.arg_count`.
+    pub fn schedule_drop(
+        &mut self,
+        span: Span,
+        region_scope: region::Scope,
+        place: &Place<'tcx>,
+        place_ty: Ty<'tcx>,
+        drop_kind: DropKind,
+    ) {
         let needs_drop = self.hir.needs_drop(place_ty);
-        let drop_kind = if needs_drop {
-            DropKind::Value { cached_block: CachedBlock::default() }
-        } else {
-            // Only temps and vars need their storage dead.
-            match *place {
-                Place::Local(index) if index.index() > self.arg_count => DropKind::Storage,
-                _ => return
+        match drop_kind {
+            DropKind::Value { .. } => if !needs_drop { return },
+            DropKind::Storage => {
+                match *place {
+                    Place::Local(index) => if index.index() <= self.arg_count {
+                        span_bug!(
+                            span, "`schedule_drop` called with index {} and arg_count {}",
+                            index.index(),
+                            self.arg_count,
+                        )
+                    },
+                    _ => span_bug!(
+                        span, "`schedule_drop` called with non-`Local` place {:?}", place
+                    ),
+                }
             }
-        };
+        }
 
         for scope in self.scopes.iter_mut().rev() {
             let this_scope = scope.region_scope == region_scope;
@@ -699,7 +731,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 let region_scope_span = region_scope.span(self.hir.tcx(),
                                                           &self.hir.region_scope_tree);
                 // Attribute scope exit drops to scope's closing brace.
-                let scope_end = self.hir.tcx().sess.codemap().end_point(region_scope_span);
+                let scope_end = self.hir.tcx().sess.source_map().end_point(region_scope_span);
 
                 scope.drops.push(DropData {
                     span: scope_end,
@@ -895,24 +927,24 @@ fn build_scope_drops<'tcx>(cfg: &mut CFG<'tcx>,
                 });
                 block = next;
             }
-            DropKind::Storage => {}
-        }
+            DropKind::Storage => {
+                // We do not need to emit StorageDead for generator drops
+                if generator_drop {
+                    continue
+                }
 
-        // We do not need to emit StorageDead for generator drops
-        if generator_drop {
-            continue
-        }
-
-        // Drop the storage for both value and storage drops.
-        // Only temps and vars need their storage dead.
-        match drop_data.location {
-            Place::Local(index) if index.index() > arg_count => {
-                cfg.push(block, Statement {
-                    source_info,
-                    kind: StatementKind::StorageDead(index)
-                });
+                // Drop the storage for both value and storage drops.
+                // Only temps and vars need their storage dead.
+                match drop_data.location {
+                    Place::Local(index) if index.index() > arg_count => {
+                        cfg.push(block, Statement {
+                            source_info,
+                            kind: StatementKind::StorageDead(index)
+                        });
+                    }
+                    _ => unreachable!(),
+                }
             }
-            _ => continue
         }
     }
     block.unit()

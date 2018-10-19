@@ -12,12 +12,8 @@
 //!
 //! This library, provided by the standard distribution, provides the types
 //! consumed in the interfaces of procedurally defined macro definitions such as
-//! function-like macros `#[proc_macro]`, macro attribures `#[proc_macro_attribute]` and
+//! function-like macros `#[proc_macro]`, macro attributes `#[proc_macro_attribute]` and
 //! custom derive attributes`#[proc_macro_derive]`.
-//!
-//! Note that this crate is intentionally bare-bones currently.
-//! This functionality is intended to be expanded over time as more surface
-//! area for macro authors is stabilized.
 //!
 //! See [the book](../book/first-edition/procedural-macros.html) for more.
 
@@ -31,10 +27,12 @@
        test(no_crate_inject, attr(deny(warnings))),
        test(attr(allow(dead_code, deprecated, unused_variables, unused_mut))))]
 
+#![feature(nll)]
 #![feature(rustc_private)]
 #![feature(staged_api)]
 #![feature(lang_items)]
 #![feature(optin_builtin_traits)]
+#![feature(non_exhaustive)]
 
 #![recursion_limit="256"]
 
@@ -43,23 +41,25 @@ extern crate syntax_pos;
 extern crate rustc_errors;
 extern crate rustc_data_structures;
 
+#[unstable(feature = "proc_macro_internals", issue = "27812")]
+#[doc(hidden)]
+pub mod rustc;
+
 mod diagnostic;
 
-#[unstable(feature = "proc_macro", issue = "38356")]
-pub use diagnostic::{Diagnostic, Level};
+#[unstable(feature = "proc_macro_diagnostic", issue = "54140")]
+pub use diagnostic::{Diagnostic, Level, MultiSpan};
 
 use std::{ascii, fmt, iter};
+use std::path::PathBuf;
 use rustc_data_structures::sync::Lrc;
 use std::str::FromStr;
 
-use syntax::ast;
 use syntax::errors::DiagnosticBuilder;
 use syntax::parse::{self, token};
-use syntax::symbol::{keywords, Symbol};
-use syntax::tokenstream;
-use syntax::parse::lexer::{self, comments};
-use syntax_pos::{FileMap, Pos, SyntaxContext, FileName};
-use syntax_pos::hygiene::Mark;
+use syntax::symbol::Symbol;
+use syntax::tokenstream::{self, DelimSpan};
+use syntax_pos::{Pos, FileName};
 
 /// The main type provided by this crate, representing an abstract stream of
 /// tokens, or, more specifically, a sequence of token trees.
@@ -68,9 +68,6 @@ use syntax_pos::hygiene::Mark;
 ///
 /// This is both the input and output of `#[proc_macro]`, `#[proc_macro_attribute]`
 /// and `#[proc_macro_derive]` definitions.
-///
-/// The API of this type is intentionally bare-bones, but it'll be expanded over
-/// time!
 #[stable(feature = "proc_macro_lib", since = "1.15.0")]
 #[derive(Clone)]
 pub struct TokenStream(tokenstream::TokenStream);
@@ -94,13 +91,13 @@ impl !Sync for LexError {}
 
 impl TokenStream {
     /// Returns an empty `TokenStream` containing no token trees.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn new() -> TokenStream {
         TokenStream(tokenstream::TokenStream::empty())
     }
 
     /// Checks if this `TokenStream` is empty.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -109,6 +106,7 @@ impl TokenStream {
 /// Attempts to break the string into tokens and parse those tokens into a token stream.
 /// May fail for a number of reasons, for example, if the string contains unbalanced delimiters
 /// or characters not existing in the language.
+/// All tokens in the parsed stream get `Span::call_site()` spans.
 ///
 /// NOTE: Some errors may cause panics instead of returning `LexError`. We reserve the right to
 /// change these errors into `LexError`s later.
@@ -117,17 +115,10 @@ impl FromStr for TokenStream {
     type Err = LexError;
 
     fn from_str(src: &str) -> Result<TokenStream, LexError> {
-        __internal::with_sess(|(sess, mark)| {
-            let src = src.to_string();
-            let name = FileName::ProcMacroSourceCode;
-            let expn_info = mark.expn_info().unwrap();
-            let call_site = expn_info.call_site;
-            // notify the expansion info that it is unhygienic
-            let mark = Mark::fresh(mark);
-            mark.set_expn_info(expn_info);
-            let span = call_site.with_ctxt(SyntaxContext::empty().apply_mark(mark));
-            let stream = parse::parse_stream_from_source_str(name, src, sess, Some(span));
-            Ok(__internal::token_stream_wrap(stream))
+        __internal::with_sess(|sess, data| {
+            Ok(__internal::token_stream_wrap(parse::parse_stream_from_source_str(
+                FileName::ProcMacroSourceCode, src.to_string(), sess, Some(data.call_site.0)
+            )))
         })
     }
 }
@@ -151,8 +142,11 @@ impl fmt::Debug for TokenStream {
     }
 }
 
+#[unstable(feature = "proc_macro_quote", issue = "54722")]
+pub use quote::{quote, quote_span};
+
 /// Creates a token stream containing a single token tree.
-#[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl From<TokenTree> for TokenStream {
     fn from(tree: TokenTree) -> TokenStream {
         TokenStream(tree.to_internal())
@@ -160,7 +154,7 @@ impl From<TokenTree> for TokenStream {
 }
 
 /// Collects a number of token trees into a single stream.
-#[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl iter::FromIterator<TokenTree> for TokenStream {
     fn from_iter<I: IntoIterator<Item = TokenTree>>(trees: I) -> Self {
         trees.into_iter().map(TokenStream::from).collect()
@@ -180,25 +174,37 @@ impl iter::FromIterator<TokenStream> for TokenStream {
     }
 }
 
+#[stable(feature = "token_stream_extend", since = "1.30.0")]
+impl Extend<TokenTree> for TokenStream {
+    fn extend<I: IntoIterator<Item = TokenTree>>(&mut self, trees: I) {
+        self.extend(trees.into_iter().map(TokenStream::from));
+    }
+}
+
+#[stable(feature = "token_stream_extend", since = "1.30.0")]
+impl Extend<TokenStream> for TokenStream {
+    fn extend<I: IntoIterator<Item = TokenStream>>(&mut self, streams: I) {
+        self.0.extend(streams.into_iter().map(|stream| stream.0));
+    }
+}
+
 /// Public implementation details for the `TokenStream` type, such as iterators.
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 pub mod token_stream {
     use syntax::tokenstream;
-    use syntax_pos::DUMMY_SP;
-
     use {TokenTree, TokenStream, Delimiter};
 
     /// An iterator over `TokenStream`'s `TokenTree`s.
     /// The iteration is "shallow", e.g. the iterator doesn't recurse into delimited groups,
     /// and returns whole groups as token trees.
     #[derive(Clone)]
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub struct IntoIter {
         cursor: tokenstream::Cursor,
         stack: Vec<TokenTree>,
     }
 
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     impl Iterator for IntoIter {
         type Item = TokenTree;
 
@@ -214,7 +220,7 @@ pub mod token_stream {
                 // need to flattened during iteration over stream's token trees.
                 // Eventually this needs to be removed in favor of keeping original token trees
                 // and not doing the roundtrip through AST.
-                if tree.span().0 == DUMMY_SP {
+                if tree.span().0.is_dummy() {
                     if let TokenTree::Group(ref group) = tree {
                         if group.delimiter() == Delimiter::None {
                             self.cursor.insert(group.stream.clone().0);
@@ -227,7 +233,7 @@ pub mod token_stream {
         }
     }
 
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     impl IntoIterator for TokenStream {
         type Item = TokenTree;
         type IntoIter = IntoIter;
@@ -244,7 +250,9 @@ pub mod token_stream {
 ///
 /// Unquoting is done with `$`, and works by taking the single next ident as the unquoted term.
 /// To quote `$` itself, use `$$`.
-#[unstable(feature = "proc_macro", issue = "38356")]
+///
+/// This is a dummy macro, the actual implementation is in `quote::quote`.`
+#[unstable(feature = "proc_macro_quote", issue = "54722")]
 #[macro_export]
 macro_rules! quote { () => {} }
 
@@ -252,28 +260,21 @@ macro_rules! quote { () => {} }
 #[doc(hidden)]
 mod quote;
 
-/// Quote a `Span` into a `TokenStream`.
-/// This is needed to implement a custom quoter.
-#[unstable(feature = "proc_macro", issue = "38356")]
-pub fn quote_span(span: Span) -> TokenStream {
-    quote::Quote::quote(span)
-}
-
 /// A region of source code, along with macro expansion information.
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 #[derive(Copy, Clone)]
 pub struct Span(syntax_pos::Span);
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Send for Span {}
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Sync for Span {}
 
 macro_rules! diagnostic_method {
     ($name:ident, $level:expr) => (
         /// Create a new `Diagnostic` with the given `message` at the span
         /// `self`.
-        #[unstable(feature = "proc_macro", issue = "38356")]
+        #[unstable(feature = "proc_macro_diagnostic", issue = "54140")]
         pub fn $name<T: Into<String>>(self, message: T) -> Diagnostic {
             Diagnostic::spanned(self, $level, message)
         }
@@ -282,34 +283,31 @@ macro_rules! diagnostic_method {
 
 impl Span {
     /// A span that resolves at the macro definition site.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_def_site", issue = "54724")]
     pub fn def_site() -> Span {
-        ::__internal::with_sess(|(_, mark)| {
-            let call_site = mark.expn_info().unwrap().call_site;
-            Span(call_site.with_ctxt(SyntaxContext::empty().apply_mark(mark)))
-        })
+        ::__internal::with_sess(|_, data| data.def_site)
     }
 
     /// The span of the invocation of the current procedural macro.
     /// Identifiers created with this span will be resolved as if they were written
     /// directly at the macro call location (call-site hygiene) and other code
     /// at the macro call site will be able to refer to them as well.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn call_site() -> Span {
-        ::__internal::with_sess(|(_, mark)| Span(mark.expn_info().unwrap().call_site))
+        ::__internal::with_sess(|_, data| data.call_site)
     }
 
     /// The original source file into which this span points.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn source_file(&self) -> SourceFile {
         SourceFile {
-            filemap: __internal::lookup_char_pos(self.0.lo()).file,
+            source_file: __internal::lookup_char_pos(self.0.lo()).file,
         }
     }
 
     /// The `Span` for the tokens in the previous macro expansion from which
     /// `self` was generated from, if any.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn parent(&self) -> Option<Span> {
         self.0.parent().map(Span)
     }
@@ -317,13 +315,13 @@ impl Span {
     /// The span for the origin source code that `self` was generated from. If
     /// this `Span` wasn't generated from other macro expansions then the return
     /// value is the same as `*self`.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn source(&self) -> Span {
         Span(self.0.source_callsite())
     }
 
     /// Get the starting line/column in the source file for this span.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn start(&self) -> LineColumn {
         let loc = __internal::lookup_char_pos(self.0.lo());
         LineColumn {
@@ -333,7 +331,7 @@ impl Span {
     }
 
     /// Get the ending line/column in the source file for this span.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn end(&self) -> LineColumn {
         let loc = __internal::lookup_char_pos(self.0.hi());
         LineColumn {
@@ -345,7 +343,7 @@ impl Span {
     /// Create a new span encompassing `self` and `other`.
     ///
     /// Returns `None` if `self` and `other` are from different files.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn join(&self, other: Span) -> Option<Span> {
         let self_loc = __internal::lookup_char_pos(self.0.lo());
         let other_loc = __internal::lookup_char_pos(other.0.lo());
@@ -357,20 +355,20 @@ impl Span {
 
     /// Creates a new span with the same line/column information as `self` but
     /// that resolves symbols as though it were at `other`.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn resolved_at(&self, other: Span) -> Span {
         Span(self.0.with_ctxt(other.0.ctxt()))
     }
 
     /// Creates a new span with the same name resolution behavior as `self` but
     /// with the line/column information of `other`.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn located_at(&self, other: Span) -> Span {
         other.resolved_at(*self)
     }
 
     /// Compares to spans to see if they're equal.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn eq(&self, other: &Span) -> bool {
         self.0 == other.0
     }
@@ -382,7 +380,7 @@ impl Span {
 }
 
 /// Prints a span in a form convenient for debugging.
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl fmt::Debug for Span {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?} bytes({}..{})",
@@ -393,33 +391,33 @@ impl fmt::Debug for Span {
 }
 
 /// A line-column pair representing the start or end of a `Span`.
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[unstable(feature = "proc_macro_span", issue = "54725")]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct LineColumn {
     /// The 1-indexed line in the source file on which the span starts or ends (inclusive).
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub line: usize,
     /// The 0-indexed column (in UTF-8 characters) in the source file on which
     /// the span starts or ends (inclusive).
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub column: usize
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[unstable(feature = "proc_macro_span", issue = "54725")]
 impl !Send for LineColumn {}
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[unstable(feature = "proc_macro_span", issue = "54725")]
 impl !Sync for LineColumn {}
 
 /// The source file of a given `Span`.
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[unstable(feature = "proc_macro_span", issue = "54725")]
 #[derive(Clone)]
 pub struct SourceFile {
-    filemap: Lrc<FileMap>,
+    source_file: Lrc<syntax_pos::SourceFile>,
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[unstable(feature = "proc_macro_span", issue = "54725")]
 impl !Send for SourceFile {}
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[unstable(feature = "proc_macro_span", issue = "54725")]
 impl !Sync for SourceFile {}
 
 impl SourceFile {
@@ -427,85 +425,91 @@ impl SourceFile {
     ///
     /// ### Note
     /// If the code span associated with this `SourceFile` was generated by an external macro, this
-    /// may not be an actual path on the filesystem. Use [`is_real`] to check.
+    /// macro, this may not be an actual path on the filesystem. Use [`is_real`] to check.
     ///
     /// Also note that even if `is_real` returns `true`, if `--remap-path-prefix` was passed on
     /// the command line, the path as given may not actually be valid.
     ///
     /// [`is_real`]: #method.is_real
-    # [unstable(feature = "proc_macro", issue = "38356")]
-    pub fn path(&self) -> &FileName {
-        &self.filemap.name
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
+    pub fn path(&self) -> PathBuf {
+        match self.source_file.name {
+            FileName::Real(ref path) => path.clone(),
+            _ => PathBuf::from(self.source_file.name.to_string())
+        }
     }
 
     /// Returns `true` if this source file is a real source file, and not generated by an external
     /// macro's expansion.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
     pub fn is_real(&self) -> bool {
         // This is a hack until intercrate spans are implemented and we can have real source files
         // for spans generated in external macros.
         // https://github.com/rust-lang/rust/pull/43604#issuecomment-333334368
-        self.filemap.is_real_file()
+        self.source_file.is_real_file()
     }
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
-impl AsRef<FileName> for SourceFile {
-    fn as_ref(&self) -> &FileName {
-        self.path()
-    }
-}
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[unstable(feature = "proc_macro_span", issue = "54725")]
 impl fmt::Debug for SourceFile {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("SourceFile")
-            .field("path", self.path())
+            .field("path", &self.path())
             .field("is_real", &self.is_real())
             .finish()
     }
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[unstable(feature = "proc_macro_span", issue = "54725")]
 impl PartialEq for SourceFile {
     fn eq(&self, other: &Self) -> bool {
-        Lrc::ptr_eq(&self.filemap, &other.filemap)
+        Lrc::ptr_eq(&self.source_file, &other.source_file)
     }
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[unstable(feature = "proc_macro_span", issue = "54725")]
 impl Eq for SourceFile {}
 
-#[unstable(feature = "proc_macro", issue = "38356")]
-impl PartialEq<FileName> for SourceFile {
-    fn eq(&self, other: &FileName) -> bool {
-        self.as_ref() == other
-    }
-}
-
 /// A single token or a delimited sequence of token trees (e.g. `[1, (), ..]`).
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 #[derive(Clone)]
 pub enum TokenTree {
     /// A token stream surrounded by bracket delimiters.
-    Group(Group),
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+    Group(
+        #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+        Group
+    ),
     /// An identifier.
-    Ident(Ident),
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+    Ident(
+        #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+        Ident
+    ),
     /// A single punctuation character (`+`, `,`, `$`, etc.).
-    Punct(Punct),
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+    Punct(
+        #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+        Punct
+    ),
     /// A literal character (`'a'`), string (`"hello"`), number (`2.3`), etc.
-    Literal(Literal),
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+    Literal(
+        #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+        Literal
+    ),
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Send for TokenTree {}
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Sync for TokenTree {}
 
 impl TokenTree {
     /// Returns the span of this tree, delegating to the `span` method of
     /// the contained token or a delimited stream.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn span(&self) -> Span {
         match *self {
             TokenTree::Group(ref t) => t.span(),
@@ -520,7 +524,7 @@ impl TokenTree {
     /// Note that if this token is a `Group` then this method will not configure
     /// the span of each of the internal tokens, this will simply delegate to
     /// the `set_span` method of each variant.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn set_span(&mut self, span: Span) {
         match *self {
             TokenTree::Group(ref mut t) => t.set_span(span),
@@ -532,7 +536,7 @@ impl TokenTree {
 }
 
 /// Prints token treee in a form convenient for debugging.
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl fmt::Debug for TokenTree {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Each of these has the name in the struct type in the derived debug,
@@ -546,28 +550,28 @@ impl fmt::Debug for TokenTree {
     }
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl From<Group> for TokenTree {
     fn from(g: Group) -> TokenTree {
         TokenTree::Group(g)
     }
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl From<Ident> for TokenTree {
     fn from(g: Ident) -> TokenTree {
         TokenTree::Ident(g)
     }
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl From<Punct> for TokenTree {
     fn from(g: Punct) -> TokenTree {
         TokenTree::Punct(g)
     }
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl From<Literal> for TokenTree {
     fn from(g: Literal) -> TokenTree {
         TokenTree::Literal(g)
@@ -577,7 +581,7 @@ impl From<Literal> for TokenTree {
 /// Prints the token tree as a string that is supposed to be losslessly convertible back
 /// into the same token tree (modulo spans), except for possibly `TokenTree::Group`s
 /// with `Delimiter::None` delimiters and negative numeric literals.
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl fmt::Display for TokenTree {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
@@ -592,34 +596,38 @@ impl fmt::Display for TokenTree {
 /// A delimited token stream.
 ///
 /// A `Group` internally contains a `TokenStream` which is surrounded by `Delimiter`s.
-#[derive(Clone, Debug)]
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[derive(Clone)]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 pub struct Group {
     delimiter: Delimiter,
     stream: TokenStream,
-    span: Span,
+    span: DelimSpan,
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Send for Group {}
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Sync for Group {}
 
 /// Describes how a sequence of token trees is delimited.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 pub enum Delimiter {
     /// `( ... )`
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     Parenthesis,
     /// `{ ... }`
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     Brace,
     /// `[ ... ]`
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     Bracket,
     /// `Ø ... Ø`
     /// An implicit delimiter, that may, for example, appear around tokens coming from a
     /// "macro variable" `$var`. It is important to preserve operator priorities in cases like
     /// `$var * 3` where `$var` is `1 + 2`.
     /// Implicit delimiters may not survive roundtrip of a token stream through a string.
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     None,
 }
 
@@ -629,17 +637,17 @@ impl Group {
     /// This constructor will set the span for this group to
     /// `Span::call_site()`. To change the span you can use the `set_span`
     /// method below.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn new(delimiter: Delimiter, stream: TokenStream) -> Group {
         Group {
             delimiter: delimiter,
             stream: stream,
-            span: Span::call_site(),
+            span: DelimSpan::from_single(Span::call_site().0),
         }
     }
 
     /// Returns the delimiter of this `Group`
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn delimiter(&self) -> Delimiter {
         self.delimiter
     }
@@ -648,16 +656,43 @@ impl Group {
     ///
     /// Note that the returned token stream does not include the delimiter
     /// returned above.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn stream(&self) -> TokenStream {
         self.stream.clone()
     }
 
     /// Returns the span for the delimiters of this token stream, spanning the
     /// entire `Group`.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    ///
+    /// ```text
+    /// pub fn span(&self) -> Span {
+    ///            ^^^^^^^
+    /// ```
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn span(&self) -> Span {
-        self.span
+        Span(self.span.entire())
+    }
+
+    /// Returns the span pointing to the opening delimiter of this group.
+    ///
+    /// ```text
+    /// pub fn span_open(&self) -> Span {
+    ///                 ^
+    /// ```
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
+    pub fn span_open(&self) -> Span {
+        Span(self.span.open)
+    }
+
+    /// Returns the span pointing to the closing delimiter of this group.
+    ///
+    /// ```text
+    /// pub fn span_close(&self) -> Span {
+    ///                        ^
+    /// ```
+    #[unstable(feature = "proc_macro_span", issue = "54725")]
+    pub fn span_close(&self) -> Span {
+        Span(self.span.close)
     }
 
     /// Configures the span for this `Group`'s delimiters, but not its internal
@@ -666,19 +701,30 @@ impl Group {
     /// This method will **not** set the span of all the internal tokens spanned
     /// by this group, but rather it will only set the span of the delimiter
     /// tokens at the level of the `Group`.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn set_span(&mut self, span: Span) {
-        self.span = span;
+        self.span = DelimSpan::from_single(span.0);
     }
 }
 
 /// Prints the group as a string that should be losslessly convertible back
 /// into the same group (modulo spans), except for possibly `TokenTree::Group`s
 /// with `Delimiter::None` delimiters.
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl fmt::Display for Group {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         TokenStream::from(TokenTree::from(self.clone())).fmt(f)
+    }
+}
+
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+impl fmt::Debug for Group {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Group")
+            .field("delimiter", &self.delimiter())
+            .field("stream", &self.stream())
+            .field("span", &self.span())
+            .finish()
     }
 }
 
@@ -686,28 +732,30 @@ impl fmt::Display for Group {
 ///
 /// Multicharacter operators like `+=` are represented as two instances of `Punct` with different
 /// forms of `Spacing` returned.
-#[unstable(feature = "proc_macro", issue = "38356")]
-#[derive(Clone, Debug)]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+#[derive(Clone)]
 pub struct Punct {
     ch: char,
     spacing: Spacing,
     span: Span,
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Send for Punct {}
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Sync for Punct {}
 
 /// Whether an `Punct` is followed immediately by another `Punct` or
 /// followed by another token or whitespace.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 pub enum Spacing {
     /// E.g. `+` is `Alone` in `+ =`, `+ident` or `+()`.
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     Alone,
     /// E.g. `+` is `Joint` in `+=` or `'#`.
     /// Additionally, single quote `'` can join with identifiers to form lifetimes `'ident`.
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     Joint,
 }
 
@@ -718,7 +766,7 @@ impl Punct {
     ///
     /// The returned `Punct` will have the default span of `Span::call_site()`
     /// which can be further configured with the `set_span` method below.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn new(ch: char, spacing: Spacing) -> Punct {
         const LEGAL_CHARS: &[char] = &['=', '<', '>', '!', '~', '+', '-', '*', '/', '%', '^',
                                        '&', '|', '@', '.', ',', ';', ':', '#', '$', '?', '\''];
@@ -733,7 +781,7 @@ impl Punct {
     }
 
     /// Returns the value of this punctuation character as `char`.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn as_char(&self) -> char {
         self.ch
     }
@@ -742,19 +790,19 @@ impl Punct {
     /// followed by another `Punct` in the token stream, so they can potentially be combined into
     /// a multicharacter operator (`Joint`), or it's followed by some other token or whitespace
     /// (`Alone`) so the operator has certainly ended.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn spacing(&self) -> Spacing {
         self.spacing
     }
 
     /// Returns the span for this punctuation character.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn span(&self) -> Span {
         self.span
     }
 
     /// Configure the span for this punctuation character.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn set_span(&mut self, span: Span) {
         self.span = span;
     }
@@ -762,28 +810,49 @@ impl Punct {
 
 /// Prints the punctuation character as a string that should be losslessly convertible
 /// back into the same character.
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl fmt::Display for Punct {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         TokenStream::from(TokenTree::from(self.clone())).fmt(f)
     }
 }
 
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+impl fmt::Debug for Punct {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Punct")
+            .field("ch", &self.as_char())
+            .field("spacing", &self.spacing())
+            .field("span", &self.span())
+            .finish()
+    }
+}
+
 /// An identifier (`ident`).
-#[derive(Clone, Debug)]
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[derive(Clone)]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 pub struct Ident {
     sym: Symbol,
     span: Span,
     is_raw: bool,
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Send for Ident {}
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Sync for Ident {}
 
 impl Ident {
+    fn is_valid(string: &str) -> bool {
+        let mut chars = string.chars();
+        if let Some(start) = chars.next() {
+            (start == '_' || start.is_xid_start())
+                && chars.all(|cont| cont == '_' || cont.is_xid_continue())
+        } else {
+            false
+        }
+    }
+
     /// Creates a new `Ident` with the given `string` as well as the specified
     /// `span`.
     /// The `string` argument must be a valid identifier permitted by the
@@ -803,39 +872,32 @@ impl Ident {
     ///
     /// Due to the current importance of hygiene this constructor, unlike other
     /// tokens, requires a `Span` to be specified at construction.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn new(string: &str, span: Span) -> Ident {
-        if !lexer::is_valid_ident(string) {
+        if !Ident::is_valid(string) {
             panic!("`{:?}` is not a valid identifier", string)
         }
-        Ident {
-            sym: Symbol::intern(string),
-            span,
-            is_raw: false,
-        }
+        Ident::new_maybe_raw(string, span, false)
     }
 
     /// Same as `Ident::new`, but creates a raw identifier (`r#ident`).
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[unstable(feature = "proc_macro_raw_ident", issue = "54723")]
     pub fn new_raw(string: &str, span: Span) -> Ident {
-        let mut ident = Ident::new(string, span);
-        if ident.sym == keywords::Underscore.name() ||
-           ast::Ident::with_empty_ctxt(ident.sym).is_path_segment_keyword() {
-            panic!("`{:?}` is not a valid raw identifier", string)
+        if !Ident::is_valid(string) {
+            panic!("`{:?}` is not a valid identifier", string)
         }
-        ident.is_raw = true;
-        ident
+        Ident::new_maybe_raw(string, span, true)
     }
 
     /// Returns the span of this `Ident`, encompassing the entire string returned
     /// by `as_str`.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn span(&self) -> Span {
         self.span
     }
 
     /// Configures the span of this `Ident`, possibly changing its hygiene context.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn set_span(&mut self, span: Span) {
         self.span = span;
     }
@@ -843,13 +905,20 @@ impl Ident {
 
 /// Prints the identifier as a string that should be losslessly convertible
 /// back into the same identifier.
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl fmt::Display for Ident {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.is_raw {
-            f.write_str("r#")?;
-        }
-        self.sym.as_str().fmt(f)
+        TokenStream::from(TokenTree::from(self.clone())).fmt(f)
+    }
+}
+
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
+impl fmt::Debug for Ident {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Ident")
+            .field("ident", &self.to_string())
+            .field("span", &self.span())
+            .finish()
     }
 }
 
@@ -857,17 +926,18 @@ impl fmt::Display for Ident {
 /// character (`'a'`), byte character (`b'a'`), an integer or floating point number
 /// with or without a suffix (`1`, `1u8`, `2.3`, `2.3f32`).
 /// Boolean literals like `true` and `false` do not belong here, they are `Ident`s.
+// FIXME(eddyb) `Literal` should not expose internal `Debug` impls.
 #[derive(Clone, Debug)]
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 pub struct Literal {
     lit: token::Lit,
-    suffix: Option<ast::Name>,
+    suffix: Option<Symbol>,
     span: Span,
 }
 
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Send for Literal {}
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl !Sync for Literal {}
 
 macro_rules! suffixed_int_literals {
@@ -883,7 +953,7 @@ macro_rules! suffixed_int_literals {
         /// Literals created through this method have the `Span::call_site()`
         /// span by default, which can be configured with the `set_span` method
         /// below.
-        #[unstable(feature = "proc_macro", issue = "38356")]
+        #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
         pub fn $name(n: $kind) -> Literal {
             Literal {
                 lit: token::Lit::Integer(Symbol::intern(&n.to_string())),
@@ -909,7 +979,7 @@ macro_rules! unsuffixed_int_literals {
         /// Literals created through this method have the `Span::call_site()`
         /// span by default, which can be configured with the `set_span` method
         /// below.
-        #[unstable(feature = "proc_macro", issue = "38356")]
+        #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
         pub fn $name(n: $kind) -> Literal {
             Literal {
                 lit: token::Lit::Integer(Symbol::intern(&n.to_string())),
@@ -963,7 +1033,7 @@ impl Literal {
     ///
     /// This function requires that the specified float is finite, for
     /// example if it is infinity or NaN this function will panic.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn f32_unsuffixed(n: f32) -> Literal {
         if !n.is_finite() {
             panic!("Invalid float literal {}", n);
@@ -988,7 +1058,7 @@ impl Literal {
     ///
     /// This function requires that the specified float is finite, for
     /// example if it is infinity or NaN this function will panic.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn f32_suffixed(n: f32) -> Literal {
         if !n.is_finite() {
             panic!("Invalid float literal {}", n);
@@ -1012,7 +1082,7 @@ impl Literal {
     ///
     /// This function requires that the specified float is finite, for
     /// example if it is infinity or NaN this function will panic.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn f64_unsuffixed(n: f64) -> Literal {
         if !n.is_finite() {
             panic!("Invalid float literal {}", n);
@@ -1037,7 +1107,7 @@ impl Literal {
     ///
     /// This function requires that the specified float is finite, for
     /// example if it is infinity or NaN this function will panic.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn f64_suffixed(n: f64) -> Literal {
         if !n.is_finite() {
             panic!("Invalid float literal {}", n);
@@ -1050,7 +1120,7 @@ impl Literal {
     }
 
     /// String literal.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn string(string: &str) -> Literal {
         let mut escaped = String::new();
         for ch in string.chars() {
@@ -1064,7 +1134,7 @@ impl Literal {
     }
 
     /// Character literal.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn character(ch: char) -> Literal {
         let mut escaped = String::new();
         escaped.extend(ch.escape_unicode());
@@ -1076,7 +1146,7 @@ impl Literal {
     }
 
     /// Byte string literal.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn byte_string(bytes: &[u8]) -> Literal {
         let string = bytes.iter().cloned().flat_map(ascii::escape_default)
             .map(Into::<char>::into).collect::<String>();
@@ -1088,13 +1158,13 @@ impl Literal {
     }
 
     /// Returns the span encompassing this literal.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn span(&self) -> Span {
         self.span
     }
 
     /// Configures the span associated for this literal.
-    #[unstable(feature = "proc_macro", issue = "38356")]
+    #[stable(feature = "proc_macro_lib2", since = "1.29.0")]
     pub fn set_span(&mut self, span: Span) {
         self.span = span;
     }
@@ -1102,240 +1172,10 @@ impl Literal {
 
 /// Prints the literal as a string that should be losslessly convertible
 /// back into the same literal (except for possible rounding for floating point literals).
-#[unstable(feature = "proc_macro", issue = "38356")]
+#[stable(feature = "proc_macro_lib2", since = "1.29.0")]
 impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         TokenStream::from(TokenTree::from(self.clone())).fmt(f)
-    }
-}
-
-impl Delimiter {
-    fn from_internal(delim: token::DelimToken) -> Delimiter {
-        match delim {
-            token::Paren => Delimiter::Parenthesis,
-            token::Brace => Delimiter::Brace,
-            token::Bracket => Delimiter::Bracket,
-            token::NoDelim => Delimiter::None,
-        }
-    }
-
-    fn to_internal(self) -> token::DelimToken {
-        match self {
-            Delimiter::Parenthesis => token::Paren,
-            Delimiter::Brace => token::Brace,
-            Delimiter::Bracket => token::Bracket,
-            Delimiter::None => token::NoDelim,
-        }
-    }
-}
-
-impl TokenTree {
-    fn from_internal(stream: tokenstream::TokenStream, stack: &mut Vec<TokenTree>)
-                -> TokenTree {
-        use syntax::parse::token::*;
-
-        let (tree, is_joint) = stream.as_tree();
-        let (span, token) = match tree {
-            tokenstream::TokenTree::Token(span, token) => (span, token),
-            tokenstream::TokenTree::Delimited(span, delimed) => {
-                let delimiter = Delimiter::from_internal(delimed.delim);
-                let mut g = Group::new(delimiter, TokenStream(delimed.tts.into()));
-                g.set_span(Span(span));
-                return g.into()
-            }
-        };
-
-        let op_kind = if is_joint { Spacing::Joint } else { Spacing::Alone };
-        macro_rules! tt {
-            ($e:expr) => ({
-                let mut x = TokenTree::from($e);
-                x.set_span(Span(span));
-                x
-            })
-        }
-        macro_rules! op {
-            ($a:expr) => (tt!(Punct::new($a, op_kind)));
-            ($a:expr, $b:expr) => ({
-                stack.push(tt!(Punct::new($b, op_kind)));
-                tt!(Punct::new($a, Spacing::Joint))
-            });
-            ($a:expr, $b:expr, $c:expr) => ({
-                stack.push(tt!(Punct::new($c, op_kind)));
-                stack.push(tt!(Punct::new($b, Spacing::Joint)));
-                tt!(Punct::new($a, Spacing::Joint))
-            })
-        }
-
-        match token {
-            Eq => op!('='),
-            Lt => op!('<'),
-            Le => op!('<', '='),
-            EqEq => op!('=', '='),
-            Ne => op!('!', '='),
-            Ge => op!('>', '='),
-            Gt => op!('>'),
-            AndAnd => op!('&', '&'),
-            OrOr => op!('|', '|'),
-            Not => op!('!'),
-            Tilde => op!('~'),
-            BinOp(Plus) => op!('+'),
-            BinOp(Minus) => op!('-'),
-            BinOp(Star) => op!('*'),
-            BinOp(Slash) => op!('/'),
-            BinOp(Percent) => op!('%'),
-            BinOp(Caret) => op!('^'),
-            BinOp(And) => op!('&'),
-            BinOp(Or) => op!('|'),
-            BinOp(Shl) => op!('<', '<'),
-            BinOp(Shr) => op!('>', '>'),
-            BinOpEq(Plus) => op!('+', '='),
-            BinOpEq(Minus) => op!('-', '='),
-            BinOpEq(Star) => op!('*', '='),
-            BinOpEq(Slash) => op!('/', '='),
-            BinOpEq(Percent) => op!('%', '='),
-            BinOpEq(Caret) => op!('^', '='),
-            BinOpEq(And) => op!('&', '='),
-            BinOpEq(Or) => op!('|', '='),
-            BinOpEq(Shl) => op!('<', '<', '='),
-            BinOpEq(Shr) => op!('>', '>', '='),
-            At => op!('@'),
-            Dot => op!('.'),
-            DotDot => op!('.', '.'),
-            DotDotDot => op!('.', '.', '.'),
-            DotDotEq => op!('.', '.', '='),
-            Comma => op!(','),
-            Semi => op!(';'),
-            Colon => op!(':'),
-            ModSep => op!(':', ':'),
-            RArrow => op!('-', '>'),
-            LArrow => op!('<', '-'),
-            FatArrow => op!('=', '>'),
-            Pound => op!('#'),
-            Dollar => op!('$'),
-            Question => op!('?'),
-            SingleQuote => op!('\''),
-
-            Ident(ident, false) => {
-                tt!(self::Ident::new(&ident.as_str(), Span(span)))
-            }
-            Ident(ident, true) => {
-                tt!(self::Ident::new_raw(&ident.as_str(), Span(span)))
-            }
-            Lifetime(ident) => {
-                let ident = ident.without_first_quote();
-                stack.push(tt!(self::Ident::new(&ident.as_str(), Span(span))));
-                tt!(Punct::new('\'', Spacing::Joint))
-            }
-            Literal(lit, suffix) => tt!(self::Literal { lit, suffix, span: Span(span) }),
-            DocComment(c) => {
-                let style = comments::doc_comment_style(&c.as_str());
-                let stripped = comments::strip_doc_comment_decoration(&c.as_str());
-                let stream = vec![
-                    tt!(self::Ident::new("doc", Span(span))),
-                    tt!(Punct::new('=', Spacing::Alone)),
-                    tt!(self::Literal::string(&stripped)),
-                ].into_iter().collect();
-                stack.push(tt!(Group::new(Delimiter::Bracket, stream)));
-                if style == ast::AttrStyle::Inner {
-                    stack.push(tt!(Punct::new('!', Spacing::Alone)));
-                }
-                tt!(Punct::new('#', Spacing::Alone))
-            }
-
-            Interpolated(_) => {
-                __internal::with_sess(|(sess, _)| {
-                    let tts = token.interpolated_to_tokenstream(sess, span);
-                    tt!(Group::new(Delimiter::None, TokenStream(tts)))
-                })
-            }
-
-            DotEq => op!('.', '='),
-            OpenDelim(..) | CloseDelim(..) => unreachable!(),
-            Whitespace | Comment | Shebang(..) | Eof => unreachable!(),
-        }
-    }
-
-    fn to_internal(self) -> tokenstream::TokenStream {
-        use syntax::parse::token::*;
-        use syntax::tokenstream::{TokenTree, Delimited};
-
-        let (ch, kind, span) = match self {
-            self::TokenTree::Punct(tt) => (tt.as_char(), tt.spacing(), tt.span()),
-            self::TokenTree::Group(tt) => {
-                return TokenTree::Delimited(tt.span.0, Delimited {
-                    delim: tt.delimiter.to_internal(),
-                    tts: tt.stream.0.into(),
-                }).into();
-            },
-            self::TokenTree::Ident(tt) => {
-                let token = Ident(ast::Ident::new(tt.sym, tt.span.0), tt.is_raw);
-                return TokenTree::Token(tt.span.0, token).into();
-            }
-            self::TokenTree::Literal(self::Literal {
-                lit: Lit::Integer(ref a),
-                suffix,
-                span,
-            })
-                if a.as_str().starts_with("-") =>
-            {
-                let minus = BinOp(BinOpToken::Minus);
-                let integer = Symbol::intern(&a.as_str()[1..]);
-                let integer = Literal(Lit::Integer(integer), suffix);
-                let a = TokenTree::Token(span.0, minus);
-                let b = TokenTree::Token(span.0, integer);
-                return vec![a, b].into_iter().collect()
-            }
-            self::TokenTree::Literal(self::Literal {
-                lit: Lit::Float(ref a),
-                suffix,
-                span,
-            })
-                if a.as_str().starts_with("-") =>
-            {
-                let minus = BinOp(BinOpToken::Minus);
-                let float = Symbol::intern(&a.as_str()[1..]);
-                let float = Literal(Lit::Float(float), suffix);
-                let a = TokenTree::Token(span.0, minus);
-                let b = TokenTree::Token(span.0, float);
-                return vec![a, b].into_iter().collect()
-            }
-            self::TokenTree::Literal(tt) => {
-                let token = Literal(tt.lit, tt.suffix);
-                return TokenTree::Token(tt.span.0, token).into()
-            }
-        };
-
-        let token = match ch {
-            '=' => Eq,
-            '<' => Lt,
-            '>' => Gt,
-            '!' => Not,
-            '~' => Tilde,
-            '+' => BinOp(Plus),
-            '-' => BinOp(Minus),
-            '*' => BinOp(Star),
-            '/' => BinOp(Slash),
-            '%' => BinOp(Percent),
-            '^' => BinOp(Caret),
-            '&' => BinOp(And),
-            '|' => BinOp(Or),
-            '@' => At,
-            '.' => Dot,
-            ',' => Comma,
-            ';' => Semi,
-            ':' => Colon,
-            '#' => Pound,
-            '$' => Dollar,
-            '?' => Question,
-            '\'' => SingleQuote,
-            _ => unreachable!(),
-        };
-
-        let tree = TokenTree::Token(span.0, token);
-        match kind {
-            Spacing::Alone => tree.into(),
-            Spacing::Joint => tree.joint(),
-        }
     }
 }
 
@@ -1351,23 +1191,22 @@ impl TokenTree {
 #[unstable(feature = "proc_macro_internals", issue = "27812")]
 #[doc(hidden)]
 pub mod __internal {
-    pub use quote::{LiteralKind, SpannedSymbol, Quoter, unquote};
-
     use std::cell::Cell;
+    use std::ptr;
 
     use syntax::ast;
     use syntax::ext::base::ExtCtxt;
-    use syntax::ext::hygiene::Mark;
     use syntax::ptr::P;
     use syntax::parse::{self, ParseSess};
     use syntax::parse::token::{self, Token};
     use syntax::tokenstream;
     use syntax_pos::{BytePos, Loc, DUMMY_SP};
+    use syntax_pos::hygiene::{SyntaxContext, Transparency};
 
-    use super::{TokenStream, LexError};
+    use super::{TokenStream, LexError, Span};
 
     pub fn lookup_char_pos(pos: BytePos) -> Loc {
-        with_sess(|(sess, _)| sess.codemap().lookup_char_pos(pos))
+        with_sess(|sess, _| sess.source_map().lookup_char_pos(pos))
     }
 
     pub fn new_token_stream(item: P<ast::Item>) -> TokenStream {
@@ -1380,7 +1219,7 @@ pub mod __internal {
     }
 
     pub fn token_stream_parse_items(stream: TokenStream) -> Result<Vec<P<ast::Item>>, LexError> {
-        with_sess(move |(sess, _)| {
+        with_sess(move |sess, _| {
             let mut parser = parse::stream_to_parser(sess, stream.0);
             let mut items = Vec::new();
 
@@ -1411,16 +1250,30 @@ pub mod __internal {
                                     expand: fn(TokenStream) -> TokenStream);
     }
 
+    #[derive(Clone, Copy)]
+    pub struct ProcMacroData {
+        pub def_site: Span,
+        pub call_site: Span,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ProcMacroSess {
+        parse_sess: *const ParseSess,
+        data: ProcMacroData,
+    }
+
     // Emulate scoped_thread_local!() here essentially
     thread_local! {
-        static CURRENT_SESS: Cell<(*const ParseSess, Mark)> =
-            Cell::new((0 as *const _, Mark::root()));
+        static CURRENT_SESS: Cell<ProcMacroSess> = Cell::new(ProcMacroSess {
+            parse_sess: ptr::null(),
+            data: ProcMacroData { def_site: Span(DUMMY_SP), call_site: Span(DUMMY_SP) },
+        });
     }
 
     pub fn set_sess<F, R>(cx: &ExtCtxt, f: F) -> R
         where F: FnOnce() -> R
     {
-        struct Reset { prev: (*const ParseSess, Mark) }
+        struct Reset { prev: ProcMacroSess }
 
         impl Drop for Reset {
             fn drop(&mut self) {
@@ -1430,24 +1283,37 @@ pub mod __internal {
 
         CURRENT_SESS.with(|p| {
             let _reset = Reset { prev: p.get() };
-            p.set((cx.parse_sess, cx.current_expansion.mark));
+
+            // No way to determine def location for a proc macro right now, so use call location.
+            let location = cx.current_expansion.mark.expn_info().unwrap().call_site;
+            let to_span = |transparency| Span(location.with_ctxt(
+                SyntaxContext::empty().apply_mark_with_transparency(cx.current_expansion.mark,
+                                                                    transparency))
+            );
+            p.set(ProcMacroSess {
+                parse_sess: cx.parse_sess,
+                data: ProcMacroData {
+                    def_site: to_span(Transparency::Opaque),
+                    call_site: to_span(Transparency::Transparent),
+                },
+            });
             f()
         })
     }
 
     pub fn in_sess() -> bool
     {
-        let p = CURRENT_SESS.with(|p| p.get());
-        !p.0.is_null()
+        !CURRENT_SESS.with(|sess| sess.get()).parse_sess.is_null()
     }
 
     pub fn with_sess<F, R>(f: F) -> R
-        where F: FnOnce((&ParseSess, Mark)) -> R
+        where F: FnOnce(&ParseSess, &ProcMacroData) -> R
     {
-        let p = CURRENT_SESS.with(|p| p.get());
-        assert!(!p.0.is_null(), "proc_macro::__internal::with_sess() called \
-                                 before set_parse_sess()!");
-        f(unsafe { (&*p.0, p.1) })
+        let sess = CURRENT_SESS.with(|sess| sess.get());
+        if sess.parse_sess.is_null() {
+            panic!("procedural macro API is used outside of a procedural macro");
+        }
+        f(unsafe { &*sess.parse_sess }, &sess.data)
     }
 }
 

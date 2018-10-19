@@ -130,7 +130,7 @@ impl<'tcx> MirPatch<'tcx> {
     }
 
     pub fn add_assign(&mut self, loc: Location, place: Place<'tcx>, rv: Rvalue<'tcx>) {
-        self.add_statement(loc, StatementKind::Assign(place, rv));
+        self.add_statement(loc, StatementKind::Assign(place, box rv));
     }
 
     pub fn make_nop(&mut self, loc: Location) {
@@ -156,7 +156,7 @@ impl<'tcx> MirPatch<'tcx> {
         }
 
         let mut new_statements = self.new_statements;
-        new_statements.sort_by(|u,v| u.0.cmp(&v.0));
+        new_statements.sort_by_key(|s| s.0);
 
         let mut delta = 0;
         let mut last_bb = START_BLOCK;

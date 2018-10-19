@@ -20,10 +20,9 @@ use rustc::ty::TyCtxt;
 use rustc::ty::{RegionKind, RegionVid};
 use rustc::ty::RegionKind::ReScope;
 
-use rustc_data_structures::bitslice::BitwiseOperator;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::indexed_set::IdxSet;
-use rustc_data_structures::indexed_vec::IndexVec;
+use rustc_data_structures::bit_set::{BitSet, BitSetOperator};
+use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 use rustc_data_structures::sync::Lrc;
 
 use dataflow::{BitDenotation, BlockSets, InitialFlow};
@@ -53,56 +52,94 @@ pub struct Borrows<'a, 'gcx: 'tcx, 'tcx: 'a> {
     _nonlexical_regioncx: Rc<RegionInferenceContext<'tcx>>,
 }
 
-fn precompute_borrows_out_of_scope<'a, 'tcx>(
-    mir: &'a Mir<'tcx>,
+struct StackEntry {
+    bb: mir::BasicBlock,
+    lo: usize,
+    hi: usize,
+    first_part_only: bool
+}
+
+fn precompute_borrows_out_of_scope<'tcx>(
+    mir: &Mir<'tcx>,
     regioncx: &Rc<RegionInferenceContext<'tcx>>,
     borrows_out_of_scope_at_location: &mut FxHashMap<Location, Vec<BorrowIndex>>,
     borrow_index: BorrowIndex,
     borrow_region: RegionVid,
     location: Location,
 ) {
-    // Keep track of places we've locations to check and locations that we have checked.
-    let mut stack = vec![ location ];
-    let mut visited = FxHashSet();
-    visited.insert(location);
+    // We visit one BB at a time. The complication is that we may start in the
+    // middle of the first BB visited (the one containing `location`), in which
+    // case we may have to later on process the first part of that BB if there
+    // is a path back to its start.
 
-    debug!(
-        "borrow {:?} has region {:?} with value {:?}",
-        borrow_index,
-        borrow_region,
-        regioncx.region_value_str(borrow_region),
-    );
-    debug!("borrow {:?} starts at {:?}", borrow_index, location);
-    while let Some(location) = stack.pop() {
-        // If region does not contain a point at the location, then add to list and skip
-        // successor locations.
-        if !regioncx.region_contains_point(borrow_region, location) {
-            debug!("borrow {:?} gets killed at {:?}", borrow_index, location);
-            borrows_out_of_scope_at_location
-                .entry(location)
-                .or_insert(vec![])
-                .push(borrow_index);
-            continue;
+    // For visited BBs, we record the index of the first statement processed.
+    // (In fully processed BBs this index is 0.) Note also that we add BBs to
+    // `visited` once they are added to `stack`, before they are actually
+    // processed, because this avoids the need to look them up again on
+    // completion.
+    let mut visited = FxHashMap();
+    visited.insert(location.block, location.statement_index);
+
+    let mut stack = vec![];
+    stack.push(StackEntry {
+        bb: location.block,
+        lo: location.statement_index,
+        hi: mir[location.block].statements.len(),
+        first_part_only: false,
+    });
+
+    while let Some(StackEntry { bb, lo, hi, first_part_only }) = stack.pop() {
+        let mut finished_early = first_part_only;
+        for i in lo ..= hi {
+            let location = Location { block: bb, statement_index: i };
+            // If region does not contain a point at the location, then add to list and skip
+            // successor locations.
+            if !regioncx.region_contains(borrow_region, location) {
+                debug!("borrow {:?} gets killed at {:?}", borrow_index, location);
+                borrows_out_of_scope_at_location
+                    .entry(location)
+                    .or_default()
+                    .push(borrow_index);
+                finished_early = true;
+                break;
+            }
         }
 
-        let bb_data = &mir[location.block];
-        // If this is the last statement in the block, then add the
-        // terminator successors next.
-        if location.statement_index == bb_data.statements.len() {
-            // Add successors to locations to visit, if not visited before.
-            if let Some(ref terminator) = bb_data.terminator {
-                for block in terminator.successors() {
-                    let loc = block.start_location();
-                    if visited.insert(loc) {
-                        stack.push(loc);
-                    }
-                }
-            }
-        } else {
-            // Visit next statement in block.
-            let loc = location.successor_within_block();
-            if visited.insert(loc) {
-                stack.push(loc);
+        if !finished_early {
+            // Add successor BBs to the work list, if necessary.
+            let bb_data = &mir[bb];
+            assert!(hi == bb_data.statements.len());
+            for &succ_bb in bb_data.terminator.as_ref().unwrap().successors() {
+                visited.entry(succ_bb)
+                    .and_modify(|lo| {
+                        // `succ_bb` has been seen before. If it wasn't
+                        // fully processed, add its first part to `stack`
+                        // for processing.
+                        if *lo > 0 {
+                            stack.push(StackEntry {
+                                bb: succ_bb,
+                                lo: 0,
+                                hi: *lo - 1,
+                                first_part_only: true,
+                            });
+                        }
+                        // And update this entry with 0, to represent the
+                        // whole BB being processed.
+                        *lo = 0;
+                    })
+                    .or_insert_with(|| {
+                        // succ_bb hasn't been seen before. Add it to
+                        // `stack` for processing.
+                        stack.push(StackEntry {
+                            bb: succ_bb,
+                            lo: 0,
+                            hi: mir[succ_bb].statements.len(),
+                            first_part_only: false,
+                        });
+                        // Insert 0 for this BB, to represent the whole BB
+                        // being processed.
+                        0
+                    });
             }
         }
     }
@@ -115,11 +152,14 @@ impl<'a, 'gcx, 'tcx> Borrows<'a, 'gcx, 'tcx> {
         nonlexical_regioncx: Rc<RegionInferenceContext<'tcx>>,
         def_id: DefId,
         body_id: Option<hir::BodyId>,
-        borrow_set: &Rc<BorrowSet<'tcx>>
+        borrow_set: &Rc<BorrowSet<'tcx>>,
     ) -> Self {
         let scope_tree = tcx.region_scope_tree(def_id);
         let root_scope = body_id.map(|body_id| {
-            region::Scope::CallSite(tcx.hir.body(body_id).value.hir_id.local_id)
+            region::Scope {
+                id: tcx.hir.body(body_id).value.hir_id.local_id,
+                data: region::ScopeData::CallSite
+            }
         });
 
         let mut borrows_out_of_scope_at_location = FxHashMap();
@@ -168,9 +208,7 @@ impl<'a, 'gcx, 'tcx> Borrows<'a, 'gcx, 'tcx> {
         // region, then setting that gen-bit will override any
         // potential kill introduced here.
         if let Some(indices) = self.borrows_out_of_scope_at_location.get(&location) {
-            for index in indices {
-                sets.kill(&index);
-            }
+            sets.kill_all(indices);
         }
     }
 
@@ -191,7 +229,7 @@ impl<'a, 'gcx, 'tcx> BitDenotation for Borrows<'a, 'gcx, 'tcx> {
         self.borrow_set.borrows.len() * 2
     }
 
-    fn start_block_effect(&self, _entry_set: &mut IdxSet<BorrowIndex>) {
+    fn start_block_effect(&self, _entry_set: &mut BitSet<BorrowIndex>) {
         // no borrows of code region_scopes have been taken prior to
         // function execution, so this method has no effect on
         // `_sets`.
@@ -232,8 +270,14 @@ impl<'a, 'gcx, 'tcx> BitDenotation for Borrows<'a, 'gcx, 'tcx> {
                 // re-consider the current implementations of the
                 // propagate_call_return method.
 
-                if let mir::Rvalue::Ref(region, _, ref place) = *rhs {
-                    if place.is_unsafe_place(self.tcx, self.mir) { return; }
+                if let mir::Rvalue::Ref(region, _, ref place) = **rhs {
+                    if place.ignore_borrow(
+                        self.tcx,
+                        self.mir,
+                        &self.borrow_set.locals_state_at_exit,
+                    ) {
+                        return;
+                    }
                     let index = self.borrow_set.location_map.get(&location).unwrap_or_else(|| {
                         panic!("could not find BorrowIndex for location {:?}", location);
                     });
@@ -244,7 +288,7 @@ impl<'a, 'gcx, 'tcx> BitDenotation for Borrows<'a, 'gcx, 'tcx> {
                         debug!("Borrows::statement_effect_on_borrows \
                                 location: {:?} stmt: {:?} has empty region, killing {:?}",
                                location, stmt.kind, index);
-                        sets.kill(&index);
+                        sets.kill(*index);
                         return
                     } else {
                         debug!("Borrows::statement_effect_on_borrows location: {:?} stmt: {:?}",
@@ -254,18 +298,19 @@ impl<'a, 'gcx, 'tcx> BitDenotation for Borrows<'a, 'gcx, 'tcx> {
                     assert!(self.borrow_set.region_map.get(region).unwrap_or_else(|| {
                         panic!("could not find BorrowIndexs for region {:?}", region);
                     }).contains(&index));
-                    sets.gen(&index);
+                    sets.gen(*index);
 
                     // Issue #46746: Two-phase borrows handles
                     // stmts of form `Tmp = &mut Borrow` ...
                     match lhs {
+                        Place::Promoted(_) |
                         Place::Local(..) | Place::Static(..) => {} // okay
                         Place::Projection(..) => {
                             // ... can assign into projections,
                             // e.g. `box (&mut _)`. Current
                             // conservative solution: force
                             // immediate activation here.
-                            sets.gen(&index);
+                            sets.gen(*index);
                         }
                     }
                 }
@@ -291,11 +336,11 @@ impl<'a, 'gcx, 'tcx> BitDenotation for Borrows<'a, 'gcx, 'tcx> {
                 }
             }
 
-            mir::StatementKind::ReadForMatch(..) |
+            mir::StatementKind::FakeRead(..) |
             mir::StatementKind::SetDiscriminant { .. } |
             mir::StatementKind::StorageLive(..) |
             mir::StatementKind::Validate(..) |
-            mir::StatementKind::UserAssertTy(..) |
+            mir::StatementKind::AscribeUserType(..) |
             mir::StatementKind::Nop => {}
 
         }
@@ -335,7 +380,7 @@ impl<'a, 'gcx, 'tcx> BitDenotation for Borrows<'a, 'gcx, 'tcx> {
                             if *scope != root_scope &&
                                 self.scope_tree.is_subscope_of(*scope, root_scope)
                             {
-                                sets.kill(&borrow_index);
+                                sets.kill(borrow_index);
                             }
                         }
                     }
@@ -356,7 +401,7 @@ impl<'a, 'gcx, 'tcx> BitDenotation for Borrows<'a, 'gcx, 'tcx> {
     }
 
     fn propagate_call_return(&self,
-                             _in_out: &mut IdxSet<BorrowIndex>,
+                             _in_out: &mut BitSet<BorrowIndex>,
                              _call_bb: mir::BasicBlock,
                              _dest_bb: mir::BasicBlock,
                              _dest_place: &mir::Place) {
@@ -368,10 +413,10 @@ impl<'a, 'gcx, 'tcx> BitDenotation for Borrows<'a, 'gcx, 'tcx> {
     }
 }
 
-impl<'a, 'gcx, 'tcx> BitwiseOperator for Borrows<'a, 'gcx, 'tcx> {
+impl<'a, 'gcx, 'tcx> BitSetOperator for Borrows<'a, 'gcx, 'tcx> {
     #[inline]
-    fn join(&self, pred1: usize, pred2: usize) -> usize {
-        pred1 | pred2 // union effects of preds when computing reservations
+    fn join<T: Idx>(&self, inout_set: &mut BitSet<T>, in_set: &BitSet<T>) -> bool {
+        inout_set.union(in_set) // "maybe" means we union effects of both preds
     }
 }
 

@@ -8,11 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use ty::AdtKind;
-use ty::layout::{Align, Size};
-
+use rustc_target::abi::{Align, Size};
 use rustc_data_structures::fx::{FxHashSet};
-
 use std::cmp::{self, Ordering};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -36,16 +33,6 @@ pub struct FieldInfo {
     pub offset: u64,
     pub size: u64,
     pub align: u64,
-}
-
-impl From<AdtKind> for DataTypeKind {
-    fn from(kind: AdtKind) -> Self {
-        match kind {
-            AdtKind::Struct => DataTypeKind::Struct,
-            AdtKind::Enum => DataTypeKind::Enum,
-            AdtKind::Union => DataTypeKind::Union,
-        }
-    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -135,8 +122,8 @@ impl CodeStats {
                 let VariantInfo { ref name, kind: _, align: _, size, ref fields } = *variant_info;
                 let indent = if !struct_like {
                     let name = match name.as_ref() {
-                        Some(name) => format!("{}", name),
-                        None => format!("{}", i),
+                        Some(name) => name.to_owned(),
+                        None => i.to_string(),
                     };
                     println!("print-type-size {}variant `{}`: {} bytes",
                              indent, name, size - discr_size);

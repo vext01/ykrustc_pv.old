@@ -22,7 +22,6 @@ fn main() {
     if cfg!(feature = "backtrace") &&
         !target.contains("cloudabi") &&
         !target.contains("emscripten") &&
-        !target.contains("fuchsia") &&
         !target.contains("msvc") &&
         !target.contains("wasm32")
     {
@@ -68,13 +67,8 @@ fn main() {
         println!("cargo:rustc-link-lib=userenv");
         println!("cargo:rustc-link-lib=shell32");
     } else if target.contains("fuchsia") {
-        // use system-provided libbacktrace
-        if cfg!(feature = "backtrace") {
-            println!("cargo:rustc-link-lib=backtrace");
-        }
         println!("cargo:rustc-link-lib=zircon");
         println!("cargo:rustc-link-lib=fdio");
-        println!("cargo:rustc-link-lib=launchpad"); // for std::process
     } else if target.contains("cloudabi") {
         if cfg!(feature = "backtrace") {
             println!("cargo:rustc-link-lib=unwind");
@@ -103,6 +97,10 @@ fn build_libbacktrace(target: &str) -> Result<(), ()> {
         .file("../libbacktrace/sort.c")
         .file("../libbacktrace/state.c");
 
+    let any_debug = env::var("RUSTC_DEBUGINFO").unwrap_or(String::new()) == "true" ||
+        env::var("RUSTC_DEBUGINFO_LINES").unwrap_or(String::new()) == "true";
+    build.debug(any_debug);
+
     if target.contains("darwin") {
         build.file("../libbacktrace/macho.c");
     } else if target.contains("windows") {
@@ -110,7 +108,8 @@ fn build_libbacktrace(target: &str) -> Result<(), ()> {
     } else {
         build.file("../libbacktrace/elf.c");
 
-        if target.contains("64") {
+        let pointer_width = env::var("CARGO_CFG_TARGET_POINTER_WIDTH").unwrap();
+        if pointer_width == "64" {
             build.define("BACKTRACE_ELF_SIZE", "64");
         } else {
             build.define("BACKTRACE_ELF_SIZE", "32");
@@ -127,7 +126,8 @@ fn build_libbacktrace(target: &str) -> Result<(), ()> {
     if !target.contains("apple-ios") &&
        !target.contains("solaris") &&
        !target.contains("redox") &&
-       !target.contains("android") {
+       !target.contains("android") &&
+       !target.contains("haiku") {
         build.define("HAVE_DL_ITERATE_PHDR", "1");
     }
     build.define("_GNU_SOURCE", "1");

@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused_imports)]
 // ignore-cross-compile
 
 #![feature(quote, rustc_private)]
@@ -15,7 +16,7 @@
 extern crate syntax;
 extern crate syntax_pos;
 
-use syntax::codemap::FilePathMapping;
+use syntax::source_map::FilePathMapping;
 use syntax::print::pprust::*;
 use syntax::symbol::Symbol;
 use syntax_pos::DUMMY_SP;

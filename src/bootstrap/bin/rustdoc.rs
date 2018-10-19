@@ -35,8 +35,10 @@ fn main() {
     };
 
     let mut dylib_path = bootstrap::util::dylib_path();
-    dylib_path.insert(0, PathBuf::from(libdir));
+    dylib_path.insert(0, PathBuf::from(libdir.clone()));
 
+    //FIXME(misdreavus): once stdsimd uses cfg(rustdoc) instead of cfg(dox), remove the `--cfg dox`
+    //arguments here
     let mut cmd = Command::new(rustdoc);
     cmd.args(&args)
         .arg("--cfg")
@@ -69,6 +71,7 @@ fn main() {
 
     if verbose > 1 {
         eprintln!("rustdoc command: {:?}", cmd);
+        eprintln!("libdir: {:?}", libdir);
     }
 
     std::process::exit(match cmd.status() {

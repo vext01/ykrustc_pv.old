@@ -21,8 +21,7 @@ use self::metadata::{type_metadata, file_metadata, TypeMap};
 use self::source_loc::InternalDebugLocation::{self, UnknownLocation};
 
 use llvm;
-use llvm::{ModuleRef, ContextRef, ValueRef};
-use llvm::debuginfo::{DIFile, DIType, DIScope, DIBuilderRef, DISubprogram, DIArray, DIFlags};
+use llvm::debuginfo::{DIFile, DIType, DIScope, DIBuilder, DISubprogram, DIArray, DIFlags};
 use rustc::hir::CodegenFnAttrFlags;
 use rustc::hir::def_id::{DefId, CrateNum};
 use rustc::ty::subst::{Substs, UnpackedKind};
@@ -33,13 +32,14 @@ use builder::Builder;
 use monomorphize::Instance;
 use rustc::ty::{self, ParamEnv, Ty, InstanceDef};
 use rustc::mir;
-use rustc::session::config::{self, FullDebugInfo, LimitedDebugInfo, NoDebugInfo};
+use rustc::session::config::{self, DebugInfo};
 use rustc::util::nodemap::{DefIdMap, FxHashMap, FxHashSet};
+use rustc_data_structures::small_c_str::SmallCStr;
+use value::Value;
 
 use libc::c_uint;
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
-use std::ptr;
 
 use syntax_pos::{self, Span, Pos};
 use syntax::ast;
@@ -67,23 +67,31 @@ const DW_TAG_auto_variable: c_uint = 0x100;
 const DW_TAG_arg_variable: c_uint = 0x101;
 
 /// A context object for maintaining all state needed by the debuginfo module.
-pub struct CrateDebugContext<'tcx> {
-    llcontext: ContextRef,
-    llmod: ModuleRef,
-    builder: DIBuilderRef,
-    created_files: RefCell<FxHashMap<(Symbol, Symbol), DIFile>>,
-    created_enum_disr_types: RefCell<FxHashMap<(DefId, layout::Primitive), DIType>>,
+pub struct CrateDebugContext<'a, 'tcx> {
+    llcontext: &'a llvm::Context,
+    llmod: &'a llvm::Module,
+    builder: &'a mut DIBuilder<'a>,
+    created_files: RefCell<FxHashMap<(Symbol, Symbol), &'a DIFile>>,
+    created_enum_disr_types: RefCell<FxHashMap<(DefId, layout::Primitive), &'a DIType>>,
 
-    type_map: RefCell<TypeMap<'tcx>>,
-    namespace_map: RefCell<DefIdMap<DIScope>>,
+    type_map: RefCell<TypeMap<'a, 'tcx>>,
+    namespace_map: RefCell<DefIdMap<&'a DIScope>>,
 
     // This collection is used to assert that composite types (structs, enums,
     // ...) have their members only set once:
-    composite_types_completed: RefCell<FxHashSet<DIType>>,
+    composite_types_completed: RefCell<FxHashSet<&'a DIType>>,
 }
 
-impl<'tcx> CrateDebugContext<'tcx> {
-    pub fn new(llmod: ModuleRef) -> CrateDebugContext<'tcx> {
+impl Drop for CrateDebugContext<'a, 'tcx> {
+    fn drop(&mut self) {
+        unsafe {
+            llvm::LLVMRustDIBuilderDispose(&mut *(self.builder as *mut _));
+        }
+    }
+}
+
+impl<'a, 'tcx> CrateDebugContext<'a, 'tcx> {
+    pub fn new(llmod: &'a llvm::Module) -> Self {
         debug!("CrateDebugContext::new");
         let builder = unsafe { llvm::LLVMRustDIBuilderCreate(llmod) };
         // DIBuilder inherits context from the module, so we'd better use the same one
@@ -101,14 +109,14 @@ impl<'tcx> CrateDebugContext<'tcx> {
     }
 }
 
-pub enum FunctionDebugContext {
-    RegularContext(FunctionDebugContextData),
+pub enum FunctionDebugContext<'ll> {
+    RegularContext(FunctionDebugContextData<'ll>),
     DebugInfoDisabled,
     FunctionWithoutDebugInfo,
 }
 
-impl FunctionDebugContext {
-    pub fn get_ref<'a>(&'a self, span: Span) -> &'a FunctionDebugContextData {
+impl FunctionDebugContext<'ll> {
+    pub fn get_ref<'a>(&'a self, span: Span) -> &'a FunctionDebugContextData<'ll> {
         match *self {
             FunctionDebugContext::RegularContext(ref data) => data,
             FunctionDebugContext::DebugInfoDisabled => {
@@ -130,18 +138,18 @@ impl FunctionDebugContext {
     }
 }
 
-pub struct FunctionDebugContextData {
-    fn_metadata: DISubprogram,
+pub struct FunctionDebugContextData<'ll> {
+    fn_metadata: &'ll DISubprogram,
     source_locations_enabled: Cell<bool>,
     pub defining_crate: CrateNum,
 }
 
-pub enum VariableAccess<'a> {
+pub enum VariableAccess<'a, 'll> {
     // The llptr given is an alloca containing the variable's value
-    DirectVariable { alloca: ValueRef },
+    DirectVariable { alloca: &'ll Value },
     // The llptr given is an alloca containing the start of some pointer chain
     // leading to the variable's content.
-    IndirectVariable { alloca: ValueRef, address_operations: &'a [i64] }
+    IndirectVariable { alloca: &'ll Value, address_operations: &'a [i64] }
 }
 
 pub enum VariableKind {
@@ -167,7 +175,6 @@ pub fn finalize(cx: &CodegenCx) {
 
     unsafe {
         llvm::LLVMRustDIBuilderFinalize(DIB(cx));
-        llvm::LLVMRustDIBuilderDispose(DIB(cx));
         // Debuginfo generation in LLVM by default uses a higher
         // version of dwarf than macOS currently understands. We can
         // instruct LLVM to emit an older version of dwarf, however,
@@ -201,12 +208,14 @@ pub fn finalize(cx: &CodegenCx) {
 /// for debug info creation. The function may also return another variant of the
 /// FunctionDebugContext enum which indicates why no debuginfo should be created
 /// for the function.
-pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
-                                               instance: Instance<'tcx>,
-                                               sig: ty::FnSig<'tcx>,
-                                               llfn: ValueRef,
-                                               mir: &mir::Mir) -> FunctionDebugContext {
-    if cx.sess().opts.debuginfo == NoDebugInfo {
+pub fn create_function_debug_context(
+    cx: &CodegenCx<'ll, 'tcx>,
+    instance: Instance<'tcx>,
+    sig: ty::FnSig<'tcx>,
+    llfn: &'ll Value,
+    mir: &mir::Mir,
+) -> FunctionDebugContext<'ll> {
+    if cx.sess().opts.debuginfo == DebugInfo::None {
         return FunctionDebugContext::DebugInfoDisabled;
     }
 
@@ -219,7 +228,7 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
     let span = mir.span;
 
     // This can be the case for functions inlined from another crate
-    if span == syntax_pos::DUMMY_SP {
+    if span.is_dummy() {
         // FIXME(simulacrum): Probably can't happen; remove.
         return FunctionDebugContext::FunctionWithoutDebugInfo;
     }
@@ -257,7 +266,7 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
     let is_local_to_unit = is_node_local_to_unit(cx, def_id);
 
     let function_name = CString::new(name).unwrap();
-    let linkage_name = CString::new(linkage_name.to_string()).unwrap();
+    let linkage_name = SmallCStr::new(&linkage_name.as_str());
 
     let mut flags = DIFlags::FlagPrototyped;
 
@@ -270,7 +279,7 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
         }
         None => {}
     };
-    if cx.layout_of(sig.output()).abi == ty::layout::Abi::Uninhabited {
+    if cx.layout_of(sig.output()).abi.is_uninhabited() {
         flags = flags | DIFlags::FlagNoReturn;
     }
 
@@ -290,7 +299,7 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
             cx.sess().opts.optimize != config::OptLevel::No,
             llfn,
             template_parameters,
-            ptr::null_mut())
+            None)
     };
 
     // Initialize fn debug context (including scope map and namespace map)
@@ -302,9 +311,11 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
 
     return FunctionDebugContext::RegularContext(fn_debug_context);
 
-    fn get_function_signature<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
-                                        sig: ty::FnSig<'tcx>) -> DIArray {
-        if cx.sess().opts.debuginfo == LimitedDebugInfo {
+    fn get_function_signature(
+        cx: &CodegenCx<'ll, 'tcx>,
+        sig: ty::FnSig<'tcx>,
+    ) -> &'ll DIArray {
+        if cx.sess().opts.debuginfo == DebugInfo::Limited {
             return create_DIArray(DIB(cx), &[]);
         }
 
@@ -312,8 +323,8 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
 
         // Return type -- llvm::DIBuilder wants this at index 0
         signature.push(match sig.output().sty {
-            ty::TyTuple(ref tys) if tys.is_empty() => ptr::null_mut(),
-            _ => type_metadata(cx, sig.output(), syntax_pos::DUMMY_SP)
+            ty::Tuple(ref tys) if tys.is_empty() => None,
+            _ => Some(type_metadata(cx, sig.output(), syntax_pos::DUMMY_SP))
         });
 
         let inputs = if sig.abi == Abi::RustCall {
@@ -336,38 +347,40 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
             // already inaccurate due to ABI adjustments (see #42800).
             signature.extend(inputs.iter().map(|&t| {
                 let t = match t.sty {
-                    ty::TyArray(ct, _)
+                    ty::Array(ct, _)
                         if (ct == cx.tcx.types.u8) || cx.layout_of(ct).is_zst() => {
                         cx.tcx.mk_imm_ptr(ct)
                     }
                     _ => t
                 };
-                type_metadata(cx, t, syntax_pos::DUMMY_SP)
+                Some(type_metadata(cx, t, syntax_pos::DUMMY_SP))
             }));
         } else {
             signature.extend(inputs.iter().map(|t| {
-                type_metadata(cx, t, syntax_pos::DUMMY_SP)
+                Some(type_metadata(cx, t, syntax_pos::DUMMY_SP))
             }));
         }
 
         if sig.abi == Abi::RustCall && !sig.inputs().is_empty() {
-            if let ty::TyTuple(args) = sig.inputs()[sig.inputs().len() - 1].sty {
-                for &argument_type in args {
-                    signature.push(type_metadata(cx, argument_type, syntax_pos::DUMMY_SP));
-                }
+            if let ty::Tuple(args) = sig.inputs()[sig.inputs().len() - 1].sty {
+                signature.extend(
+                    args.iter().map(|argument_type| {
+                        Some(type_metadata(cx, argument_type, syntax_pos::DUMMY_SP))
+                    })
+                );
             }
         }
 
         return create_DIArray(DIB(cx), &signature[..]);
     }
 
-    fn get_template_parameters<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
-                                         generics: &ty::Generics,
-                                         substs: &Substs<'tcx>,
-                                         file_metadata: DIFile,
-                                         name_to_append_suffix_to: &mut String)
-                                         -> DIArray
-    {
+    fn get_template_parameters(
+        cx: &CodegenCx<'ll, 'tcx>,
+        generics: &ty::Generics,
+        substs: &Substs<'tcx>,
+        file_metadata: &'ll DIFile,
+        name_to_append_suffix_to: &mut String,
+    ) -> &'ll DIArray {
         if substs.types().next().is_none() {
             return create_DIArray(DIB(cx), &[]);
         }
@@ -388,23 +401,24 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
         name_to_append_suffix_to.push('>');
 
         // Again, only create type information if full debuginfo is enabled
-        let template_params: Vec<_> = if cx.sess().opts.debuginfo == FullDebugInfo {
+        let template_params: Vec<_> = if cx.sess().opts.debuginfo == DebugInfo::Full {
             let names = get_parameter_names(cx, generics);
             substs.iter().zip(names).filter_map(|(kind, name)| {
                 if let UnpackedKind::Type(ty) = kind.unpack() {
                     let actual_type = cx.tcx.normalize_erasing_regions(ParamEnv::reveal_all(), ty);
                     let actual_type_metadata =
                         type_metadata(cx, actual_type, syntax_pos::DUMMY_SP);
-                    let name = CString::new(name.as_str().as_bytes()).unwrap();
+                    let name = SmallCStr::new(&name.as_str());
                     Some(unsafe {
-                        llvm::LLVMRustDIBuilderCreateTemplateTypeParameter(
+                        Some(llvm::LLVMRustDIBuilderCreateTemplateTypeParameter(
                             DIB(cx),
-                            ptr::null_mut(),
+                            None,
                             name.as_ptr(),
                             actual_type_metadata,
                             file_metadata,
                             0,
-                            0)
+                            0,
+                        ))
                     })
                 } else {
                     None
@@ -427,9 +441,10 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
         names
     }
 
-    fn get_containing_scope<'cx, 'tcx>(cx: &CodegenCx<'cx, 'tcx>,
-                                        instance: Instance<'tcx>)
-                                        -> DIScope {
+    fn get_containing_scope(
+        cx: &CodegenCx<'ll, 'tcx>,
+        instance: Instance<'tcx>,
+    ) -> &'ll DIScope {
         // First, let's see if this is a method within an inherent impl. Because
         // if yes, we want to make the result subroutine DIE a child of the
         // subroutine's self-type.
@@ -445,7 +460,7 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
                 // Only "class" methods are generally understood by LLVM,
                 // so avoid methods on other types (e.g. `<*mut T>::null`).
                 match impl_self_ty.sty {
-                    ty::TyAdt(def, ..) if !def.is_box() => {
+                    ty::Adt(def, ..) if !def.is_box() => {
                         Some(type_metadata(cx, impl_self_ty, syntax_pos::DUMMY_SP))
                     }
                     _ => None
@@ -469,14 +484,16 @@ pub fn create_function_debug_context<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
     }
 }
 
-pub fn declare_local<'a, 'tcx>(bx: &Builder<'a, 'tcx>,
-                               dbg_context: &FunctionDebugContext,
-                               variable_name: ast::Name,
-                               variable_type: Ty<'tcx>,
-                               scope_metadata: DIScope,
-                               variable_access: VariableAccess,
-                               variable_kind: VariableKind,
-                               span: Span) {
+pub fn declare_local(
+    bx: &Builder<'a, 'll, 'tcx>,
+    dbg_context: &FunctionDebugContext<'ll>,
+    variable_name: ast::Name,
+    variable_type: Ty<'tcx>,
+    scope_metadata: &'ll DIScope,
+    variable_access: VariableAccess<'_, 'll>,
+    variable_kind: VariableKind,
+    span: Span,
+) {
     assert!(!dbg_context.get_ref(span).source_locations_enabled.get());
     let cx = bx.cx;
 
@@ -494,7 +511,7 @@ pub fn declare_local<'a, 'tcx>(bx: &Builder<'a, 'tcx>,
     };
     let align = cx.align_of(variable_type);
 
-    let name = CString::new(variable_name.as_str().as_bytes()).unwrap();
+    let name = SmallCStr::new(&variable_name.as_str());
     match (variable_access, &[][..]) {
         (DirectVariable { alloca }, address_operations) |
         (IndirectVariable {alloca, address_operations}, _) => {

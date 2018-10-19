@@ -15,9 +15,9 @@ use rustc::mir::visit::Visitor;
 use dataflow::BitDenotation;
 
 /// This calculates if any part of a MIR local could have previously been borrowed.
-/// This means that once a local has been borrowed, its bit will always be set
-/// from that point and onwards, even if the borrow ends. You could also think of this
-/// as computing the lifetimes of infinite borrows.
+/// This means that once a local has been borrowed, its bit will be set
+/// from that point and onwards, until we see a StorageDead statement for the local,
+/// at which points there is no memory associated with the local, so it cannot be borrowed.
 /// This is used to compute which locals are live during a yield expression for
 /// immovable generators.
 #[derive(Copy, Clone)]
@@ -43,16 +43,24 @@ impl<'a, 'tcx> BitDenotation for HaveBeenBorrowedLocals<'a, 'tcx> {
         self.mir.local_decls.len()
     }
 
-    fn start_block_effect(&self, _sets: &mut IdxSet<Local>) {
+    fn start_block_effect(&self, _sets: &mut BitSet<Local>) {
         // Nothing is borrowed on function entry
     }
 
     fn statement_effect(&self,
                         sets: &mut BlockSets<Local>,
                         loc: Location) {
+        let stmt = &self.mir[loc.block].statements[loc.statement_index];
+
         BorrowedLocalsVisitor {
             sets,
-        }.visit_statement(loc.block, &self.mir[loc.block].statements[loc.statement_index], loc);
+        }.visit_statement(loc.block, stmt, loc);
+
+        // StorageDead invalidates all borrows and raw pointers to a local
+        match stmt.kind {
+            StatementKind::StorageDead(l) => sets.kill(l),
+            _ => (),
+        }
     }
 
     fn terminator_effect(&self,
@@ -64,7 +72,7 @@ impl<'a, 'tcx> BitDenotation for HaveBeenBorrowedLocals<'a, 'tcx> {
     }
 
     fn propagate_call_return(&self,
-                             _in_out: &mut IdxSet<Local>,
+                             _in_out: &mut BitSet<Local>,
                              _call_bb: mir::BasicBlock,
                              _dest_bb: mir::BasicBlock,
                              _dest_place: &mir::Place) {
@@ -72,10 +80,10 @@ impl<'a, 'tcx> BitDenotation for HaveBeenBorrowedLocals<'a, 'tcx> {
     }
 }
 
-impl<'a, 'tcx> BitwiseOperator for HaveBeenBorrowedLocals<'a, 'tcx> {
+impl<'a, 'tcx> BitSetOperator for HaveBeenBorrowedLocals<'a, 'tcx> {
     #[inline]
-    fn join(&self, pred1: usize, pred2: usize) -> usize {
-        pred1 | pred2 // "maybe" means we union effects of both preds
+    fn join<T: Idx>(&self, inout_set: &mut BitSet<T>, in_set: &BitSet<T>) -> bool {
+        inout_set.union(in_set) // "maybe" means we union effects of both preds
     }
 }
 
@@ -93,6 +101,7 @@ struct BorrowedLocalsVisitor<'b, 'c: 'b> {
 fn find_local<'tcx>(place: &Place<'tcx>) -> Option<Local> {
     match *place {
         Place::Local(l) => Some(l),
+        Place::Promoted(_) |
         Place::Static(..) => None,
         Place::Projection(ref proj) => {
             match proj.elem {
@@ -109,7 +118,7 @@ impl<'tcx, 'b, 'c> Visitor<'tcx> for BorrowedLocalsVisitor<'b, 'c> {
                     location: Location) {
         if let Rvalue::Ref(_, _, ref place) = *rvalue {
             if let Some(local) = find_local(place) {
-                self.sets.gen(&local);
+                self.sets.gen(local);
             }
         }
 

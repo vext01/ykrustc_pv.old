@@ -18,8 +18,9 @@ use rustc::{infer, traits};
 use rustc::ty::{self, TyCtxt, TypeFoldable, Ty};
 use rustc::ty::adjustment::{Adjustment, Adjust, AllowTwoPhase, AutoBorrow, AutoBorrowMutability};
 use rustc_target::spec::abi;
-use syntax::symbol::Symbol;
+use syntax::ast::Ident;
 use syntax_pos::Span;
+use errors::Applicability;
 
 use rustc::hir;
 
@@ -95,13 +96,13 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
         // If the callee is a bare function or a closure, then we're all set.
         match adjusted_ty.sty {
-            ty::TyFnDef(..) | ty::TyFnPtr(_) => {
+            ty::FnDef(..) | ty::FnPtr(_) => {
                 let adjustments = autoderef.adjust_steps(Needs::None);
                 self.apply_adjustments(callee_expr, adjustments);
                 return Some(CallStep::Builtin(adjusted_ty));
             }
 
-            ty::TyClosure(def_id, substs) => {
+            ty::Closure(def_id, substs) => {
                 assert_eq!(def_id.krate, LOCAL_CRATE);
 
                 // Check whether this is a call to a closure where we
@@ -135,7 +136,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             // over the top. The simplest fix by far is to just ignore
             // this case and deref again, so we wind up with
             // `FnMut::call_mut(&mut *x, ())`.
-            ty::TyRef(..) if autoderef.step_count() == 0 => {
+            ty::Ref(..) if autoderef.step_count() == 0 => {
                 return None;
             }
 
@@ -157,42 +158,39 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                              MethodCallee<'tcx>)> {
         // Try the options that are least restrictive on the caller first.
         for &(opt_trait_def_id, method_name, borrow) in
-            &[(self.tcx.lang_items().fn_trait(), Symbol::intern("call"), true),
-              (self.tcx.lang_items().fn_mut_trait(), Symbol::intern("call_mut"), true),
-              (self.tcx.lang_items().fn_once_trait(), Symbol::intern("call_once"), false)] {
+            &[(self.tcx.lang_items().fn_trait(), Ident::from_str("call"), true),
+              (self.tcx.lang_items().fn_mut_trait(), Ident::from_str("call_mut"), true),
+              (self.tcx.lang_items().fn_once_trait(), Ident::from_str("call_once"), false)] {
             let trait_def_id = match opt_trait_def_id {
                 Some(def_id) => def_id,
                 None => continue,
             };
 
-            match self.lookup_method_in_trait(call_expr.span,
-                                              method_name,
-                                              trait_def_id,
-                                              adjusted_ty,
-                                              None) {
-                None => continue,
-                Some(ok) => {
-                    let method = self.register_infer_ok_obligations(ok);
-                    let mut autoref = None;
-                    if borrow {
-                        if let ty::TyRef(region, _, mutbl) = method.sig.inputs()[0].sty {
-                            let mutbl = match mutbl {
-                                hir::MutImmutable => AutoBorrowMutability::Immutable,
-                                hir::MutMutable => AutoBorrowMutability::Mutable {
-                                    // For initial two-phase borrow
-                                    // deployment, conservatively omit
-                                    // overloaded function call ops.
-                                    allow_two_phase_borrow: AllowTwoPhase::No,
-                                }
-                            };
-                            autoref = Some(Adjustment {
-                                kind: Adjust::Borrow(AutoBorrow::Ref(region, mutbl)),
-                                target: method.sig.inputs()[0]
-                            });
-                        }
+            if let Some(ok) = self.lookup_method_in_trait(call_expr.span,
+                                                          method_name,
+                                                          trait_def_id,
+                                                          adjusted_ty,
+                                                          None) {
+                let method = self.register_infer_ok_obligations(ok);
+                let mut autoref = None;
+                if borrow {
+                    if let ty::Ref(region, _, mutbl) = method.sig.inputs()[0].sty {
+                        let mutbl = match mutbl {
+                            hir::MutImmutable => AutoBorrowMutability::Immutable,
+                            hir::MutMutable => AutoBorrowMutability::Mutable {
+                                // For initial two-phase borrow
+                                // deployment, conservatively omit
+                                // overloaded function call ops.
+                                allow_two_phase_borrow: AllowTwoPhase::No,
+                            }
+                        };
+                        autoref = Some(Adjustment {
+                            kind: Adjust::Borrow(AutoBorrow::Ref(region, mutbl)),
+                            target: method.sig.inputs()[0]
+                        });
                     }
-                    return Some((autoref, method));
                 }
+                return Some((autoref, method));
             }
         }
 
@@ -206,15 +204,15 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                             expected: Expectation<'tcx>)
                             -> Ty<'tcx> {
         let (fn_sig, def_span) = match callee_ty.sty {
-            ty::TyFnDef(def_id, _) => {
+            ty::FnDef(def_id, _) => {
                 (callee_ty.fn_sig(self.tcx), self.tcx.hir.span_if_local(def_id))
             }
-            ty::TyFnPtr(sig) => (sig, None),
+            ty::FnPtr(sig) => (sig, None),
             ref t => {
                 let mut unit_variant = None;
-                if let &ty::TyAdt(adt_def, ..) = t {
+                if let &ty::Adt(adt_def, ..) = t {
                     if adt_def.is_enum() {
-                        if let hir::ExprCall(ref expr, _) = call_expr.node {
+                        if let hir::ExprKind::Call(ref expr, _) = call_expr.node {
                             unit_variant = Some(self.tcx.hir.node_to_pretty_string(expr.id))
                         }
                     }
@@ -234,14 +232,17 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 err.span_label(call_expr.span, "not a function");
 
                 if let Some(ref path) = unit_variant {
-                    err.span_suggestion(call_expr.span,
-                                        &format!("`{}` is a unit variant, you need to write it \
-                                                  without the parenthesis", path),
-                                        path.to_string());
+                    err.span_suggestion_with_applicability(
+                        call_expr.span,
+                        &format!("`{}` is a unit variant, you need to write it \
+                                  without the parenthesis", path),
+                        path.to_string(),
+                        Applicability::MachineApplicable
+                    );
                 }
 
-                if let hir::ExprCall(ref expr, _) = call_expr.node {
-                    let def = if let hir::ExprPath(ref qpath) = expr.node {
+                if let hir::ExprKind::Call(ref expr, _) = call_expr.node {
+                    let def = if let hir::ExprKind::Path(ref qpath) = expr.node {
                         self.tables.borrow().qpath_def(qpath, expr.hir_id)
                     } else {
                         Def::Err

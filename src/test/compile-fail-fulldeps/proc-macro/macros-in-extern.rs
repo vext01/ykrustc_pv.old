@@ -12,8 +12,6 @@
 // ignore-stage1
 // ignore-wasm32
 
-#![feature(proc_macro)]
-
 extern crate test_macros;
 
 use test_macros::{nop_attr, no_output, emit_input};
@@ -26,13 +24,13 @@ fn main() {
 #[link(name = "rust_test_helpers", kind = "static")]
 extern {
     #[no_output]
-    //~^ ERROR Macro and proc-macro invocations in `extern {}` blocks are experimental.
+    //~^ ERROR macro invocations in `extern {}` blocks are experimental
     fn some_definitely_unknown_symbol_which_should_be_removed();
 
     #[nop_attr]
-    //~^ ERROR Macro and proc-macro invocations in `extern {}` blocks are experimental.
+    //~^ ERROR macro invocations in `extern {}` blocks are experimental
     fn rust_get_test_int() -> isize;
 
     emit_input!(fn rust_dbg_extern_identity_u32(arg: u32) -> u32;);
-    //~^ ERROR Macro and proc-macro invocations in `extern {}` blocks are experimental.
+    //~^ ERROR macro invocations in `extern {}` blocks are experimental
 }

@@ -80,7 +80,7 @@ impl<'a, 'tcx> Visitor<'tcx> for UniformArrayMoveOutVisitor<'a, 'tcx> {
                     // no need to transformation
                 } else {
                     let place_ty = proj.base.ty(self.mir, self.tcx).to_ty(self.tcx);
-                    if let ty::TyArray(item_ty, const_size) = place_ty.sty {
+                    if let ty::Array(item_ty, const_size) = place_ty.sty {
                         if let Some(size) = const_size.assert_usize(self.tcx) {
                             assert!(size <= u32::max_value() as u64,
                                     "uniform array move out doesn't supported
@@ -184,13 +184,13 @@ impl MirPass for RestoreSubsliceArrayMoveOut {
             for candidate in &visitor.candidates {
                 let statement = &mir[candidate.block].statements[candidate.statement_index];
                 if let StatementKind::Assign(ref dst_place, ref rval) = statement.kind {
-                    if let Rvalue::Aggregate(box AggregateKind::Array(_), ref items) = *rval {
+                    if let Rvalue::Aggregate(box AggregateKind::Array(_), ref items) = **rval {
                         let items : Vec<_> = items.iter().map(|item| {
                             if let Operand::Move(Place::Local(local)) = item {
                                 let local_use = &visitor.locals_use[*local];
                                 let opt_index_and_place = Self::try_get_item_source(local_use, mir);
                                 // each local should be used twice:
-                                //  in assign and in aggregate statments
+                                //  in assign and in aggregate statements
                                 if local_use.use_count == 2 && opt_index_and_place.is_some() {
                                     let (index, src_place) = opt_index_and_place.unwrap();
                                     return Some((local_use, index, src_place));
@@ -202,7 +202,7 @@ impl MirPass for RestoreSubsliceArrayMoveOut {
                         let opt_src_place = items.first().and_then(|x| *x).map(|x| x.2);
                         let opt_size = opt_src_place.and_then(|src_place| {
                             let src_ty = src_place.ty(mir, tcx).to_ty(tcx);
-                            if let ty::TyArray(_, ref size_o) = src_ty.sty {
+                            if let ty::Array(_, ref size_o) = src_ty.sty {
                                 size_o.assert_usize(tcx)
                             } else {
                                 None
@@ -222,7 +222,7 @@ impl RestoreSubsliceArrayMoveOut {
     // indices is an integer interval. If all checks pass do the replacent.
     // items are Vec<Option<LocalUse, index in source array, source place for init local>>
     fn check_and_patch<'tcx>(candidate: Location,
-                             items: &Vec<Option<(&LocalUse, u32, &Place<'tcx>)>>,
+                             items: &[Option<(&LocalUse, u32, &Place<'tcx>)>],
                              opt_size: Option<u64>,
                              patch: &mut MirPatch<'tcx>,
                              dst_place: &Place<'tcx>) {
@@ -231,15 +231,15 @@ impl RestoreSubsliceArrayMoveOut {
         if opt_size.is_some() && items.iter().all(
             |l| l.is_some() && l.unwrap().2 == opt_src_place.unwrap()) {
 
-            let indicies: Vec<_> = items.iter().map(|x| x.unwrap().1).collect();
-            for i in 1..indicies.len() {
-                if indicies[i - 1] + 1 != indicies[i] {
+            let indices: Vec<_> = items.iter().map(|x| x.unwrap().1).collect();
+            for i in 1..indices.len() {
+                if indices[i - 1] + 1 != indices[i] {
                     return;
                 }
             }
 
-            let min = *indicies.first().unwrap();
-            let max = *indicies.last().unwrap();
+            let min = *indices.first().unwrap();
+            let max = *indices.last().unwrap();
 
             for item in items {
                 let locals_use = item.unwrap().0;
@@ -268,7 +268,7 @@ impl RestoreSubsliceArrayMoveOut {
                 let statement = &block.statements[location.statement_index];
                 if let StatementKind::Assign(
                     Place::Local(_),
-                    Rvalue::Use(Operand::Move(Place::Projection(box PlaceProjection{
+                    box Rvalue::Use(Operand::Move(Place::Projection(box PlaceProjection{
                         ref base, elem: ProjectionElem::ConstantIndex{
                             offset, min_length: _, from_end: false}})))) = statement.kind {
                     return Some((offset, base))

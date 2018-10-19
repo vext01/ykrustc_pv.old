@@ -8,6 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(dead_code)]
+#![allow(unused_variables)]
+
 #![feature(const_fn, const_let)]
 
 const fn x() {

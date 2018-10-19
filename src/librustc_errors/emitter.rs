@@ -10,19 +10,19 @@
 
 use self::Destination::*;
 
-use syntax_pos::{DUMMY_SP, FileMap, Span, MultiSpan};
+use syntax_pos::{SourceFile, Span, MultiSpan};
 
-use {Level, CodeSuggestion, DiagnosticBuilder, SubDiagnostic, CodeMapperDyn, DiagnosticId};
+use {Level, CodeSuggestion, DiagnosticBuilder, SubDiagnostic, SourceMapperDyn, DiagnosticId};
 use snippet::{Annotation, AnnotationType, Line, MultilineAnnotation, StyledString, Style};
 use styled_buffer::StyledBuffer;
 
+use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sync::Lrc;
 use atty;
 use std::borrow::Cow;
 use std::io::prelude::*;
 use std::io;
-use std::collections::HashMap;
-use std::cmp::min;
+use std::cmp::{min, Reverse};
 use termcolor::{StandardStream, ColorChoice, ColorSpec, BufferWriter};
 use termcolor::{WriteColor, Color, Buffer};
 use unicode_width;
@@ -120,21 +120,21 @@ impl ColorConfig {
 
 pub struct EmitterWriter {
     dst: Destination,
-    cm: Option<Lrc<CodeMapperDyn>>,
+    cm: Option<Lrc<SourceMapperDyn>>,
     short_message: bool,
     teach: bool,
     ui_testing: bool,
 }
 
 struct FileWithAnnotatedLines {
-    file: Lrc<FileMap>,
+    file: Lrc<SourceFile>,
     lines: Vec<Line>,
     multiline_depth: usize,
 }
 
 impl EmitterWriter {
     pub fn stderr(color_config: ColorConfig,
-                  code_map: Option<Lrc<CodeMapperDyn>>,
+                  code_map: Option<Lrc<SourceMapperDyn>>,
                   short_message: bool,
                   teach: bool)
                   -> EmitterWriter {
@@ -148,8 +148,8 @@ impl EmitterWriter {
         }
     }
 
-    pub fn new(dst: Box<Write + Send>,
-               code_map: Option<Lrc<CodeMapperDyn>>,
+    pub fn new(dst: Box<dyn Write + Send>,
+               code_map: Option<Lrc<SourceMapperDyn>>,
                short_message: bool,
                teach: bool)
                -> EmitterWriter {
@@ -177,7 +177,7 @@ impl EmitterWriter {
 
     fn preprocess_annotations(&mut self, msp: &MultiSpan) -> Vec<FileWithAnnotatedLines> {
         fn add_annotation_to_file(file_vec: &mut Vec<FileWithAnnotatedLines>,
-                                  file: Lrc<FileMap>,
+                                  file: Lrc<SourceFile>,
                                   line_index: usize,
                                   ann: Annotation) {
 
@@ -216,7 +216,7 @@ impl EmitterWriter {
 
         if let Some(ref cm) = self.cm {
             for span_label in msp.span_labels() {
-                if span_label.span == DUMMY_SP {
+                if span_label.span.is_dummy() {
                     continue;
                 }
 
@@ -265,9 +265,7 @@ impl EmitterWriter {
         }
 
         // Find overlapping multiline annotations, put them at different depths
-        multiline_annotations.sort_by(|a, b| {
-            (a.1.line_start, a.1.line_end).cmp(&(b.1.line_start, b.1.line_end))
-        });
+        multiline_annotations.sort_by_key(|&(_, ref ml)| (ml.line_start, ml.line_end));
         for item in multiline_annotations.clone() {
             let ann = item.1;
             for item in multiline_annotations.iter_mut() {
@@ -309,7 +307,7 @@ impl EmitterWriter {
 
     fn render_source_line(&self,
                           buffer: &mut StyledBuffer,
-                          file: Lrc<FileMap>,
+                          file: Lrc<SourceFile>,
                           line: &Line,
                           width_offset: usize,
                           code_offset: usize) -> Vec<(usize, Style)> {
@@ -403,7 +401,7 @@ impl EmitterWriter {
         // otherwise the lines would end up needing to go over a message.
 
         let mut annotations = line.annotations.clone();
-        annotations.sort_by(|a,b| b.start_col.cmp(&a.start_col));
+        annotations.sort_by_key(|a| Reverse(a.start_col));
 
         // First, figure out where each label will be positioned.
         //
@@ -530,9 +528,7 @@ impl EmitterWriter {
 
         // If there are no annotations or the only annotations on this line are
         // MultilineLine, then there's only code being shown, stop processing.
-        if line.annotations.is_empty() || line.annotations.iter()
-            .filter(|a| !a.is_line()).collect::<Vec<_>>().len() == 0
-        {
+        if line.annotations.iter().all(|a| a.is_line()) {
             return vec![];
         }
 
@@ -730,7 +726,7 @@ impl EmitterWriter {
         let mut max = 0;
         if let Some(ref cm) = self.cm {
             for primary_span in msp.primary_spans() {
-                if primary_span != &DUMMY_SP {
+                if !primary_span.is_dummy() {
                     let hi = cm.lookup_char_pos(primary_span.hi());
                     if hi.line > max {
                         max = hi.line;
@@ -739,7 +735,7 @@ impl EmitterWriter {
             }
             if !self.short_message {
                 for span_label in msp.span_labels() {
-                    if span_label.span != DUMMY_SP {
+                    if !span_label.span.is_dummy() {
                         let hi = cm.lookup_char_pos(span_label.span.hi());
                         if hi.line > max {
                             max = hi.line;
@@ -751,7 +747,7 @@ impl EmitterWriter {
         max
     }
 
-    fn get_max_line_num(&mut self, span: &MultiSpan, children: &Vec<SubDiagnostic>) -> usize {
+    fn get_max_line_num(&mut self, span: &MultiSpan, children: &[SubDiagnostic]) -> usize {
         let mut max = 0;
 
         let primary = self.get_multispan_max_line_num(span);
@@ -778,7 +774,7 @@ impl EmitterWriter {
 
             // First, find all the spans in <*macros> and point instead at their use site
             for sp in span.primary_spans() {
-                if *sp == DUMMY_SP {
+                if sp.is_dummy() {
                     continue;
                 }
                 let call_sp = cm.call_span_if_macro(*sp);
@@ -790,7 +786,7 @@ impl EmitterWriter {
                     // Only show macro locations that are local
                     // and display them like a span_note
                     if let Some(def_site) = trace.def_site_span {
-                        if def_site == DUMMY_SP {
+                        if def_site.is_dummy() {
                             continue;
                         }
                         if always_backtrace {
@@ -802,7 +798,7 @@ impl EmitterWriter {
                                                          // at by "in this macro invocation"
                                                          format!(" (#{})", i + 1)
                                                      } else {
-                                                         "".to_string()
+                                                         String::new()
                                                      })));
                         }
                         // Check to make sure we're not in any <*macros>
@@ -817,7 +813,7 @@ impl EmitterWriter {
                                                          // backtrace is multiple levels deep
                                                          format!(" (#{})", i + 1)
                                                      } else {
-                                                         "".to_string()
+                                                         String::new()
                                                      })));
                             if !always_backtrace {
                                 break;
@@ -830,7 +826,7 @@ impl EmitterWriter {
                 span.push_span_label(label_span, label_text);
             }
             for sp_label in span.span_labels() {
-                if sp_label.span == DUMMY_SP {
+                if sp_label.span.is_dummy() {
                     continue;
                 }
                 if cm.span_to_filename(sp_label.span.clone()).is_macros() &&
@@ -903,9 +899,7 @@ impl EmitterWriter {
         //    |  |   length of label
         //    |  magic `3`
         //    `max_line_num_len`
-        let padding = (0..padding + label.len() + 5)
-            .map(|_| " ")
-            .collect::<String>();
+        let padding = " ".repeat(padding + label.len() + 5);
 
         /// Return whether `style`, or the override if present and the style is `NoStyle`.
         fn style_or_override(style: Style, override_style: Option<Style>) -> Style {
@@ -956,13 +950,18 @@ impl EmitterWriter {
 
     fn emit_message_default(&mut self,
                             msp: &MultiSpan,
-                            msg: &Vec<(String, Style)>,
+                            msg: &[(String, Style)],
                             code: &Option<DiagnosticId>,
                             level: &Level,
                             max_line_num_len: usize,
                             is_secondary: bool)
                             -> io::Result<()> {
         let mut buffer = StyledBuffer::new();
+        let header_style = if is_secondary {
+            Style::HeaderMsg
+        } else {
+            Style::MainHeaderMsg
+        };
 
         if msp.primary_spans().is_empty() && msp.span_labels().is_empty() && is_secondary
            && !self.short_message {
@@ -973,7 +972,7 @@ impl EmitterWriter {
             draw_note_separator(&mut buffer, 0, max_line_num_len + 1);
             let level_str = level.to_string();
             if !level_str.is_empty() {
-                buffer.append(0, &level_str, Style::HeaderMsg);
+                buffer.append(0, &level_str, Style::MainHeaderMsg);
                 buffer.append(0, ": ", Style::NoStyle);
             }
             self.msg_to_buffer(&mut buffer, msg, max_line_num_len, "note", None);
@@ -989,10 +988,10 @@ impl EmitterWriter {
                 buffer.append(0, "]", Style::Level(level.clone()));
             }
             if !level_str.is_empty() {
-                buffer.append(0, ": ", Style::HeaderMsg);
+                buffer.append(0, ": ", header_style);
             }
             for &(ref text, _) in msg.iter() {
-                buffer.append(0, text, Style::HeaderMsg);
+                buffer.append(0, text, header_style);
             }
         }
 
@@ -1003,7 +1002,7 @@ impl EmitterWriter {
         // Make sure our primary file comes first
         let (primary_lo, cm) = if let (Some(cm), Some(ref primary_span)) =
             (self.cm.as_ref(), msp.primary_span().as_ref()) {
-            if primary_span != &&DUMMY_SP {
+            if !primary_span.is_dummy() {
                 (cm.lookup_char_pos(primary_span.lo()), cm)
             } else {
                 emit_to_destination(&buffer.render(), level, &mut self.dst, self.short_message)?;
@@ -1022,7 +1021,7 @@ impl EmitterWriter {
         // Print out the annotate source lines that correspond with the error
         for annotated_file in annotated_files {
             // we can't annotate anything if the source is unavailable.
-            if !cm.ensure_filemap_source_present(annotated_file.file.clone()) {
+            if !cm.ensure_source_file_source_present(annotated_file.file.clone()) {
                 continue;
             }
 
@@ -1066,7 +1065,7 @@ impl EmitterWriter {
                     let col = if let Some(first_annotation) = first_line.annotations.first() {
                         format!(":{}", first_annotation.start_col + 1)
                     } else {
-                        "".to_string()
+                        String::new()
                     };
                     format!("{}:{}{}",
                             annotated_file.file.name,
@@ -1091,7 +1090,7 @@ impl EmitterWriter {
                                             max_line_num_len + 1);
 
                 // Contains the vertical lines' positions for active multiline annotations
-                let mut multilines = HashMap::new();
+                let mut multilines = FxHashMap::default();
 
                 // Next, output the annotate source for this file
                 for line_idx in 0..annotated_file.lines.len() {
@@ -1110,7 +1109,7 @@ impl EmitterWriter {
                                                          width_offset,
                                                          code_offset);
 
-                    let mut to_add = HashMap::new();
+                    let mut to_add = FxHashMap::default();
 
                     for (depth, style) in depths {
                         if multilines.get(&depth).is_some() {
@@ -1296,7 +1295,7 @@ impl EmitterWriter {
                 }
 
                 // if we elided some lines, add an ellipsis
-                if let Some(_) = lines.next() {
+                if lines.next().is_some() {
                     buffer.puts(row_num, max_line_num_len - 1, "...", Style::LineNumber);
                 } else if !show_underline {
                     draw_col_separator_no_space(&mut buffer, row_num, max_line_num_len + 1);
@@ -1314,10 +1313,10 @@ impl EmitterWriter {
 
     fn emit_messages_default(&mut self,
                              level: &Level,
-                             message: &Vec<(String, Style)>,
+                             message: &[(String, Style)],
                              code: &Option<DiagnosticId>,
                              span: &MultiSpan,
-                             children: &Vec<SubDiagnostic>,
+                             children: &[SubDiagnostic],
                              suggestions: &[CodeSuggestion]) {
         let max_line_num_len = if self.ui_testing {
             ANONYMIZED_LINE_NUM.len()
@@ -1430,7 +1429,7 @@ fn overlaps(a1: &Annotation, a2: &Annotation, padding: usize) -> bool {
     num_overlap(a1.start_col, a1.end_col + padding, a2.start_col, a2.end_col, false)
 }
 
-fn emit_to_destination(rendered_buffer: &Vec<Vec<StyledString>>,
+fn emit_to_destination(rendered_buffer: &[Vec<StyledString>],
                        lvl: &Level,
                        dst: &mut Destination,
                        short_message: bool)
@@ -1469,13 +1468,13 @@ fn emit_to_destination(rendered_buffer: &Vec<Vec<StyledString>>,
 pub enum Destination {
     Terminal(StandardStream),
     Buffered(BufferWriter),
-    Raw(Box<Write + Send>),
+    Raw(Box<dyn Write + Send>),
 }
 
 pub enum WritableDst<'a> {
     Terminal(&'a mut StandardStream),
     Buffered(&'a mut BufferWriter, Buffer),
-    Raw(&'a mut Box<Write + Send>),
+    Raw(&'a mut Box<dyn Write + Send>),
 }
 
 impl Destination {
@@ -1521,7 +1520,7 @@ impl<'a> WritableDst<'a> {
                 }
             }
             Style::Quotation => {}
-            Style::OldSchoolNoteText | Style::HeaderMsg => {
+            Style::OldSchoolNoteText | Style::MainHeaderMsg => {
                 spec.set_bold(true);
                 if cfg!(windows) {
                     spec.set_intense(true)
@@ -1542,6 +1541,7 @@ impl<'a> WritableDst<'a> {
                     spec.set_fg(Some(Color::Blue));
                 }
             }
+            Style::HeaderMsg |
             Style::NoStyle => {}
             Style::Level(lvl) => {
                 spec = lvl.color();

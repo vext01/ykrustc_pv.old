@@ -8,10 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use hir::map as hir_map;
+use hir::Node;
 use rustc::hir;
 use rustc::hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
-use rustc::ty::maps::Providers;
+use rustc::ty::query::Providers;
 use rustc::ty::subst::UnpackedKind;
 use rustc::ty::{self, CratePredicatesMap, TyCtxt};
 use rustc_data_structures::sync::Lrc;
@@ -40,8 +40,8 @@ fn inferred_outlives_of<'a, 'tcx>(
         .expect("expected local def-id");
 
     match tcx.hir.get(id) {
-        hir_map::NodeItem(item) => match item.node {
-            hir::ItemStruct(..) | hir::ItemEnum(..) | hir::ItemUnion(..) => {
+        Node::Item(item) => match item.node {
+            hir::ItemKind::Struct(..) | hir::ItemKind::Enum(..) | hir::ItemKind::Union(..) => {
                 let crate_map = tcx.inferred_outlives_crate(LOCAL_CRATE);
 
                 let predicates = crate_map
@@ -54,13 +54,10 @@ fn inferred_outlives_of<'a, 'tcx>(
                     let mut pred: Vec<String> = predicates
                         .iter()
                         .map(|out_pred| match out_pred {
-                            ty::Predicate::RegionOutlives(p) => format!("{}", &p),
-
-                            ty::Predicate::TypeOutlives(p) => format!("{}", &p),
-
+                            ty::Predicate::RegionOutlives(p) => p.to_string(),
+                            ty::Predicate::TypeOutlives(p) => p.to_string(),
                             err => bug!("unexpected predicate {:?}", err),
-                        })
-                        .collect();
+                        }).collect();
                     pred.sort();
 
                     let span = tcx.def_span(item_def_id);
@@ -84,6 +81,8 @@ fn inferred_outlives_crate<'tcx>(
     tcx: TyCtxt<'_, 'tcx, 'tcx>,
     crate_num: CrateNum,
 ) -> Lrc<CratePredicatesMap<'tcx>> {
+    assert_eq!(crate_num, LOCAL_CRATE);
+
     // Compute a map from each struct/enum/union S to the **explicit**
     // outlives predicates (`T: 'a`, `'a: 'b`) that the user wrote.
     // Typically there won't be many of these, except in older code where
@@ -92,8 +91,9 @@ fn inferred_outlives_crate<'tcx>(
     // for the type.
 
     // Compute the inferred predicates
-    let exp = explicit::explicit_predicates(tcx, crate_num);
-    let global_inferred_outlives = implicit_infer::infer_predicates(tcx, &exp);
+    let mut exp_map = explicit::ExplicitPredicatesMap::new();
+
+    let global_inferred_outlives = implicit_infer::infer_predicates(tcx, &mut exp_map);
 
     // Convert the inferred predicates into the "collected" form the
     // global data structure expects.
@@ -114,11 +114,9 @@ fn inferred_outlives_crate<'tcx>(
                             ty::Binder::bind(ty::OutlivesPredicate(region1, region2)),
                         ),
                     },
-                )
-                .collect();
+                ).collect();
             (def_id, Lrc::new(vec))
-        })
-        .collect();
+        }).collect();
 
     let empty_predicate = Lrc::new(Vec::new());
 

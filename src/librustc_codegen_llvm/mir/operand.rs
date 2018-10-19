@@ -8,57 +8,40 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use llvm::{ValueRef, LLVMConstInBoundsGEP};
-use rustc::middle::const_val::ConstEvalErr;
+use rustc::mir::interpret::{ConstValue, ConstEvalErr};
 use rustc::mir;
-use rustc::mir::interpret::ConstValue;
 use rustc::ty;
 use rustc::ty::layout::{self, Align, LayoutOf, TyLayout};
-use rustc_data_structures::indexed_vec::Idx;
+use rustc_data_structures::sync::Lrc;
 
 use base;
-use common::{self, CodegenCx, C_null, C_undef, C_usize};
+use common::{CodegenCx, C_undef, C_usize};
 use builder::{Builder, MemFlags};
 use value::Value;
 use type_of::LayoutLlvmExt;
 use type_::Type;
-use consts;
+use glue;
 
 use std::fmt;
-use std::ptr;
 
 use super::{FunctionCx, LocalRef};
-use super::constant::{scalar_to_llvm, const_alloc_to_llvm};
+use super::constant::scalar_to_llvm;
 use super::place::PlaceRef;
 
 /// The representation of a Rust value. The enum variant is in fact
 /// uniquely determined by the value's type, but is kept as a
 /// safety check.
-#[derive(Copy, Clone)]
-pub enum OperandValue {
+#[derive(Copy, Clone, Debug)]
+pub enum OperandValue<'ll> {
     /// A reference to the actual operand. The data is guaranteed
     /// to be valid for the operand's lifetime.
-    Ref(ValueRef, Align),
+    /// The second value, if any, is the extra data (vtable or length)
+    /// which indicates that it refers to an unsized rvalue.
+    Ref(&'ll Value, Option<&'ll Value>, Align),
     /// A single LLVM value.
-    Immediate(ValueRef),
+    Immediate(&'ll Value),
     /// A pair of immediate LLVM values. Used by fat pointers too.
-    Pair(ValueRef, ValueRef)
-}
-
-impl fmt::Debug for OperandValue {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            OperandValue::Ref(r, align) => {
-                write!(f, "Ref({:?}, {:?})", Value(r), align)
-            }
-            OperandValue::Immediate(i) => {
-                write!(f, "Immediate({:?})", Value(i))
-            }
-            OperandValue::Pair(a, b) => {
-                write!(f, "Pair({:?}, {:?})", Value(a), Value(b))
-            }
-        }
-    }
+    Pair(&'ll Value, &'ll Value)
 }
 
 /// An `OperandRef` is an "SSA" reference to a Rust value, along with
@@ -70,23 +53,23 @@ impl fmt::Debug for OperandValue {
 /// directly is sure to cause problems -- use `OperandRef::store`
 /// instead.
 #[derive(Copy, Clone)]
-pub struct OperandRef<'tcx> {
+pub struct OperandRef<'ll, 'tcx> {
     // The value.
-    pub val: OperandValue,
+    pub val: OperandValue<'ll>,
 
     // The layout of value, based on its Rust type.
     pub layout: TyLayout<'tcx>,
 }
 
-impl<'tcx> fmt::Debug for OperandRef<'tcx> {
+impl fmt::Debug for OperandRef<'ll, 'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "OperandRef({:?} @ {:?})", self.val, self.layout)
     }
 }
 
-impl<'a, 'tcx> OperandRef<'tcx> {
-    pub fn new_zst(cx: &CodegenCx<'a, 'tcx>,
-                   layout: TyLayout<'tcx>) -> OperandRef<'tcx> {
+impl OperandRef<'ll, 'tcx> {
+    pub fn new_zst(cx: &CodegenCx<'ll, 'tcx>,
+                   layout: TyLayout<'tcx>) -> OperandRef<'ll, 'tcx> {
         assert!(layout.is_zst());
         OperandRef {
             val: OperandValue::Immediate(C_undef(layout.immediate_llvm_type(cx))),
@@ -94,17 +77,17 @@ impl<'a, 'tcx> OperandRef<'tcx> {
         }
     }
 
-    pub fn from_const(bx: &Builder<'a, 'tcx>,
-                      val: ConstValue<'tcx>,
-                      ty: ty::Ty<'tcx>)
-                      -> Result<OperandRef<'tcx>, ConstEvalErr<'tcx>> {
-        let layout = bx.cx.layout_of(ty);
+    pub fn from_const(bx: &Builder<'a, 'll, 'tcx>,
+                      val: &'tcx ty::Const<'tcx>)
+                      -> Result<OperandRef<'ll, 'tcx>, Lrc<ConstEvalErr<'tcx>>> {
+        let layout = bx.cx.layout_of(val.ty);
 
         if layout.is_zst() {
             return Ok(OperandRef::new_zst(bx.cx, layout));
         }
 
-        let val = match val {
+        let val = match val.val {
+            ConstValue::Unevaluated(..) => bug!(),
             ConstValue::Scalar(x) => {
                 let scalar = match layout.abi {
                     layout::Abi::Scalar(ref x) => x,
@@ -127,27 +110,19 @@ impl<'a, 'tcx> OperandRef<'tcx> {
                     bx.cx,
                     a,
                     a_scalar,
-                    layout.scalar_pair_element_llvm_type(bx.cx, 0),
+                    layout.scalar_pair_element_llvm_type(bx.cx, 0, true),
                 );
+                let b_layout = layout.scalar_pair_element_llvm_type(bx.cx, 1, true);
                 let b_llval = scalar_to_llvm(
                     bx.cx,
                     b,
                     b_scalar,
-                    layout.scalar_pair_element_llvm_type(bx.cx, 1),
+                    b_layout,
                 );
                 OperandValue::Pair(a_llval, b_llval)
             },
-            ConstValue::ByRef(alloc, offset) => {
-                let init = const_alloc_to_llvm(bx.cx, alloc);
-                let base_addr = consts::addr_of(bx.cx, init, layout.align, "byte_str");
-
-                let llval = unsafe { LLVMConstInBoundsGEP(
-                    consts::bitcast(base_addr, Type::i8p(bx.cx)),
-                    &C_usize(bx.cx, offset.bytes()),
-                    1,
-                )};
-                let llval = consts::bitcast(llval, layout.llvm_type(bx.cx).ptr_to());
-                return Ok(PlaceRef::new_sized(llval, layout, alloc.align).load(bx));
+            ConstValue::ByRef(_, alloc, offset) => {
+                return Ok(PlaceRef::from_const_alloc(bx, layout, alloc, offset).load(bx));
             },
         };
 
@@ -159,19 +134,19 @@ impl<'a, 'tcx> OperandRef<'tcx> {
 
     /// Asserts that this operand refers to a scalar and returns
     /// a reference to its value.
-    pub fn immediate(self) -> ValueRef {
+    pub fn immediate(self) -> &'ll Value {
         match self.val {
             OperandValue::Immediate(s) => s,
             _ => bug!("not immediate: {:?}", self)
         }
     }
 
-    pub fn deref(self, cx: &CodegenCx<'a, 'tcx>) -> PlaceRef<'tcx> {
+    pub fn deref(self, cx: &CodegenCx<'ll, 'tcx>) -> PlaceRef<'ll, 'tcx> {
         let projected_ty = self.layout.ty.builtin_deref(true)
             .unwrap_or_else(|| bug!("deref of non-pointer {:?}", self)).ty;
         let (llptr, llextra) = match self.val {
-            OperandValue::Immediate(llptr) => (llptr, ptr::null_mut()),
-            OperandValue::Pair(llptr, llextra) => (llptr, llextra),
+            OperandValue::Immediate(llptr) => (llptr, None),
+            OperandValue::Pair(llptr, llextra) => (llptr, Some(llextra)),
             OperandValue::Ref(..) => bug!("Deref of by-Ref operand {:?}", self)
         };
         let layout = cx.layout_of(projected_ty);
@@ -185,15 +160,15 @@ impl<'a, 'tcx> OperandRef<'tcx> {
 
     /// If this operand is a `Pair`, we return an aggregate with the two values.
     /// For other cases, see `immediate`.
-    pub fn immediate_or_packed_pair(self, bx: &Builder<'a, 'tcx>) -> ValueRef {
+    pub fn immediate_or_packed_pair(self, bx: &Builder<'a, 'll, 'tcx>) -> &'ll Value {
         if let OperandValue::Pair(a, b) = self.val {
             let llty = self.layout.llvm_type(bx.cx);
             debug!("Operand::immediate_or_packed_pair: packing {:?} into {:?}",
                    self, llty);
             // Reconstruct the immediate aggregate.
             let mut llpair = C_undef(llty);
-            llpair = bx.insert_value(llpair, a, 0);
-            llpair = bx.insert_value(llpair, b, 1);
+            llpair = bx.insert_value(llpair, base::from_immediate(bx, a), 0);
+            llpair = bx.insert_value(llpair, base::from_immediate(bx, b), 1);
             llpair
         } else {
             self.immediate()
@@ -201,24 +176,25 @@ impl<'a, 'tcx> OperandRef<'tcx> {
     }
 
     /// If the type is a pair, we return a `Pair`, otherwise, an `Immediate`.
-    pub fn from_immediate_or_packed_pair(bx: &Builder<'a, 'tcx>,
-                                         llval: ValueRef,
+    pub fn from_immediate_or_packed_pair(bx: &Builder<'a, 'll, 'tcx>,
+                                         llval: &'ll Value,
                                          layout: TyLayout<'tcx>)
-                                         -> OperandRef<'tcx> {
-        let val = if layout.is_llvm_scalar_pair() {
+                                         -> OperandRef<'ll, 'tcx> {
+        let val = if let layout::Abi::ScalarPair(ref a, ref b) = layout.abi {
             debug!("Operand::from_immediate_or_packed_pair: unpacking {:?} @ {:?}",
                     llval, layout);
 
             // Deconstruct the immediate aggregate.
-            OperandValue::Pair(bx.extract_value(llval, 0),
-                               bx.extract_value(llval, 1))
+            let a_llval = base::to_immediate_scalar(bx, bx.extract_value(llval, 0), a);
+            let b_llval = base::to_immediate_scalar(bx, bx.extract_value(llval, 1), b);
+            OperandValue::Pair(a_llval, b_llval)
         } else {
             OperandValue::Immediate(llval)
         };
         OperandRef { val, layout }
     }
 
-    pub fn extract_field(&self, bx: &Builder<'a, 'tcx>, i: usize) -> OperandRef<'tcx> {
+    pub fn extract_field(&self, bx: &Builder<'a, 'll, 'tcx>, i: usize) -> OperandRef<'ll, 'tcx> {
         let field = self.layout.field(bx.cx, i);
         let offset = self.layout.fields.offset(i);
 
@@ -263,8 +239,8 @@ impl<'a, 'tcx> OperandRef<'tcx> {
                 *llval = bx.bitcast(*llval, field.immediate_llvm_type(bx.cx));
             }
             OperandValue::Pair(ref mut a, ref mut b) => {
-                *a = bx.bitcast(*a, field.scalar_pair_element_llvm_type(bx.cx, 0));
-                *b = bx.bitcast(*b, field.scalar_pair_element_llvm_type(bx.cx, 1));
+                *a = bx.bitcast(*a, field.scalar_pair_element_llvm_type(bx.cx, 0, true));
+                *b = bx.bitcast(*b, field.scalar_pair_element_llvm_type(bx.cx, 1, true));
             }
             OperandValue::Ref(..) => bug!()
         }
@@ -276,20 +252,29 @@ impl<'a, 'tcx> OperandRef<'tcx> {
     }
 }
 
-impl<'a, 'tcx> OperandValue {
-    pub fn store(self, bx: &Builder<'a, 'tcx>, dest: PlaceRef<'tcx>) {
+impl OperandValue<'ll> {
+    pub fn store(self, bx: &Builder<'a, 'll, 'tcx>, dest: PlaceRef<'ll, 'tcx>) {
         self.store_with_flags(bx, dest, MemFlags::empty());
     }
 
-    pub fn volatile_store(self, bx: &Builder<'a, 'tcx>, dest: PlaceRef<'tcx>) {
+    pub fn volatile_store(self, bx: &Builder<'a, 'll, 'tcx>, dest: PlaceRef<'ll, 'tcx>) {
         self.store_with_flags(bx, dest, MemFlags::VOLATILE);
     }
 
-    pub fn nontemporal_store(self, bx: &Builder<'a, 'tcx>, dest: PlaceRef<'tcx>) {
+    pub fn unaligned_volatile_store(self, bx: &Builder<'a, 'll, 'tcx>, dest: PlaceRef<'ll, 'tcx>) {
+        self.store_with_flags(bx, dest, MemFlags::VOLATILE | MemFlags::UNALIGNED);
+    }
+
+    pub fn nontemporal_store(self, bx: &Builder<'a, 'll, 'tcx>, dest: PlaceRef<'ll, 'tcx>) {
         self.store_with_flags(bx, dest, MemFlags::NONTEMPORAL);
     }
 
-    fn store_with_flags(self, bx: &Builder<'a, 'tcx>, dest: PlaceRef<'tcx>, flags: MemFlags) {
+    fn store_with_flags(
+        self,
+        bx: &Builder<'a, 'll, 'tcx>,
+        dest: PlaceRef<'ll, 'tcx>,
+        flags: MemFlags,
+    ) {
         debug!("OperandRef::store: operand={:?}, dest={:?}", self, dest);
         // Avoid generating stores of zero-sized values, because the only way to have a zero-sized
         // value is through `undef`, and store itself is useless.
@@ -297,9 +282,12 @@ impl<'a, 'tcx> OperandValue {
             return;
         }
         match self {
-            OperandValue::Ref(r, source_align) => {
+            OperandValue::Ref(r, None, source_align) => {
                 base::memcpy_ty(bx, dest.llval, r, dest.layout,
                                 source_align.min(dest.align), flags)
+            }
+            OperandValue::Ref(_, Some(_), _) => {
+                bug!("cannot directly store unsized values");
             }
             OperandValue::Immediate(s) => {
                 let val = base::from_immediate(bx, s);
@@ -307,24 +295,49 @@ impl<'a, 'tcx> OperandValue {
             }
             OperandValue::Pair(a, b) => {
                 for (i, &x) in [a, b].iter().enumerate() {
-                    let mut llptr = bx.struct_gep(dest.llval, i as u64);
-                    // Make sure to always store i1 as i8.
-                    if common::val_ty(x) == Type::i1(bx.cx) {
-                        llptr = bx.pointercast(llptr, Type::i8p(bx.cx));
-                    }
+                    let llptr = bx.struct_gep(dest.llval, i as u64);
                     let val = base::from_immediate(bx, x);
                     bx.store_with_flags(val, llptr, dest.align, flags);
                 }
             }
         }
     }
+
+    pub fn store_unsized(self, bx: &Builder<'a, 'll, 'tcx>, indirect_dest: PlaceRef<'ll, 'tcx>) {
+        debug!("OperandRef::store_unsized: operand={:?}, indirect_dest={:?}", self, indirect_dest);
+        let flags = MemFlags::empty();
+
+        // `indirect_dest` must have `*mut T` type. We extract `T` out of it.
+        let unsized_ty = indirect_dest.layout.ty.builtin_deref(true)
+            .unwrap_or_else(|| bug!("indirect_dest has non-pointer type: {:?}", indirect_dest)).ty;
+
+        let (llptr, llextra) =
+            if let OperandValue::Ref(llptr, Some(llextra), _) = self {
+                (llptr, llextra)
+            } else {
+                bug!("store_unsized called with a sized value")
+            };
+
+        // FIXME: choose an appropriate alignment, or use dynamic align somehow
+        let max_align = Align::from_bits(128, 128).unwrap();
+        let min_align = Align::from_bits(8, 8).unwrap();
+
+        // Allocate an appropriate region on the stack, and copy the value into it
+        let (llsize, _) = glue::size_and_align_of_dst(&bx, unsized_ty, Some(llextra));
+        let lldst = bx.array_alloca(Type::i8(bx.cx), llsize, "unsized_tmp", max_align);
+        base::call_memcpy(&bx, lldst, llptr, llsize, min_align, flags);
+
+        // Store the allocated region and the extra to the indirect place.
+        let indirect_operand = OperandValue::Pair(lldst, llextra);
+        indirect_operand.store(&bx, indirect_dest);
+    }
 }
 
-impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
+impl FunctionCx<'a, 'll, 'tcx> {
     fn maybe_codegen_consume_direct(&mut self,
-                                  bx: &Builder<'a, 'tcx>,
+                                  bx: &Builder<'a, 'll, 'tcx>,
                                   place: &mir::Place<'tcx>)
-                                   -> Option<OperandRef<'tcx>>
+                                   -> Option<OperandRef<'ll, 'tcx>>
     {
         debug!("maybe_codegen_consume_direct(place={:?})", place);
 
@@ -338,7 +351,7 @@ impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
                 LocalRef::Operand(None) => {
                     bug!("use of {:?} before def", place);
                 }
-                LocalRef::Place(..) => {
+                LocalRef::Place(..) | LocalRef::UnsizedPlace(..) => {
                     // use path below
                 }
             }
@@ -370,9 +383,9 @@ impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
     }
 
     pub fn codegen_consume(&mut self,
-                         bx: &Builder<'a, 'tcx>,
+                         bx: &Builder<'a, 'll, 'tcx>,
                          place: &mir::Place<'tcx>)
-                         -> OperandRef<'tcx>
+                         -> OperandRef<'ll, 'tcx>
     {
         debug!("codegen_consume(place={:?})", place);
 
@@ -394,9 +407,9 @@ impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
     }
 
     pub fn codegen_operand(&mut self,
-                         bx: &Builder<'a, 'tcx>,
+                         bx: &Builder<'a, 'll, 'tcx>,
                          operand: &mir::Operand<'tcx>)
-                         -> OperandRef<'tcx>
+                         -> OperandRef<'ll, 'tcx>
     {
         debug!("codegen_operand(operand={:?})", operand);
 
@@ -408,24 +421,21 @@ impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
 
             mir::Operand::Constant(ref constant) => {
                 let ty = self.monomorphize(&constant.ty);
-                self.mir_constant_to_const_value(bx, constant)
-                    .and_then(|c| OperandRef::from_const(bx, c, ty))
+                self.eval_mir_constant(bx, constant)
+                    .and_then(|c| OperandRef::from_const(bx, c))
                     .unwrap_or_else(|err| {
-                        match constant.literal {
-                            mir::Literal::Promoted { .. } => {
-                                // FIXME: generate a panic here
-                            },
-                            mir::Literal::Value { .. } => {
-                                err.report_as_error(
-                                    bx.tcx().at(constant.span),
-                                    "could not evaluate constant operand",
-                                );
-                            },
-                        }
+                        err.report_as_error(
+                            bx.tcx().at(constant.span),
+                            "could not evaluate constant operand",
+                        );
+                        // Allow RalfJ to sleep soundly knowing that even refactorings that remove
+                        // the above error (or silence it under some conditions) will not cause UB
+                        let fnname = bx.cx.get_intrinsic(&("llvm.trap"));
+                        bx.call(fnname, &[], None);
                         // We've errored, so we don't have to produce working code.
                         let layout = bx.cx.layout_of(ty);
                         PlaceRef::new_sized(
-                            C_null(layout.llvm_type(bx.cx).ptr_to()),
+                            C_undef(layout.llvm_type(bx.cx).ptr_to()),
                             layout,
                             layout.align,
                         ).load(bx)

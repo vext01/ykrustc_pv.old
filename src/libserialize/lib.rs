@@ -23,12 +23,16 @@ Core encoding and decoding interfaces.
 #![feature(box_syntax)]
 #![feature(core_intrinsics)]
 #![feature(specialization)]
+#![feature(never_type)]
+#![feature(nll)]
 #![cfg_attr(test, feature(test))]
 
 pub use self::serialize::{Decoder, Encoder, Decodable, Encodable};
 
 pub use self::serialize::{SpecializationError, SpecializedEncoder, SpecializedDecoder};
 pub use self::serialize::{UseSpecializedEncodable, UseSpecializedDecodable};
+
+extern crate smallvec;
 
 mod serialize;
 mod collection_impls;

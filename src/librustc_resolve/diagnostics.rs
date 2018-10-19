@@ -770,17 +770,18 @@ match x {
 "##,
 
 E0411: r##"
-The `Self` keyword was used outside an impl or a trait.
+The `Self` keyword was used outside an impl, trait, or type definition.
 
 Erroneous code example:
 
 ```compile_fail,E0411
-<Self>::foo; // error: use of `Self` outside of an impl or trait
+<Self>::foo; // error: use of `Self` outside of an impl, trait, or type
+             // definition
 ```
 
 The `Self` keyword represents the current type, which explains why it can only
-be used inside an impl or a trait. It gives access to the associated items of a
-type:
+be used inside an impl, trait, or type definition. It gives access to the
+associated items of a type:
 
 ```
 trait Foo {
@@ -967,16 +968,18 @@ one.
 "##,
 
 E0423: r##"
-A `struct` variant name was used like a function name.
+An identifier was used like a function name or a value was expected and the
+identifier exists but it belongs to a different namespace.
 
-Erroneous code example:
+For (an erroneous) example, here a `struct` variant name were used as a
+function:
 
 ```compile_fail,E0423
 struct Foo { a: bool };
 
 let f = Foo();
-// error: `Foo` is a struct variant name, but this expression uses
-//        it like a function name
+// error: expected function, found `Foo`
+// `Foo` is a struct name, but this expression uses it like a function name
 ```
 
 Please verify you didn't misspell the name of what you actually wanted to use
@@ -986,6 +989,30 @@ here. Example:
 fn Foo() -> u32 { 0 }
 
 let f = Foo(); // ok!
+```
+
+It is common to forget the trailing `!` on macro invocations, which would also
+yield this error:
+
+```compile_fail,E0423
+println("");
+// error: expected function, found macro `println`
+// did you mean `println!(...)`? (notice the trailing `!`)
+```
+
+Another case where this error is emitted is when a value is expected, but
+something else is found:
+
+```compile_fail,E0423
+pub mod a {
+    pub const I: i32 = 1;
+}
+
+fn h1() -> i32 {
+    a.I
+    //~^ ERROR expected value, found module `a`
+    // did you mean `a::I`?
+}
 ```
 "##,
 
@@ -1230,7 +1257,7 @@ let map = HashMap::new();
 ```
 
 Please verify you didn't misspell the type/module's name or that you didn't
-forgot to import it:
+forget to import it:
 
 
 ```
@@ -1555,7 +1582,7 @@ mod SomeModule {
                                             // `SomeModule` module.
 }
 
-println!("const value: {}", SomeModule::PRIVATE); // error: constant `CONSTANT`
+println!("const value: {}", SomeModule::PRIVATE); // error: constant `PRIVATE`
                                                   //        is private
 ```
 

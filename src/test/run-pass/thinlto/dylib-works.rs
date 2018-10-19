@@ -8,8 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+
 // aux-build:dylib.rs
-// min-llvm-version 4.0
 
 extern crate dylib;
 

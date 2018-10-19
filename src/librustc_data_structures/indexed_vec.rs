@@ -14,6 +14,7 @@ use std::slice;
 use std::marker::PhantomData;
 use std::ops::{Index, IndexMut, Range, RangeBounds};
 use std::fmt;
+use std::hash::Hash;
 use std::vec;
 use std::u32;
 
@@ -22,9 +23,15 @@ use rustc_serialize as serialize;
 /// Represents some newtyped `usize` wrapper.
 ///
 /// (purpose: avoid mixing indexes for different bitvector domains.)
-pub trait Idx: Copy + 'static + Eq + Debug {
+pub trait Idx: Copy + 'static + Ord + Debug + Hash {
     fn new(idx: usize) -> Self;
+
     fn index(self) -> usize;
+
+    fn increment_by(&mut self, amount: usize) {
+        let v = self.index() + amount;
+        *self = Self::new(v);
+    }
 }
 
 impl Idx for usize {
@@ -41,25 +48,44 @@ impl Idx for u32 {
     fn index(self) -> usize { self as usize }
 }
 
+/// Creates a struct type `S` that can be used as an index with
+/// `IndexVec` and so on.
+///
+/// There are two ways of interacting with these indices:
+///
+/// - The `From` impls are the preferred way. So you can do
+///   `S::from(v)` with a `usize` or `u32`. And you can convert back
+///   to an integer with `u32::from(s)`.
+///
+/// - Alternatively, you can use the methods `S::new(v)` and `s.index()`
+///   to create/return a value.
+///
+/// Internally, the index uses a u32, so the index must not exceed
+/// `u32::MAX`. You can also customize things like the `Debug` impl,
+/// what traits are derived, and so forth via the macro.
 #[macro_export]
 macro_rules! newtype_index {
     // ---- public rules ----
 
     // Use default constants
-    ($name:ident) => (
+    ($v:vis struct $name:ident { .. }) => (
         newtype_index!(
             // Leave out derives marker so we can use its absence to ensure it comes first
             @type         [$name]
-            @max          [::std::u32::MAX]
+            // shave off 256 indices at the end to allow space for packing these indices into enums
+            @max          [0xFFFF_FF00]
+            @vis          [$v]
             @debug_format ["{}"]);
     );
 
     // Define any constants
-    ($name:ident { $($tokens:tt)+ }) => (
+    ($v:vis struct $name:ident { $($tokens:tt)+ }) => (
         newtype_index!(
             // Leave out derives marker so we can use its absence to ensure it comes first
             @type         [$name]
-            @max          [::std::u32::MAX]
+            // shave off 256 indices at the end to allow space for packing these indices into enums
+            @max          [0xFFFF_FF00]
+            @vis          [$v]
             @debug_format ["{}"]
                           $($tokens)+);
     );
@@ -68,23 +94,151 @@ macro_rules! newtype_index {
 
     // Base case, user-defined constants (if any) have already been defined
     (@derives      [$($derives:ident,)*]
-     @pub          [$($pub:tt)*]
      @type         [$type:ident]
      @max          [$max:expr]
+     @vis          [$v:vis]
      @debug_format [$debug_format:tt]) => (
         #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, $($derives),*)]
-        pub struct $type($($pub)* u32);
+        #[rustc_layout_scalar_valid_range_end($max)]
+        $v struct $type {
+            private: u32
+        }
+
+        impl $type {
+            $v const MAX_AS_U32: u32 = $max;
+
+            $v const MAX: $type = $type::from_u32_const($max);
+
+            #[inline]
+            $v fn from_usize(value: usize) -> Self {
+                assert!(value <= ($max as usize));
+                unsafe {
+                    $type::from_u32_unchecked(value as u32)
+                }
+            }
+
+            #[inline]
+            $v fn from_u32(value: u32) -> Self {
+                assert!(value <= $max);
+                unsafe {
+                    $type::from_u32_unchecked(value)
+                }
+            }
+
+            /// Hacky variant of `from_u32` for use in constants.
+            /// This version checks the "max" constraint by using an
+            /// invalid array dereference.
+            #[inline]
+            $v const fn from_u32_const(value: u32) -> Self {
+                // This will fail at const eval time unless `value <=
+                // max` is true (in which case we get the index 0).
+                // It will also fail at runtime, of course, but in a
+                // kind of wacky way.
+                let _ = ["out of range value used"][
+                    !(value <= $max) as usize
+                ];
+
+                unsafe {
+                    $type { private: value }
+                }
+            }
+
+            #[inline]
+            $v const unsafe fn from_u32_unchecked(value: u32) -> Self {
+                $type { private: value }
+            }
+
+            /// Extract value of this index as an integer.
+            #[inline]
+            $v fn index(self) -> usize {
+                self.as_usize()
+            }
+
+            /// Extract value of this index as a usize.
+            #[inline]
+            $v fn as_u32(self) -> u32 {
+                self.private
+            }
+
+            /// Extract value of this index as a u32.
+            #[inline]
+            $v fn as_usize(self) -> usize {
+                self.as_u32() as usize
+            }
+        }
 
         impl Idx for $type {
             #[inline]
             fn new(value: usize) -> Self {
-                assert!(value < ($max) as usize);
-                $type(value as u32)
+                Self::from(value)
             }
 
             #[inline]
             fn index(self) -> usize {
-                self.0 as usize
+                usize::from(self)
+            }
+        }
+
+        impl ::std::iter::Step for $type {
+            #[inline]
+            fn steps_between(start: &Self, end: &Self) -> Option<usize> {
+                <usize as ::std::iter::Step>::steps_between(
+                    &Idx::index(*start),
+                    &Idx::index(*end),
+                )
+            }
+
+            #[inline]
+            fn replace_one(&mut self) -> Self {
+                ::std::mem::replace(self, Self::new(1))
+            }
+
+            #[inline]
+            fn replace_zero(&mut self) -> Self {
+                ::std::mem::replace(self, Self::new(0))
+            }
+
+            #[inline]
+            fn add_one(&self) -> Self {
+                Self::new(Idx::index(*self) + 1)
+            }
+
+            #[inline]
+            fn sub_one(&self) -> Self {
+                Self::new(Idx::index(*self) - 1)
+            }
+
+            #[inline]
+            fn add_usize(&self, u: usize) -> Option<Self> {
+                Idx::index(*self).checked_add(u).map(Self::new)
+            }
+        }
+
+        impl From<$type> for u32 {
+            #[inline]
+            fn from(v: $type) -> u32 {
+                v.as_u32()
+            }
+        }
+
+        impl From<$type> for usize {
+            #[inline]
+            fn from(v: $type) -> usize {
+                v.as_usize()
+            }
+        }
+
+        impl From<usize> for $type {
+            #[inline]
+            fn from(value: usize) -> Self {
+                $type::from_usize(value)
+            }
+        }
+
+        impl From<u32> for $type {
+            #[inline]
+            fn from(value: u32) -> Self {
+                $type::from_u32(value)
             }
         }
 
@@ -108,7 +262,7 @@ macro_rules! newtype_index {
      @debug_format [$debug_format:tt]) => (
         impl ::std::fmt::Debug for $type {
             fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-                write!(fmt, $debug_format, self.0)
+                write!(fmt, $debug_format, self.as_u32())
             }
         }
     );
@@ -131,44 +285,17 @@ macro_rules! newtype_index {
             @debug_format [$debug_format]);
     );
 
-    // Handle the case where someone wants to make the internal field public
-    (@type         [$type:ident]
-     @max          [$max:expr]
-     @debug_format [$debug_format:tt]
-                   pub idx
-                   $($tokens:tt)*) => (
-        newtype_index!(
-            @pub          [pub]
-            @type         [$type]
-            @max          [$max]
-            @debug_format [$debug_format]
-                          $($tokens)*);
-    );
-
-    // The default case is that the internal field is private
-    (@type         [$type:ident]
-     @max          [$max:expr]
-     @debug_format [$debug_format:tt]
-                   $($tokens:tt)*) => (
-        newtype_index!(
-            @pub          []
-            @type         [$type]
-            @max          [$max]
-            @debug_format [$debug_format]
-                          $($tokens)*);
-    );
-
     // Append comma to end of derives list if it's missing
-    (@pub          [$($pub:tt)*]
-     @type         [$type:ident]
+    (@type         [$type:ident]
      @max          [$max:expr]
+     @vis          [$v:vis]
      @debug_format [$debug_format:tt]
                    derive [$($derives:ident),*]
                    $($tokens:tt)*) => (
         newtype_index!(
-            @pub          [$($pub)*]
             @type         [$type]
             @max          [$max]
+            @vis          [$v]
             @debug_format [$debug_format]
                           derive [$($derives,)*]
                           $($tokens)*);
@@ -176,154 +303,154 @@ macro_rules! newtype_index {
 
     // By not including the @derives marker in this list nor in the default args, we can force it
     // to come first if it exists. When encodable is custom, just use the derives list as-is.
-    (@pub          [$($pub:tt)*]
-     @type         [$type:ident]
+    (@type         [$type:ident]
      @max          [$max:expr]
+     @vis          [$v:vis]
      @debug_format [$debug_format:tt]
                    derive [$($derives:ident,)+]
                    ENCODABLE = custom
                    $($tokens:tt)*) => (
         newtype_index!(
             @derives      [$($derives,)+]
-            @pub          [$($pub)*]
             @type         [$type]
             @max          [$max]
+            @vis          [$v]
             @debug_format [$debug_format]
                           $($tokens)*);
     );
 
     // By not including the @derives marker in this list nor in the default args, we can force it
     // to come first if it exists. When encodable isn't custom, add serialization traits by default.
-    (@pub          [$($pub:tt)*]
-     @type         [$type:ident]
+    (@type         [$type:ident]
      @max          [$max:expr]
+     @vis          [$v:vis]
      @debug_format [$debug_format:tt]
                    derive [$($derives:ident,)+]
                    $($tokens:tt)*) => (
         newtype_index!(
             @derives      [$($derives,)+ RustcDecodable, RustcEncodable,]
-            @pub          [$($pub)*]
             @type         [$type]
             @max          [$max]
+            @vis          [$v]
             @debug_format [$debug_format]
                           $($tokens)*);
     );
 
     // The case where no derives are added, but encodable is overridden. Don't
     // derive serialization traits
-    (@pub          [$($pub:tt)*]
-     @type         [$type:ident]
+    (@type         [$type:ident]
      @max          [$max:expr]
+     @vis          [$v:vis]
      @debug_format [$debug_format:tt]
                    ENCODABLE = custom
                    $($tokens:tt)*) => (
         newtype_index!(
             @derives      []
-            @pub          [$($pub)*]
             @type         [$type]
             @max          [$max]
+            @vis          [$v]
             @debug_format [$debug_format]
                           $($tokens)*);
     );
 
     // The case where no derives are added, add serialization derives by default
-    (@pub          [$($pub:tt)*]
-     @type         [$type:ident]
+    (@type         [$type:ident]
      @max          [$max:expr]
+     @vis          [$v:vis]
      @debug_format [$debug_format:tt]
                    $($tokens:tt)*) => (
         newtype_index!(
             @derives      [RustcDecodable, RustcEncodable,]
-            @pub          [$($pub)*]
             @type         [$type]
             @max          [$max]
+            @vis          [$v]
             @debug_format [$debug_format]
                           $($tokens)*);
     );
 
     // Rewrite final without comma to one that includes comma
     (@derives      [$($derives:ident,)*]
-     @pub          [$($pub:tt)*]
      @type         [$type:ident]
      @max          [$max:expr]
+     @vis          [$v:vis]
      @debug_format [$debug_format:tt]
                    $name:ident = $constant:expr) => (
         newtype_index!(
             @derives      [$($derives,)*]
-            @pub          [$($pub)*]
             @type         [$type]
             @max          [$max]
+            @vis          [$v]
             @debug_format [$debug_format]
                           $name = $constant,);
     );
 
     // Rewrite final const without comma to one that includes comma
     (@derives      [$($derives:ident,)*]
-     @pub          [$($pub:tt)*]
      @type         [$type:ident]
      @max          [$_max:expr]
+     @vis          [$v:vis]
      @debug_format [$debug_format:tt]
                    $(#[doc = $doc:expr])*
                    const $name:ident = $constant:expr) => (
         newtype_index!(
             @derives      [$($derives,)*]
-            @pub          [$($pub)*]
             @type         [$type]
             @max          [$max]
+            @vis          [$v]
             @debug_format [$debug_format]
                           $(#[doc = $doc])* const $name = $constant,);
     );
 
     // Replace existing default for max
     (@derives      [$($derives:ident,)*]
-     @pub          [$($pub:tt)*]
      @type         [$type:ident]
      @max          [$_max:expr]
+     @vis          [$v:vis]
      @debug_format [$debug_format:tt]
                    MAX = $max:expr,
                    $($tokens:tt)*) => (
         newtype_index!(
             @derives      [$($derives,)*]
-            @pub          [$($pub)*]
             @type         [$type]
             @max          [$max]
+            @vis          [$v]
             @debug_format [$debug_format]
                           $($tokens)*);
     );
 
     // Replace existing default for debug_format
     (@derives      [$($derives:ident,)*]
-     @pub          [$($pub:tt)*]
      @type         [$type:ident]
      @max          [$max:expr]
+     @vis          [$v:vis]
      @debug_format [$_debug_format:tt]
                    DEBUG_FORMAT = $debug_format:tt,
                    $($tokens:tt)*) => (
         newtype_index!(
             @derives      [$($derives,)*]
-            @pub          [$($pub)*]
             @type         [$type]
             @max          [$max]
+            @vis          [$v]
             @debug_format [$debug_format]
                           $($tokens)*);
     );
 
     // Assign a user-defined constant
     (@derives      [$($derives:ident,)*]
-     @pub          [$($pub:tt)*]
      @type         [$type:ident]
      @max          [$max:expr]
+     @vis          [$v:vis]
      @debug_format [$debug_format:tt]
                    $(#[doc = $doc:expr])*
                    const $name:ident = $constant:expr,
                    $($tokens:tt)*) => (
         $(#[doc = $doc])*
-        pub const $name: $type = $type($constant);
+        pub const $name: $type = $type::from_u32_const($constant);
         newtype_index!(
             @derives      [$($derives,)*]
-            @pub          [$($pub)*]
             @type         [$type]
             @max          [$max]
+            @vis          [$v]
             @debug_format [$debug_format]
                           $($tokens)*);
     );
@@ -368,6 +495,11 @@ impl<I: Idx, T> IndexVec<I, T> {
     }
 
     #[inline]
+    pub fn from_raw(raw: Vec<T>) -> Self {
+        IndexVec { raw, _marker: PhantomData }
+    }
+
+    #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         IndexVec { raw: Vec::with_capacity(capacity), _marker: PhantomData }
     }
@@ -401,6 +533,13 @@ impl<I: Idx, T> IndexVec<I, T> {
     #[inline]
     pub fn len(&self) -> usize {
         self.raw.len()
+    }
+
+    /// Gives the next index that will be assigned when `push` is
+    /// called.
+    #[inline]
+    pub fn next_index(&self) -> I {
+        I::new(self.len())
     }
 
     #[inline]
@@ -469,8 +608,8 @@ impl<I: Idx, T> IndexVec<I, T> {
     }
 
     #[inline]
-    pub fn swap(&mut self, a: usize, b: usize) {
-        self.raw.swap(a, b)
+    pub fn swap(&mut self, a: I, b: I) {
+        self.raw.swap(a.index(), b.index())
     }
 
     #[inline]
@@ -512,9 +651,27 @@ impl<I: Idx, T> IndexVec<I, T> {
 }
 
 impl<I: Idx, T: Clone> IndexVec<I, T> {
+    /// Grows the index vector so that it contains an entry for
+    /// `elem`; if that is already true, then has no
+    /// effect. Otherwise, inserts new values as needed by invoking
+    /// `fill_value`.
+    #[inline]
+    pub fn ensure_contains_elem(&mut self, elem: I, fill_value: impl FnMut() -> T) {
+        let min_new_len = elem.index() + 1;
+        if self.len() < min_new_len {
+            self.raw.resize_with(min_new_len, fill_value);
+        }
+    }
+
     #[inline]
     pub fn resize(&mut self, new_len: usize, value: T) {
         self.raw.resize(new_len, value)
+    }
+
+    #[inline]
+    pub fn resize_to_elem(&mut self, elem: I, fill_value: impl FnMut() -> T) {
+        let min_new_len = elem.index() + 1;
+        self.raw.resize_with(min_new_len, fill_value);
     }
 }
 

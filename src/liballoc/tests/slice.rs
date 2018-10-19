@@ -18,7 +18,8 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize};
 use std::thread;
 
-use rand::{Rng, thread_rng};
+use rand::{Rng, RngCore, thread_rng};
+use rand::distributions::Standard;
 
 fn square(n: usize) -> usize {
     n * n
@@ -405,7 +406,7 @@ fn test_sort() {
     for len in (2..25).chain(500..510) {
         for &modulus in &[5, 10, 100, 1000] {
             for _ in 0..10 {
-                let orig: Vec<_> = rng.gen_iter::<i32>()
+                let orig: Vec<_> = rng.sample_iter::<i32, _>(&Standard)
                     .map(|x| x % modulus)
                     .take(len)
                     .collect();
@@ -974,27 +975,27 @@ fn test_chunksator_0() {
 }
 
 #[test]
-fn test_exact_chunksator() {
+fn test_chunks_exactator() {
     let v = &[1, 2, 3, 4, 5];
 
-    assert_eq!(v.exact_chunks(2).len(), 2);
+    assert_eq!(v.chunks_exact(2).len(), 2);
 
     let chunks: &[&[_]] = &[&[1, 2], &[3, 4]];
-    assert_eq!(v.exact_chunks(2).collect::<Vec<_>>(), chunks);
+    assert_eq!(v.chunks_exact(2).collect::<Vec<_>>(), chunks);
     let chunks: &[&[_]] = &[&[1, 2, 3]];
-    assert_eq!(v.exact_chunks(3).collect::<Vec<_>>(), chunks);
+    assert_eq!(v.chunks_exact(3).collect::<Vec<_>>(), chunks);
     let chunks: &[&[_]] = &[];
-    assert_eq!(v.exact_chunks(6).collect::<Vec<_>>(), chunks);
+    assert_eq!(v.chunks_exact(6).collect::<Vec<_>>(), chunks);
 
     let chunks: &[&[_]] = &[&[3, 4], &[1, 2]];
-    assert_eq!(v.exact_chunks(2).rev().collect::<Vec<_>>(), chunks);
+    assert_eq!(v.chunks_exact(2).rev().collect::<Vec<_>>(), chunks);
 }
 
 #[test]
 #[should_panic]
-fn test_exact_chunksator_0() {
+fn test_chunks_exactator_0() {
     let v = &[1, 2, 3, 4];
-    let _it = v.exact_chunks(0);
+    let _it = v.chunks_exact(0);
 }
 
 #[test]
@@ -1234,10 +1235,10 @@ fn test_mut_chunks_0() {
 }
 
 #[test]
-fn test_mut_exact_chunks() {
+fn test_mut_chunks_exact() {
     let mut v = [0, 1, 2, 3, 4, 5, 6];
-    assert_eq!(v.exact_chunks_mut(2).len(), 3);
-    for (i, chunk) in v.exact_chunks_mut(3).enumerate() {
+    assert_eq!(v.chunks_exact_mut(2).len(), 3);
+    for (i, chunk) in v.chunks_exact_mut(3).enumerate() {
         for x in chunk {
             *x = i as u8;
         }
@@ -1247,9 +1248,9 @@ fn test_mut_exact_chunks() {
 }
 
 #[test]
-fn test_mut_exact_chunks_rev() {
+fn test_mut_chunks_exact_rev() {
     let mut v = [0, 1, 2, 3, 4, 5, 6];
-    for (i, chunk) in v.exact_chunks_mut(3).rev().enumerate() {
+    for (i, chunk) in v.chunks_exact_mut(3).rev().enumerate() {
         for x in chunk {
             *x = i as u8;
         }
@@ -1260,9 +1261,9 @@ fn test_mut_exact_chunks_rev() {
 
 #[test]
 #[should_panic]
-fn test_mut_exact_chunks_0() {
+fn test_mut_chunks_exact_0() {
     let mut v = [1, 2, 3, 4];
-    let _it = v.exact_chunks_mut(0);
+    let _it = v.chunks_exact_mut(0);
 }
 
 #[test]
@@ -1528,4 +1529,15 @@ fn panic_safe() {
             }
         }
     }
+}
+
+#[test]
+fn repeat_generic_slice() {
+    assert_eq!([1, 2].repeat(2), vec![1, 2, 1, 2]);
+    assert_eq!([1, 2, 3, 4].repeat(0), vec![]);
+    assert_eq!([1, 2, 3, 4].repeat(1), vec![1, 2, 3, 4]);
+    assert_eq!(
+        [1, 2, 3, 4].repeat(3),
+        vec![1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4]
+    );
 }

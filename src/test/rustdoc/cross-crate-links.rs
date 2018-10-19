@@ -11,8 +11,6 @@
 // aux-build:all-item-types.rs
 // build-aux-docs
 
-#![feature(use_extern_macros)]
-
 #![crate_name = "foo"]
 
 #[macro_use]
@@ -66,6 +64,6 @@ pub use all_item_types::FOO_STATIC;
 #[doc(no_inline)]
 pub use all_item_types::FOO_CONSTANT;
 
-// @has 'foo/index.html' '//a[@href="../foo/macro.foo_macro.html"]' 'foo_macro'
+// @has 'foo/index.html' '//a[@href="../all_item_types/macro.foo_macro.html"]' 'foo_macro'
 #[doc(no_inline)]
 pub use all_item_types::foo_macro;

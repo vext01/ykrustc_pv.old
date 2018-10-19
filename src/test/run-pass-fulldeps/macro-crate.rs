@@ -8,29 +8,31 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(plugin_as_library)]
+#![allow(dead_code)]
 // aux-build:macro_crate_test.rs
 // ignore-stage1
 
-#![feature(plugin, custom_attribute)]
+#![feature(plugin, rustc_attrs)]
 #![plugin(macro_crate_test)]
 
 #[macro_use] #[no_link]
 extern crate macro_crate_test;
 
+#[rustc_into_multi_foo]
 #[derive(PartialEq, Clone, Debug)]
-#[into_multi_foo]
 fn foo() -> AnotherFakeTypeThatHadBetterGoAway {}
 
 // Check that the `#[into_multi_foo]`-generated `foo2` is configured away
 fn foo2() {}
 
 trait Qux {
-    #[into_multi_foo]
+    #[rustc_into_multi_foo]
     fn bar();
 }
 
 impl Qux for i32 {
-    #[into_multi_foo]
+    #[rustc_into_multi_foo]
     fn bar() {}
 }
 

@@ -1,0 +1,9 @@
+error[E0223]: ambiguous associated type
+  --> $DIR/issue-34209.rs:17:9
+   |
+LL |         S::B{ } => { },
+   |         ^^^^ help: use fully-qualified syntax: `<S as Trait>::B`
+
+error: aborting due to previous error
+
+For more information about this error, try `rustc --explain E0223`.

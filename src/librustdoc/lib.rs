@@ -13,17 +13,18 @@
        html_root_url = "https://doc.rust-lang.org/nightly/",
        html_playground_url = "https://play.rust-lang.org/")]
 
-#![feature(ascii_ctype)]
 #![feature(rustc_private)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![feature(fs_read_write)]
+#![feature(nll)]
 #![feature(set_stdio)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(test)]
 #![feature(vec_remove_item)]
-#![feature(entry_and_modify)]
 #![feature(ptr_offset_from)]
+#![feature(crate_visibility_modifier)]
+#![feature(const_fn)]
+#![feature(drain_filter)]
 
 #![recursion_limit="256"]
 
@@ -46,8 +47,9 @@ extern crate test as testing;
 #[macro_use] extern crate log;
 extern crate rustc_errors as errors;
 extern crate pulldown_cmark;
-extern crate tempdir;
+extern crate tempfile;
 extern crate minifier;
+extern crate parking_lot;
 
 extern crate serialize as rustc_serialize; // used by deriving
 
@@ -56,6 +58,7 @@ use errors::ColorConfig;
 use std::collections::{BTreeMap, BTreeSet};
 use std::default::Default;
 use std::env;
+use std::panic;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::mpsc::channel;
@@ -67,33 +70,31 @@ use rustc::session::search_paths::SearchPaths;
 use rustc::session::config::{ErrorOutputType, RustcOptGroup, Externs, CodegenOptions};
 use rustc::session::config::{nightly_options, build_codegen_options};
 use rustc_target::spec::TargetTriple;
+use rustc::session::config::get_cmd_lint_options;
 
 #[macro_use]
-pub mod externalfiles;
+mod externalfiles;
 
-pub mod clean;
-pub mod core;
-pub mod doctree;
-pub mod fold;
+mod clean;
+mod core;
+mod doctree;
+mod fold;
 pub mod html {
-    pub mod highlight;
-    pub mod escape;
-    pub mod item_type;
-    pub mod format;
-    pub mod layout;
+    crate mod highlight;
+    crate mod escape;
+    crate mod item_type;
+    crate mod format;
+    crate mod layout;
     pub mod markdown;
-    pub mod render;
-    pub mod toc;
+    crate mod render;
+    crate mod toc;
 }
-pub mod markdown;
-pub mod passes;
-pub mod plugins;
-pub mod visit_ast;
-pub mod visit_lib;
-pub mod test;
-pub mod theme;
-
-use clean::AttributesExt;
+mod markdown;
+mod passes;
+mod visit_ast;
+mod visit_lib;
+mod test;
+mod theme;
 
 struct Output {
     krate: clean::Crate,
@@ -102,14 +103,18 @@ struct Output {
 }
 
 pub fn main() {
-    const STACK_SIZE: usize = 32_000_000; // 32MB
+    let thread_stack_size: usize = if cfg!(target_os = "haiku") {
+        16_000_000 // 16MB on Haiku
+    } else {
+        32_000_000 // 32MB on other platforms
+    };
     rustc_driver::set_sigpipe_handler();
     env_logger::init();
-    let res = std::thread::Builder::new().stack_size(STACK_SIZE).spawn(move || {
+    let res = std::thread::Builder::new().stack_size(thread_stack_size).spawn(move || {
         syntax::with_globals(move || {
             get_args().map(|args| main_args(&args)).unwrap_or(1)
         })
-    }).unwrap().join().unwrap_or(101);
+    }).unwrap().join().unwrap_or(rustc_driver::EXIT_FAILURE);
     process::exit(res as i32);
 }
 
@@ -134,7 +139,7 @@ fn unstable<F>(name: &'static str, f: F) -> RustcOptGroup
     RustcOptGroup::unstable(name, f)
 }
 
-pub fn opts() -> Vec<RustcOptGroup> {
+fn opts() -> Vec<RustcOptGroup> {
     vec![
         stable("h", |o| o.optflag("h", "help", "show this help message")),
         stable("V", |o| o.optflag("V", "version", "print rustdoc's version")),
@@ -158,8 +163,12 @@ pub fn opts() -> Vec<RustcOptGroup> {
         stable("extern", |o| {
             o.optmulti("", "extern", "pass an --extern to rustc", "NAME=PATH")
         }),
+        unstable("extern-html-root-url", |o| {
+            o.optmulti("", "extern-html-root-url",
+                       "base URL to use for dependencies", "NAME=URL")
+        }),
         stable("plugin-path", |o| {
-            o.optmulti("", "plugin-path", "directory to load plugins from", "DIR")
+            o.optmulti("", "plugin-path", "removed", "DIR")
         }),
         stable("C", |o| {
             o.optmulti("C", "codegen", "pass a codegen option to rustc", "OPT[=VALUE]")
@@ -172,7 +181,7 @@ pub fn opts() -> Vec<RustcOptGroup> {
                        "PASSES")
         }),
         stable("plugins", |o| {
-            o.optmulti("", "plugins", "space separated list of plugins to also load",
+            o.optmulti("", "plugins", "removed",
                        "PLUGINS")
         }),
         stable("no-default", |o| {
@@ -278,12 +287,12 @@ pub fn opts() -> Vec<RustcOptGroup> {
                       \"light-suffix.css\"",
                      "PATH")
         }),
-        unstable("edition", |o| {
+        stable("edition", |o| {
             o.optopt("", "edition",
                      "edition to use when compiling rust code (default: 2015)",
                      "EDITION")
         }),
-        unstable("color", |o| {
+        stable("color", |o| {
             o.optopt("",
                      "color",
                      "Configure coloring of output:
@@ -292,7 +301,7 @@ pub fn opts() -> Vec<RustcOptGroup> {
                                           never  = never colorize output",
                      "auto|always|never")
         }),
-        unstable("error-format", |o| {
+        stable("error-format", |o| {
             o.optopt("",
                      "error-format",
                      "How errors and other messages are produced",
@@ -303,10 +312,32 @@ pub fn opts() -> Vec<RustcOptGroup> {
                        "disable-minification",
                        "Disable minification applied on JS files")
         }),
+        stable("warn", |o| {
+            o.optmulti("W", "warn", "Set lint warnings", "OPT")
+        }),
+        stable("allow", |o| {
+            o.optmulti("A", "allow", "Set lint allowed", "OPT")
+        }),
+        stable("deny", |o| {
+            o.optmulti("D", "deny", "Set lint denied", "OPT")
+        }),
+        stable("forbid", |o| {
+            o.optmulti("F", "forbid", "Set lint forbidden", "OPT")
+        }),
+        stable("cap-lints", |o| {
+            o.optmulti(
+                "",
+                "cap-lints",
+                "Set the most restrictive lint level. \
+                 More restrictive lints are capped at this \
+                 level. By default, it is at `forbid` level.",
+                "LEVEL",
+            )
+        }),
     ]
 }
 
-pub fn usage(argv0: &str) {
+fn usage(argv0: &str) {
     let mut options = getopts::Options::new();
     for option in opts() {
         (option.apply)(&mut options);
@@ -314,7 +345,7 @@ pub fn usage(argv0: &str) {
     println!("{}", options.usage(&format!("{} [options] <input>", argv0)));
 }
 
-pub fn main_args(args: &[String]) -> isize {
+fn main_args(args: &[String]) -> isize {
     let mut options = getopts::Options::new();
     for option in opts() {
         (option.apply)(&mut options);
@@ -338,11 +369,15 @@ pub fn main_args(args: &[String]) -> isize {
 
     if matches.opt_strs("passes") == ["list"] {
         println!("Available passes for running rustdoc:");
-        for &(name, _, description) in passes::PASSES {
-            println!("{:>20} - {}", name, description);
+        for pass in passes::PASSES {
+            println!("{:>20} - {}", pass.name(), pass.description());
         }
         println!("\nDefault passes for rustdoc:");
         for &name in passes::DEFAULT_PASSES {
+            println!("{:>20}", name);
+        }
+        println!("\nPasses run with `--document-private-items`:");
+        for &name in passes::DEFAULT_PRIVATE_PASSES {
             println!("{:>20}", name);
         }
         return 0;
@@ -371,8 +406,14 @@ pub fn main_args(args: &[String]) -> isize {
                                   `short` (instead was `{}`)", arg));
         }
     };
+    let treat_err_as_bug = matches.opt_strs("Z").iter().any(|x| {
+        *x == "treat-err-as-bug"
+    });
+    let ui_testing = matches.opt_strs("Z").iter().any(|x| {
+        *x == "ui-testing"
+    });
 
-    let diag = core::new_handler(error_format, None);
+    let diag = core::new_handler(error_format, None, treat_err_as_bug, ui_testing);
 
     // check for deprecated options
     check_deprecated_options(&matches, &diag);
@@ -423,6 +464,13 @@ pub fn main_args(args: &[String]) -> isize {
             return 1;
         }
     };
+    let extern_urls = match parse_extern_html_roots(&matches) {
+        Ok(ex) => ex,
+        Err(err) => {
+            diag.struct_err(err).emit();
+            return 1;
+        }
+    };
 
     let test_args = matches.opt_strs("test-args");
     let test_args: Vec<String> = test_args.iter()
@@ -436,7 +484,8 @@ pub fn main_args(args: &[String]) -> isize {
 
     let output = matches.opt_str("o").map(|s| PathBuf::from(&s));
     let css_file_extension = matches.opt_str("e").map(|s| PathBuf::from(&s));
-    let cfgs = matches.opt_strs("cfg");
+    let mut cfgs = matches.opt_strs("cfg");
+    cfgs.push("rustdoc".to_string());
 
     if let Some(ref p) = css_file_extension {
         if !p.is_file() {
@@ -467,12 +516,14 @@ pub fn main_args(args: &[String]) -> isize {
         }
     }
 
+    let mut id_map = html::markdown::IdMap::new();
+    id_map.populate(html::render::initial_ids());
     let external_html = match ExternalHtml::load(
             &matches.opt_strs("html-in-header"),
             &matches.opt_strs("html-before-content"),
             &matches.opt_strs("html-after-content"),
             &matches.opt_strs("markdown-before-content"),
-            &matches.opt_strs("markdown-after-content"), &diag) {
+            &matches.opt_strs("markdown-after-content"), &diag, &mut id_map) {
         Some(eh) => eh,
         None => return 3,
     };
@@ -517,11 +568,11 @@ pub fn main_args(args: &[String]) -> isize {
     let res = acquire_input(PathBuf::from(input), externs, edition, cg, &matches, error_format,
                             move |out| {
         let Output { krate, passes, renderinfo } = out;
-        let diag = core::new_handler(error_format, None);
+        let diag = core::new_handler(error_format, None, treat_err_as_bug, ui_testing);
         info!("going to format");
         match output_format.as_ref().map(|s| &**s) {
             Some("html") | None => {
-                html::render::run(krate, &external_html, playground_url,
+                html::render::run(krate, extern_urls, &external_html, playground_url,
                                   output.unwrap_or(PathBuf::from("doc")),
                                   resource_suffix.unwrap_or(String::new()),
                                   passes.into_iter().collect(),
@@ -529,7 +580,7 @@ pub fn main_args(args: &[String]) -> isize {
                                   renderinfo,
                                   sort_modules_alphabetically,
                                   themes,
-                                  enable_minification)
+                                  enable_minification, id_map)
                     .expect("failed to generate documentation");
                 0
             }
@@ -566,18 +617,38 @@ where R: 'static + Send, F: 'static + Send + FnOnce(Output) -> R {
 /// Extracts `--extern CRATE=PATH` arguments from `matches` and
 /// returns a map mapping crate names to their paths or else an
 /// error message.
+// FIXME(eddyb) This shouldn't be duplicated with `rustc::session`.
 fn parse_externs(matches: &getopts::Matches) -> Result<Externs, String> {
-    let mut externs = BTreeMap::new();
+    let mut externs: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
     for arg in &matches.opt_strs("extern") {
         let mut parts = arg.splitn(2, '=');
         let name = parts.next().ok_or("--extern value must not be empty".to_string())?;
-        let location = parts.next()
-                                 .ok_or("--extern value must be of the format `foo=bar`"
-                                    .to_string())?;
+        let location = parts.next().map(|s| s.to_string());
+        if location.is_none() && !nightly_options::is_unstable_enabled(matches) {
+            return Err("the `-Z unstable-options` flag must also be passed to \
+                        enable `--extern crate_name` without `=path`".to_string());
+        }
         let name = name.to_string();
-        externs.entry(name).or_insert_with(BTreeSet::new).insert(location.to_string());
+        externs.entry(name).or_default().insert(location);
     }
     Ok(Externs::new(externs))
+}
+
+/// Extracts `--extern-html-root-url` arguments from `matches` and returns a map of crate names to
+/// the given URLs. If an `--extern-html-root-url` argument was ill-formed, returns an error
+/// describing the issue.
+fn parse_extern_html_roots(matches: &getopts::Matches)
+    -> Result<BTreeMap<String, String>, &'static str>
+{
+    let mut externs = BTreeMap::new();
+    for arg in &matches.opt_strs("extern-html-root-url") {
+        let mut parts = arg.splitn(2, '=');
+        let name = parts.next().ok_or("--extern-html-root-url must not be empty")?;
+        let url = parts.next().ok_or("--extern-html-root-url must be of the form name=url")?;
+        externs.insert(name.to_string(), url.to_string());
+    }
+
+    Ok(externs)
 }
 
 /// Interprets the input file as a rust source file, passing it through the
@@ -595,27 +666,24 @@ fn rust_input<R, F>(cratefile: PathBuf,
 where R: 'static + Send,
       F: 'static + Send + FnOnce(Output) -> R
 {
-    let mut default_passes = !matches.opt_present("no-defaults");
-    let mut passes = matches.opt_strs("passes");
-    let mut plugins = matches.opt_strs("plugins");
+    let default_passes = if matches.opt_present("no-defaults") {
+        passes::DefaultPassOption::None
+    } else if matches.opt_present("document-private-items") {
+        passes::DefaultPassOption::Private
+    } else {
+        passes::DefaultPassOption::Default
+    };
 
-    // We hardcode in the passes here, as this is a new flag and we
-    // are generally deprecating passes.
-    if matches.opt_present("document-private-items") {
-        default_passes = false;
-
-        passes = vec![
-            String::from("collapse-docs"),
-            String::from("unindent-comments"),
-        ];
-    }
+    let manual_passes = matches.opt_strs("passes");
+    let plugins = matches.opt_strs("plugins");
 
     // First, parse the crate and extract all relevant information.
     let mut paths = SearchPaths::new();
     for s in &matches.opt_strs("L") {
         paths.add_path(s, ErrorOutputType::default());
     }
-    let cfgs = matches.opt_strs("cfg");
+    let mut cfgs = matches.opt_strs("cfg");
+    cfgs.push("rustdoc".to_string());
     let triple = matches.opt_str("target").map(|target| {
         if target.ends_with(".json") {
             TargetTriple::TargetPath(PathBuf::from(target))
@@ -634,16 +702,26 @@ where R: 'static + Send,
     let force_unstable_if_unmarked = matches.opt_strs("Z").iter().any(|x| {
         *x == "force-unstable-if-unmarked"
     });
+    let treat_err_as_bug = matches.opt_strs("Z").iter().any(|x| {
+        *x == "treat-err-as-bug"
+    });
+    let ui_testing = matches.opt_strs("Z").iter().any(|x| {
+        *x == "ui-testing"
+    });
+
+    let (lint_opts, describe_lints, lint_cap) = get_cmd_lint_options(matches, error_format);
 
     let (tx, rx) = channel();
 
-    rustc_driver::monitor(move || syntax::with_globals(move || {
+    let result = rustc_driver::monitor(move || syntax::with_globals(move || {
         use rustc::session::config::Input;
 
-        let (mut krate, renderinfo) =
+        let (mut krate, renderinfo, passes) =
             core::run_core(paths, cfgs, externs, Input::File(cratefile), triple, maybe_sysroot,
                            display_warnings, crate_name.clone(),
-                           force_unstable_if_unmarked, edition, cg, error_format);
+                           force_unstable_if_unmarked, edition, cg, error_format,
+                           lint_opts, lint_cap, describe_lints, manual_passes, default_passes,
+                           treat_err_as_bug, ui_testing);
 
         info!("finished with rustc");
 
@@ -653,91 +731,43 @@ where R: 'static + Send,
 
         krate.version = crate_version;
 
-        let diag = core::new_handler(error_format, None);
-
-        fn report_deprecated_attr(name: &str, diag: &errors::Handler) {
-            let mut msg = diag.struct_warn(&format!("the `#![doc({})]` attribute is \
-                                                     considered deprecated", name));
-            msg.warn("please see https://github.com/rust-lang/rust/issues/44136");
-
-            if name == "no_default_passes" {
-                msg.help("you may want to use `#![doc(document_private_items)]`");
-            }
-
-            msg.emit();
+        if !plugins.is_empty() {
+            eprintln!("WARNING: --plugins no longer functions; see CVE-2018-1000622");
         }
 
-        // Process all of the crate attributes, extracting plugin metadata along
-        // with the passes which we are supposed to run.
-        for attr in krate.module.as_ref().unwrap().attrs.lists("doc") {
-            let name = attr.name().map(|s| s.as_str());
-            let name = name.as_ref().map(|s| &s[..]);
-            if attr.is_word() {
-                if name == Some("no_default_passes") {
-                    report_deprecated_attr("no_default_passes", &diag);
-                    default_passes = false;
-                }
-            } else if let Some(value) = attr.value_str() {
-                let sink = match name {
-                    Some("passes") => {
-                        report_deprecated_attr("passes = \"...\"", &diag);
-                        &mut passes
-                    },
-                    Some("plugins") => {
-                        report_deprecated_attr("plugins = \"...\"", &diag);
-                        &mut plugins
-                    },
-                    _ => continue,
-                };
-                for p in value.as_str().split_whitespace() {
-                    sink.push(p.to_string());
-                }
-            }
-
-            if attr.is_word() && name == Some("document_private_items") {
-                default_passes = false;
-
-                passes = vec![
-                    String::from("collapse-docs"),
-                    String::from("unindent-comments"),
-                ];
-            }
+        if !plugin_path.is_none() {
+            eprintln!("WARNING: --plugin-path no longer functions; see CVE-2018-1000622");
         }
 
-        if default_passes {
-            for name in passes::DEFAULT_PASSES.iter().rev() {
-                passes.insert(0, name.to_string());
-            }
-        }
+        info!("Executing passes");
 
-        // Load all plugins/passes into a PluginManager
-        let path = plugin_path.unwrap_or("/tmp/rustdoc/plugins".to_string());
-        let mut pm = plugins::PluginManager::new(PathBuf::from(path));
         for pass in &passes {
-            let plugin = match passes::PASSES.iter()
-                                             .position(|&(p, ..)| {
-                                                 p == *pass
-                                             }) {
-                Some(i) => passes::PASSES[i].1,
+            // determine if we know about this pass
+            let pass = match passes::find_pass(pass) {
+                Some(pass) => if let Some(pass) = pass.late_fn() {
+                    pass
+                } else {
+                    // not a late pass, but still valid so don't report the error
+                    continue
+                }
                 None => {
                     error!("unknown pass {}, skipping", *pass);
+
                     continue
                 },
             };
-            pm.add_plugin(plugin);
-        }
-        info!("loading plugins...");
-        for pname in plugins {
-            pm.load_plugin(pname);
-        }
 
-        // Run everything!
-        info!("Executing passes/plugins");
-        let krate = pm.run_plugins(krate);
+            // run it
+            krate = pass(krate);
+        }
 
         tx.send(f(Output { krate: krate, renderinfo: renderinfo, passes: passes })).unwrap();
     }));
-    rx.recv().unwrap()
+
+    match result {
+        Ok(()) => rx.recv().unwrap(),
+        Err(_) => panic::resume_unwind(Box::new(errors::FatalErrorMarker)),
+    }
 }
 
 /// Prints deprecation warnings for deprecated options
@@ -745,8 +775,6 @@ fn check_deprecated_options(matches: &getopts::Matches, diag: &errors::Handler) 
     let deprecated_flags = [
        "input-format",
        "output-format",
-       "plugin-path",
-       "plugins",
        "no-defaults",
        "passes",
     ];

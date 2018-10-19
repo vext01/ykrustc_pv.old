@@ -17,7 +17,7 @@ use rustc::ty;
 use rustc_mir::util::borrowck_errors::{BorrowckErrors, Origin};
 use syntax::ast;
 use syntax_pos;
-use errors::DiagnosticBuilder;
+use errors::{DiagnosticBuilder, Applicability};
 use borrowck::gather_loans::gather_moves::PatternSource;
 
 pub struct MoveErrorCollector<'tcx> {
@@ -68,7 +68,7 @@ pub struct GroupedMoveErrors<'tcx> {
     move_to_places: Vec<MovePlace<'tcx>>
 }
 
-fn report_move_errors<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>, errors: &Vec<MoveError<'tcx>>) {
+fn report_move_errors<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>, errors: &[MoveError<'tcx>]) {
     let grouped_errors = group_errors_with_same_origin(errors);
     for error in &grouped_errors {
         let mut err = report_cannot_move_out_of(bccx, error.move_from.clone());
@@ -79,10 +79,13 @@ fn report_move_errors<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>, errors: &Vec<Move
                 // see `get_pattern_source()` for details
                 let initializer =
                     e.init.as_ref().expect("should have an initializer to get an error");
-                if let Ok(snippet) = bccx.tcx.sess.codemap().span_to_snippet(initializer.span) {
-                    err.span_suggestion(initializer.span,
-                                        "consider using a reference instead",
-                                        format!("&{}", snippet));
+                if let Ok(snippet) = bccx.tcx.sess.source_map().span_to_snippet(initializer.span) {
+                    err.span_suggestion_with_applicability(
+                        initializer.span,
+                        "consider using a reference instead",
+                        format!("&{}", snippet),
+                        Applicability::MaybeIncorrect // using a reference may not be the right fix
+                    );
                 }
             }
             _ => {
@@ -99,10 +102,11 @@ fn report_move_errors<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>, errors: &Vec<Move
                            "captured outer variable");
         }
         err.emit();
+        bccx.signal_error();
     }
 }
 
-fn group_errors_with_same_origin<'tcx>(errors: &Vec<MoveError<'tcx>>)
+fn group_errors_with_same_origin<'tcx>(errors: &[MoveError<'tcx>])
                                        -> Vec<GroupedMoveErrors<'tcx>> {
     let mut grouped_errors = Vec::new();
     for error in errors {
@@ -112,15 +116,15 @@ fn group_errors_with_same_origin<'tcx>(errors: &Vec<MoveError<'tcx>>)
 
     fn append_to_grouped_errors<'tcx>(grouped_errors: &mut Vec<GroupedMoveErrors<'tcx>>,
                                       error: &MoveError<'tcx>) {
-        let move_from_id = error.move_from.id;
-        debug!("append_to_grouped_errors(move_from_id={})", move_from_id);
+        let move_from_id = error.move_from.hir_id;
+        debug!("append_to_grouped_errors(move_from_id={:?})", move_from_id);
         let move_to = if error.move_to.is_some() {
             vec![error.move_to.clone().unwrap()]
         } else {
             Vec::new()
         };
         for ge in &mut *grouped_errors {
-            if move_from_id == ge.move_from.id && error.move_to.is_some() {
+            if move_from_id == ge.move_from.hir_id && error.move_to.is_some() {
                 debug!("appending move_to to list");
                 ge.move_to_places.extend(move_to);
                 return
@@ -147,13 +151,13 @@ fn report_cannot_move_out_of<'a, 'tcx>(bccx: &'a BorrowckCtxt<'a, 'tcx>,
         }
         Categorization::Interior(ref b, mc::InteriorElement(ik)) => {
             bccx.cannot_move_out_of_interior_noncopy(
-                move_from.span, b.ty, ik == Kind::Index, Origin::Ast)
+                move_from.span, b.ty, Some(ik == Kind::Index), Origin::Ast)
         }
 
         Categorization::Downcast(ref b, _) |
         Categorization::Interior(ref b, mc::InteriorField(_)) => {
             match b.ty.sty {
-                ty::TyAdt(def, _) if def.has_dtor(bccx.tcx) => {
+                ty::Adt(def, _) if def.has_dtor(bccx.tcx) => {
                     bccx.cannot_move_out_of_interior_of_drop(
                         move_from.span, b.ty, Origin::Ast)
                 }

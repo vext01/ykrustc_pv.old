@@ -1,0 +1,58 @@
+error[E0625]: thread-local statics cannot be accessed at compile-time
+  --> $DIR/thread-local-in-ctfe.rs:16:17
+   |
+LL | static B: u32 = A;
+   |                 ^
+
+error[E0625]: thread-local statics cannot be accessed at compile-time
+  --> $DIR/thread-local-in-ctfe.rs:19:18
+   |
+LL | static C: &u32 = &A;
+   |                  ^^
+
+warning[E0712]: thread-local variable borrowed past end of function
+  --> $DIR/thread-local-in-ctfe.rs:19:18
+   |
+LL | static C: &u32 = &A;
+   |                  ^^- end of enclosing function is here
+   |                  |
+   |                  thread-local variables cannot be borrowed beyond the end of the function
+   |
+   = warning: This error has been downgraded to a warning for backwards compatibility with previous releases.
+           It represents potential unsoundness in your code.
+           This warning will become a hard error in the future.
+
+error[E0625]: thread-local statics cannot be accessed at compile-time
+  --> $DIR/thread-local-in-ctfe.rs:22:16
+   |
+LL | const D: u32 = A;
+   |                ^
+
+error[E0625]: thread-local statics cannot be accessed at compile-time
+  --> $DIR/thread-local-in-ctfe.rs:25:17
+   |
+LL | const E: &u32 = &A;
+   |                 ^^
+
+warning[E0712]: thread-local variable borrowed past end of function
+  --> $DIR/thread-local-in-ctfe.rs:25:17
+   |
+LL | const E: &u32 = &A;
+   |                 ^^- end of enclosing function is here
+   |                 |
+   |                 thread-local variables cannot be borrowed beyond the end of the function
+   |
+   = warning: This error has been downgraded to a warning for backwards compatibility with previous releases.
+           It represents potential unsoundness in your code.
+           This warning will become a hard error in the future.
+
+error[E0625]: thread-local statics cannot be accessed at compile-time
+  --> $DIR/thread-local-in-ctfe.rs:29:5
+   |
+LL |     A
+   |     ^
+
+error: aborting due to 5 previous errors
+
+Some errors occurred: E0625, E0712.
+For more information about an error, try `rustc --explain E0625`.

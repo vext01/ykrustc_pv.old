@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(unused_imports)]
 // This test verifies that casting from the same lifetime on a value
 // to the same lifetime on a trait succeeds. See issue #10766.
 

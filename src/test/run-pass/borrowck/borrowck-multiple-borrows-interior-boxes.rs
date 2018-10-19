@@ -8,6 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(dead_code)]
+#![allow(unused_variables)]
 // Test case from #39963.
 
 #![feature(nll)]

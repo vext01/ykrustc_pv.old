@@ -43,7 +43,7 @@
 //!   throwing. Note that throwing an exception into Rust is undefined behavior
 //!   anyway, so this should be fine.
 //! * We've got some data to transmit across the unwinding boundary,
-//!   specifically a `Box<Any + Send>`. Like with Dwarf exceptions
+//!   specifically a `Box<dyn Any + Send>`. Like with Dwarf exceptions
 //!   these two pointers are stored as a payload in the exception itself. On
 //!   MSVC, however, there's no need for an extra heap allocation because the
 //!   call stack is preserved while filter functions are being executed. This
@@ -54,7 +54,7 @@
 //! [win64]: http://msdn.microsoft.com/en-us/library/1eyas8tf.aspx
 //! [llvm]: http://llvm.org/docs/ExceptionHandling.html#background-on-windows-exceptions
 
-#![allow(bad_style)]
+#![allow(nonstandard_style)]
 #![allow(private_no_mangle_fns)]
 
 use alloc::boxed::Box;
@@ -119,7 +119,7 @@ mod imp {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "arm"))]
 #[macro_use]
 mod imp {
     pub type ptr_t = u32;
@@ -142,7 +142,7 @@ mod imp {
 
 #[repr(C)]
 pub struct _ThrowInfo {
-    pub attribues: c_uint,
+    pub attributes: c_uint,
     pub pnfnUnwind: imp::ptr_t,
     pub pForwardCompat: imp::ptr_t,
     pub pCatchableTypeArray: imp::ptr_t,
@@ -178,7 +178,7 @@ pub struct _TypeDescriptor {
 }
 
 static mut THROW_INFO: _ThrowInfo = _ThrowInfo {
-    attribues: 0,
+    attributes: 0,
     pnfnUnwind: ptr!(0),
     pForwardCompat: ptr!(0),
     pCatchableTypeArray: ptr!(0),
@@ -243,7 +243,7 @@ static mut TYPE_DESCRIPTOR2: _TypeDescriptor = _TypeDescriptor {
     name: imp::NAME2,
 };
 
-pub unsafe fn panic(data: Box<Any + Send>) -> u32 {
+pub unsafe fn panic(data: Box<dyn Any + Send>) -> u32 {
     use core::intrinsics::atomic_store;
 
     // _CxxThrowException executes entirely on this stack frame, so there's no
@@ -297,7 +297,7 @@ pub fn payload() -> [u64; 2] {
     [0; 2]
 }
 
-pub unsafe fn cleanup(payload: [u64; 2]) -> Box<Any + Send> {
+pub unsafe fn cleanup(payload: [u64; 2]) -> Box<dyn Any + Send> {
     mem::transmute(raw::TraitObject {
         data: payload[0] as *mut _,
         vtable: payload[1] as *mut _,

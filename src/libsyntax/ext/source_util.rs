@@ -17,9 +17,9 @@ use parse::{token, DirectoryOwnership};
 use parse;
 use print::pprust;
 use ptr::P;
+use smallvec::SmallVec;
 use symbol::Symbol;
 use tokenstream;
-use util::small_vector::SmallVector;
 
 use std::fs::File;
 use std::io::prelude::*;
@@ -32,29 +32,29 @@ use rustc_data_structures::sync::Lrc;
 
 /// line!(): expands to the current line number
 pub fn expand_line(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenTree])
-                   -> Box<base::MacResult+'static> {
+                   -> Box<dyn base::MacResult+'static> {
     base::check_zero_tts(cx, sp, tts, "line!");
 
     let topmost = cx.expansion_cause().unwrap_or(sp);
-    let loc = cx.codemap().lookup_char_pos(topmost.lo());
+    let loc = cx.source_map().lookup_char_pos(topmost.lo());
 
     base::MacEager::expr(cx.expr_u32(topmost, loc.line as u32))
 }
 
 /* column!(): expands to the current column number */
 pub fn expand_column(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenTree])
-                  -> Box<base::MacResult+'static> {
+                  -> Box<dyn base::MacResult+'static> {
     base::check_zero_tts(cx, sp, tts, "column!");
 
     let topmost = cx.expansion_cause().unwrap_or(sp);
-    let loc = cx.codemap().lookup_char_pos(topmost.lo());
+    let loc = cx.source_map().lookup_char_pos(topmost.lo());
 
     base::MacEager::expr(cx.expr_u32(topmost, loc.col.to_usize() as u32 + 1))
 }
 
 /* __rust_unstable_column!(): expands to the current column number */
 pub fn expand_column_gated(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenTree])
-                  -> Box<base::MacResult+'static> {
+                  -> Box<dyn base::MacResult+'static> {
     if sp.allows_unstable() {
         expand_column(cx, sp, tts)
     } else {
@@ -63,25 +63,25 @@ pub fn expand_column_gated(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::Token
 }
 
 /// file!(): expands to the current filename */
-/// The filemap (`loc.file`) contains a bunch more information we could spit
+/// The source_file (`loc.file`) contains a bunch more information we could spit
 /// out if we wanted.
 pub fn expand_file(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenTree])
-                   -> Box<base::MacResult+'static> {
+                   -> Box<dyn base::MacResult+'static> {
     base::check_zero_tts(cx, sp, tts, "file!");
 
     let topmost = cx.expansion_cause().unwrap_or(sp);
-    let loc = cx.codemap().lookup_char_pos(topmost.lo());
+    let loc = cx.source_map().lookup_char_pos(topmost.lo());
     base::MacEager::expr(cx.expr_str(topmost, Symbol::intern(&loc.file.name.to_string())))
 }
 
 pub fn expand_stringify(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let s = pprust::tts_to_string(tts);
     base::MacEager::expr(cx.expr_str(sp, Symbol::intern(&s)))
 }
 
 pub fn expand_mod(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenTree])
-                  -> Box<base::MacResult+'static> {
+                  -> Box<dyn base::MacResult+'static> {
     base::check_zero_tts(cx, sp, tts, "module_path!");
     let mod_path = &cx.current_expansion.module.mod_path;
     let string = mod_path.iter().map(|x| x.to_string()).collect::<Vec<String>>().join("::");
@@ -93,7 +93,7 @@ pub fn expand_mod(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenTree])
 /// This is generally a bad idea because it's going to behave
 /// unhygienically.
 pub fn expand_include<'cx>(cx: &'cx mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenTree])
-                           -> Box<base::MacResult+'cx> {
+                           -> Box<dyn base::MacResult+'cx> {
     let file = match get_single_str_from_tts(cx, sp, tts, "include!") {
         Some(f) => f,
         None => return DummyResult::expr(sp),
@@ -110,9 +110,9 @@ pub fn expand_include<'cx>(cx: &'cx mut ExtCtxt, sp: Span, tts: &[tokenstream::T
         fn make_expr(mut self: Box<ExpandResult<'a>>) -> Option<P<ast::Expr>> {
             Some(panictry!(self.p.parse_expr()))
         }
-        fn make_items(mut self: Box<ExpandResult<'a>>)
-                      -> Option<SmallVector<P<ast::Item>>> {
-            let mut ret = SmallVector::new();
+
+        fn make_items(mut self: Box<ExpandResult<'a>>) -> Option<SmallVec<[P<ast::Item>; 1]>> {
+            let mut ret = SmallVec::new();
             while self.p.token != token::Eof {
                 match panictry!(self.p.parse_item()) {
                     Some(item) => ret.push(item),
@@ -131,7 +131,7 @@ pub fn expand_include<'cx>(cx: &'cx mut ExtCtxt, sp: Span, tts: &[tokenstream::T
 
 // include_str! : read the given file, insert it as a literal string expr
 pub fn expand_include_str(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenTree])
-                          -> Box<base::MacResult+'static> {
+                          -> Box<dyn base::MacResult+'static> {
     let file = match get_single_str_from_tts(cx, sp, tts, "include_str!") {
         Some(f) => f,
         None => return DummyResult::expr(sp)
@@ -150,11 +150,13 @@ pub fn expand_include_str(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenT
     };
     match String::from_utf8(bytes) {
         Ok(src) => {
+            let interned_src = Symbol::intern(&src);
+
             // Add this input file to the code map to make it available as
             // dependency information
-            cx.codemap().new_filemap_and_lines(&file, &src);
+            cx.source_map().new_source_file(file.into(), src);
 
-            base::MacEager::expr(cx.expr_str(sp, Symbol::intern(&src)))
+            base::MacEager::expr(cx.expr_str(sp, interned_src))
         }
         Err(_) => {
             cx.span_err(sp,
@@ -166,7 +168,7 @@ pub fn expand_include_str(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenT
 }
 
 pub fn expand_include_bytes(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::TokenTree])
-                            -> Box<base::MacResult+'static> {
+                            -> Box<dyn base::MacResult+'static> {
     let file = match get_single_str_from_tts(cx, sp, tts, "include_bytes!") {
         Some(f) => f,
         None => return DummyResult::expr(sp)
@@ -182,7 +184,7 @@ pub fn expand_include_bytes(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::Toke
         Ok(..) => {
             // Add this input file to the code map to make it available as
             // dependency information, but don't enter it's contents
-            cx.codemap().new_filemap_and_lines(&file, "");
+            cx.source_map().new_source_file(file.into(), String::new());
 
             base::MacEager::expr(cx.expr_lit(sp, ast::LitKind::ByteStr(Lrc::new(bytes))))
         }
@@ -197,7 +199,7 @@ fn res_rel_file(cx: &mut ExtCtxt, sp: syntax_pos::Span, arg: String) -> PathBuf 
     // after macro expansion (that is, they are unhygienic).
     if !arg.is_absolute() {
         let callsite = sp.source_callsite();
-        let mut path = match cx.codemap().span_to_unmapped_path(callsite) {
+        let mut path = match cx.source_map().span_to_unmapped_path(callsite) {
             FileName::Real(path) => path,
             other => panic!("cannot resolve relative path in non-file source `{}`", other),
         };

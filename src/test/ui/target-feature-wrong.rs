@@ -13,7 +13,10 @@
 // ignore-wasm
 // ignore-emscripten
 // ignore-mips
+// ignore-mips64
 // ignore-powerpc
+// ignore-powerpc64
+// ignore-powerpc64le
 // ignore-s390x
 // ignore-sparc
 // ignore-sparc64

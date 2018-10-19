@@ -11,10 +11,20 @@
 use chalk_engine::fallible::Fallible as ChalkEngineFallible;
 use chalk_engine::{context, hh::HhGoal, DelayedLiteral, ExClause};
 use rustc::infer::canonical::{
-    Canonical, CanonicalVarValues, Canonicalize, QueryRegionConstraint, QueryResult,
+    Canonical, CanonicalVarValues, OriginalQueryValues, QueryRegionConstraint, QueryResponse,
 };
 use rustc::infer::{InferCtxt, InferOk, LateBoundRegionConversionTime};
-use rustc::traits::{DomainGoal, ExClauseFold, ExClauseLift, Goal, ProgramClause, QuantifierKind};
+use rustc::traits::{
+    WellFormed,
+    FromEnv,
+    DomainGoal,
+    ExClauseFold,
+    ExClauseLift,
+    Goal,
+    GoalKind,
+    ProgramClause,
+    QuantifierKind
+};
 use rustc::ty::fold::{TypeFoldable, TypeFolder, TypeVisitor};
 use rustc::ty::subst::Kind;
 use rustc::ty::{self, TyCtxt};
@@ -68,7 +78,7 @@ impl context::Context for ChalkArenas<'tcx> {
     // u-canonicalization not yet implemented
     type UniverseMap = UniverseMap;
 
-    type Solution = Canonical<'tcx, QueryResult<'tcx, ()>>;
+    type Solution = Canonical<'tcx, QueryResponse<'tcx, ()>>;
 
     type InferenceNormalizedSubst = CanonicalVarValues<'tcx>;
 
@@ -84,7 +94,7 @@ impl context::Context for ChalkArenas<'tcx> {
 
     type DomainGoal = DomainGoal<'tcx>;
 
-    type BindersGoal = ty::Binder<&'tcx Goal<'tcx>>;
+    type BindersGoal = ty::Binder<Goal<'tcx>>;
 
     type Parameter = Kind<'tcx>;
 
@@ -93,14 +103,6 @@ impl context::Context for ChalkArenas<'tcx> {
     type ProgramClauses = Vec<ProgramClause<'tcx>>;
 
     type UnificationResult = InferOk<'tcx, ()>;
-
-    fn into_goal(domain_goal: DomainGoal<'tcx>) -> Goal<'tcx> {
-        Goal::DomainGoal(domain_goal)
-    }
-
-    fn cannot_prove() -> Goal<'tcx> {
-        Goal::CannotProve
-    }
 
     fn goal_in_environment(
         env: &ty::ParamEnv<'tcx>,
@@ -115,7 +117,7 @@ impl context::AggregateOps<ChalkArenas<'gcx>> for ChalkContext<'cx, 'gcx> {
         &self,
         _root_goal: &Canonical<'gcx, ty::ParamEnvAnd<'gcx, Goal<'gcx>>>,
         _simplified_answers: impl context::AnswerStream<ChalkArenas<'gcx>>,
-    ) -> Option<Canonical<'gcx, QueryResult<'gcx, ()>>> {
+    ) -> Option<Canonical<'gcx, QueryResponse<'gcx, ()>>> {
         unimplemented!()
     }
 }
@@ -229,7 +231,7 @@ impl context::ContextOps<ChalkArenas<'gcx>> for ChalkContext<'cx, 'gcx> {
 //                    _ => false,
 //                },
 //                Kind::Type(ty) => match ty.sty {
-//                    ty::TyInfer(ty::InferTy::CanonicalTy(cvar1)) => cvar == cvar1,
+//                    ty::Infer(ty::InferTy::CanonicalTy(cvar1)) => cvar == cvar1,
 //                    _ => false,
 //                },
 //            })
@@ -243,15 +245,23 @@ impl context::ContextOps<ChalkArenas<'gcx>> for ChalkContext<'cx, 'gcx> {
 impl context::InferenceTable<ChalkArenas<'gcx>, ChalkArenas<'tcx>>
     for ChalkInferenceContext<'cx, 'gcx, 'tcx>
 {
+    fn into_goal(&self, domain_goal: DomainGoal<'tcx>) -> Goal<'tcx> {
+        self.infcx.tcx.mk_goal(GoalKind::DomainGoal(domain_goal))
+    }
+
+    fn cannot_prove(&self) -> Goal<'tcx> {
+        self.infcx.tcx.mk_goal(GoalKind::CannotProve)
+    }
+
     fn into_hh_goal(&mut self, goal: Goal<'tcx>) -> ChalkHhGoal<'tcx> {
-        match goal {
-            Goal::Implies(..) => panic!("FIXME rust-lang-nursery/chalk#94"),
-            Goal::And(left, right) => HhGoal::And(*left, *right),
-            Goal::Not(subgoal) => HhGoal::Not(*subgoal),
-            Goal::DomainGoal(d) => HhGoal::DomainGoal(d),
-            Goal::Quantified(QuantifierKind::Universal, binder) => HhGoal::ForAll(binder),
-            Goal::Quantified(QuantifierKind::Existential, binder) => HhGoal::Exists(binder),
-            Goal::CannotProve => HhGoal::CannotProve,
+        match *goal {
+            GoalKind::Implies(..) => panic!("FIXME rust-lang-nursery/chalk#94"),
+            GoalKind::And(left, right) => HhGoal::And(left, right),
+            GoalKind::Not(subgoal) => HhGoal::Not(subgoal),
+            GoalKind::DomainGoal(d) => HhGoal::DomainGoal(d),
+            GoalKind::Quantified(QuantifierKind::Universal, binder) => HhGoal::ForAll(binder),
+            GoalKind::Quantified(QuantifierKind::Existential, binder) => HhGoal::Exists(binder),
+            GoalKind::CannotProve => HhGoal::CannotProve,
         }
     }
 
@@ -314,11 +324,10 @@ impl context::UnificationOps<ChalkArenas<'gcx>, ChalkArenas<'tcx>>
         _environment: &ty::ParamEnv<'tcx>,
         goal: &DomainGoal<'tcx>,
     ) -> Vec<ProgramClause<'tcx>> {
-        use rustc::traits::DomainGoal::*;
-        use rustc::traits::WhereClauseAtom::*;
+        use rustc::traits::WhereClause::*;
 
         match goal {
-            Holds(Implemented(_trait_predicate)) => {
+            DomainGoal::Holds(Implemented(_trait_predicate)) => {
                 // These come from:
                 //
                 // - Trait definitions (implied bounds)
@@ -326,51 +335,51 @@ impl context::UnificationOps<ChalkArenas<'gcx>, ChalkArenas<'tcx>>
                 panic!()
             }
 
-            Holds(ProjectionEq(_projection_predicate)) => {
+            DomainGoal::Holds(ProjectionEq(_projection_predicate)) => {
                 // These come from:
                 panic!()
             }
 
-            WellFormed(Implemented(_trait_predicate)) => {
+            DomainGoal::Holds(RegionOutlives(_region_outlives)) => {
+                panic!()
+            }
+
+            DomainGoal::Holds(TypeOutlives(_type_outlives)) => {
+                panic!()
+            }
+
+            DomainGoal::WellFormed(WellFormed::Trait(_trait_predicate)) => {
                 // These come from -- the trait decl.
                 panic!()
             }
 
-            WellFormed(ProjectionEq(_projection_predicate)) => panic!(),
+            DomainGoal::WellFormed(WellFormed::Ty(_ty)) => panic!(),
 
-            FromEnv(Implemented(_trait_predicate)) => panic!(),
+            DomainGoal::FromEnv(FromEnv::Trait(_trait_predicate)) => panic!(),
 
-            FromEnv(ProjectionEq(_projection_predicate)) => panic!(),
+            DomainGoal::FromEnv(FromEnv::Ty(_ty)) => panic!(),
 
-            WellFormedTy(_ty) => panic!(),
-
-            FromEnvTy(_ty) => panic!(),
-
-            RegionOutlives(_region_outlives) => panic!(),
-
-            TypeOutlives(_type_outlives) => panic!(),
-
-            Normalize(_) => panic!(),
+            DomainGoal::Normalize(_) => panic!(),
         }
     }
 
     fn instantiate_binders_universally(
         &mut self,
-        _arg: &ty::Binder<&'tcx Goal<'tcx>>,
+        _arg: &ty::Binder<Goal<'tcx>>,
     ) -> Goal<'tcx> {
         panic!("FIXME -- universal instantiation needs sgrif's branch")
     }
 
     fn instantiate_binders_existentially(
         &mut self,
-        arg: &ty::Binder<&'tcx Goal<'tcx>>,
+        arg: &ty::Binder<Goal<'tcx>>,
     ) -> Goal<'tcx> {
         let (value, _map) = self.infcx.replace_late_bound_regions_with_fresh_var(
             DUMMY_SP,
             LateBoundRegionConversionTime::HigherRankedType,
             arg,
         );
-        *value
+        value
     }
 
     fn debug_ex_clause(&mut self, value: &'v ChalkExClause<'tcx>) -> Box<dyn Debug + 'v> {
@@ -382,14 +391,15 @@ impl context::UnificationOps<ChalkArenas<'gcx>, ChalkArenas<'tcx>>
         &mut self,
         value: &ty::ParamEnvAnd<'tcx, Goal<'tcx>>,
     ) -> Canonical<'gcx, ty::ParamEnvAnd<'gcx, Goal<'gcx>>> {
-        self.infcx.canonicalize_query(value).0
+        let mut _orig_values = OriginalQueryValues::default();
+        self.infcx.canonicalize_query(value, &mut _orig_values)
     }
 
     fn canonicalize_ex_clause(
         &mut self,
         value: &ChalkExClause<'tcx>,
     ) -> Canonical<'gcx, ChalkExClause<'gcx>> {
-        self.infcx.canonicalize_response(value).0
+        self.infcx.canonicalize_response(value)
     }
 
     fn canonicalize_constrained_subst(
@@ -397,9 +407,7 @@ impl context::UnificationOps<ChalkArenas<'gcx>, ChalkArenas<'tcx>>
         subst: CanonicalVarValues<'tcx>,
         constraints: Vec<QueryRegionConstraint<'tcx>>,
     ) -> Canonical<'gcx, ConstrainedSubst<'gcx>> {
-        self.infcx
-            .canonicalize_response(&ConstrainedSubst { subst, constraints })
-            .0
+        self.infcx.canonicalize_response(&ConstrainedSubst { subst, constraints })
     }
 
     fn u_canonicalize_goal(
@@ -509,16 +517,5 @@ BraceStructLiftImpl! {
         type Lifted = ConstrainedSubst<'tcx>;
 
         subst, constraints
-    }
-}
-
-impl<'gcx: 'tcx, 'tcx> Canonicalize<'gcx, 'tcx> for ConstrainedSubst<'tcx> {
-    type Canonicalized = Canonical<'gcx, ConstrainedSubst<'gcx>>;
-
-    fn intern(
-        _gcx: TyCtxt<'_, 'gcx, 'gcx>,
-        value: Canonical<'gcx, ConstrainedSubst<'gcx>>,
-    ) -> Self::Canonicalized {
-        value
     }
 }

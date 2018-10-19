@@ -27,6 +27,7 @@ pub enum Abi {
     PtxKernel,
     Msp430Interrupt,
     X86Interrupt,
+    AmdGpuKernel,
 
     // Multiplatform / generic ABIs
     Rust,
@@ -50,7 +51,7 @@ pub struct AbiData {
 }
 
 #[allow(non_upper_case_globals)]
-const AbiDatas: &'static [AbiData] = &[
+const AbiDatas: &[AbiData] = &[
     // Platform-specific ABIs
     AbiData {abi: Abi::Cdecl, name: "cdecl", generic: false },
     AbiData {abi: Abi::Stdcall, name: "stdcall", generic: false },
@@ -63,6 +64,7 @@ const AbiDatas: &'static [AbiData] = &[
     AbiData {abi: Abi::PtxKernel, name: "ptx-kernel", generic: false },
     AbiData {abi: Abi::Msp430Interrupt, name: "msp430-interrupt", generic: false },
     AbiData {abi: Abi::X86Interrupt, name: "x86-interrupt", generic: false },
+    AbiData {abi: Abi::AmdGpuKernel, name: "amdgpu-kernel", generic: false },
 
     // Cross-platform ABIs
     AbiData {abi: Abi::Rust, name: "Rust", generic: true },
@@ -85,20 +87,20 @@ pub fn all_names() -> Vec<&'static str> {
 
 impl Abi {
     #[inline]
-    pub fn index(&self) -> usize {
-        *self as usize
+    pub fn index(self) -> usize {
+        self as usize
     }
 
     #[inline]
-    pub fn data(&self) -> &'static AbiData {
+    pub fn data(self) -> &'static AbiData {
         &AbiDatas[self.index()]
     }
 
-    pub fn name(&self) -> &'static str {
+    pub fn name(self) -> &'static str {
         self.data().name
     }
 
-    pub fn generic(&self) -> bool {
+    pub fn generic(self) -> bool {
         self.data().generic
     }
 }

@@ -8,7 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use alloc::{Global, Alloc, Layout, LayoutErr, CollectionAllocErr, oom};
+use alloc::{Global, Alloc, Layout, LayoutErr, handle_alloc_error};
+use collections::CollectionAllocErr;
 use hash::{BuildHasher, Hash, Hasher};
 use marker;
 use mem::{size_of, needs_drop};
@@ -233,10 +234,10 @@ fn can_alias_safehash_as_hash() {
 // make a RawBucket point to invalid memory using safe code.
 impl<K, V> RawBucket<K, V> {
     unsafe fn hash(&self) -> *mut HashUint {
-        self.hash_start.offset(self.idx as isize)
+        self.hash_start.add(self.idx)
     }
     unsafe fn pair(&self) -> *mut (K, V) {
-        self.pair_start.offset(self.idx as isize) as *mut (K, V)
+        self.pair_start.add(self.idx) as *mut (K, V)
     }
     unsafe fn hash_pair(&self) -> (*mut HashUint, *mut (K, V)) {
         (self.hash(), self.pair())
@@ -699,7 +700,7 @@ impl<K, V> RawTable<K, V> {
         // point into it.
         let (layout, _) = calculate_layout::<K, V>(capacity)?;
         let buffer = Global.alloc(layout).map_err(|e| match fallibility {
-            Infallible => oom(layout),
+            Infallible => handle_alloc_error(layout),
             Fallible => e,
         })?;
 
@@ -741,7 +742,9 @@ impl<K, V> RawTable<K, V> {
     ) -> Result<RawTable<K, V>, CollectionAllocErr> {
         unsafe {
             let ret = RawTable::new_uninitialized_internal(capacity, fallibility)?;
-            ptr::write_bytes(ret.hashes.ptr(), 0, capacity);
+            if capacity > 0 {
+                ptr::write_bytes(ret.hashes.ptr(), 0, capacity);
+            }
             Ok(ret)
         }
     }
@@ -1124,7 +1127,7 @@ unsafe impl<#[may_dangle] K, #[may_dangle] V> Drop for RawTable<K, V> {
         let (layout, _) = calculate_layout::<K, V>(self.capacity())
             .unwrap_or_else(|_| unsafe { hint::unreachable_unchecked() });
         unsafe {
-            Global.dealloc(NonNull::new_unchecked(self.hashes.ptr()).as_opaque(), layout);
+            Global.dealloc(NonNull::new_unchecked(self.hashes.ptr()).cast(), layout);
             // Remember how everything was allocated out of one buffer
             // during initialization? We only need one call to free here.
         }

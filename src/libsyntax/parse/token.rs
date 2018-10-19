@@ -23,14 +23,13 @@ use symbol::keywords;
 use syntax::parse::parse_stream_from_source_str;
 use syntax_pos::{self, Span, FileName};
 use syntax_pos::symbol::{self, Symbol};
-use tokenstream::{TokenStream, TokenTree};
-use tokenstream;
+use tokenstream::{self, DelimSpan, TokenStream, TokenTree};
 
 use std::{cmp, fmt};
 use std::mem;
 use rustc_data_structures::sync::{Lrc, Lock};
 
-#[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug, Copy)]
+#[derive(Clone, PartialEq, RustcEncodable, RustcDecodable, Hash, Debug, Copy)]
 pub enum BinOpToken {
     Plus,
     Minus,
@@ -45,7 +44,7 @@ pub enum BinOpToken {
 }
 
 /// A delimiter token
-#[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug, Copy)]
+#[derive(Clone, PartialEq, RustcEncodable, RustcDecodable, Hash, Debug, Copy)]
 pub enum DelimToken {
     /// A round parenthesis: `(` or `)`
     Paren,
@@ -67,7 +66,7 @@ impl DelimToken {
     }
 }
 
-#[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug, Copy)]
+#[derive(Clone, PartialEq, RustcEncodable, RustcDecodable, Hash, Debug, Copy)]
 pub enum Lit {
     Byte(ast::Name),
     Char(ast::Name),
@@ -80,7 +79,7 @@ pub enum Lit {
 }
 
 impl Lit {
-    pub fn short_name(&self) -> &'static str {
+    crate fn short_name(&self) -> &'static str {
         match *self {
             Byte(_) => "byte",
             Char(_) => "char",
@@ -104,6 +103,7 @@ pub(crate) fn ident_can_begin_expr(ident: ast::Ident, is_raw: bool) -> bool {
     !ident_token.is_reserved_ident() ||
     ident_token.is_path_segment_keyword() ||
     [
+        keywords::Async.name(),
         keywords::Do.name(),
         keywords::Box.name(),
         keywords::Break.name(),
@@ -136,10 +136,11 @@ fn ident_can_begin_type(ident: ast::Ident, is_raw: bool) -> bool {
         keywords::Unsafe.name(),
         keywords::Extern.name(),
         keywords::Typeof.name(),
+        keywords::Dyn.name(),
     ].contains(&ident.name)
 }
 
-#[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, RustcEncodable, RustcDecodable, PartialEq, Debug)]
 pub enum Token {
     /* Expression-operator symbols. */
     Eq,
@@ -217,16 +218,15 @@ impl Token {
         Ident(ident, ident.is_raw_guess())
     }
 
-    /// Returns `true` if the token starts with '>'.
-    pub fn is_like_gt(&self) -> bool {
+    crate fn is_like_plus(&self) -> bool {
         match *self {
-            BinOp(Shr) | BinOpEq(Shr) | Gt | Ge => true,
+            BinOp(Plus) | BinOpEq(Plus) => true,
             _ => false,
         }
     }
 
     /// Returns `true` if the token can appear at the start of an expression.
-    pub fn can_begin_expr(&self) -> bool {
+    crate fn can_begin_expr(&self) -> bool {
         match *self {
             Ident(ident, is_raw)              =>
                 ident_can_begin_expr(ident, is_raw), // value name or keyword
@@ -258,7 +258,7 @@ impl Token {
     }
 
     /// Returns `true` if the token can appear at the start of a type.
-    pub fn can_begin_type(&self) -> bool {
+    crate fn can_begin_type(&self) -> bool {
         match *self {
             Ident(ident, is_raw)        =>
                 ident_can_begin_type(ident, is_raw), // type name or keyword
@@ -281,13 +281,13 @@ impl Token {
     }
 
     /// Returns `true` if the token can appear at the start of a generic bound.
-    pub fn can_begin_bound(&self) -> bool {
+    crate fn can_begin_bound(&self) -> bool {
         self.is_path_start() || self.is_lifetime() || self.is_keyword(keywords::For) ||
         self == &Question || self == &OpenDelim(Paren)
     }
 
     /// Returns `true` if the token is any literal
-    pub fn is_lit(&self) -> bool {
+    crate fn is_lit(&self) -> bool {
         match *self {
             Literal(..) => true,
             _           => false,
@@ -296,12 +296,16 @@ impl Token {
 
     /// Returns `true` if the token is any literal, a minus (which can follow a literal,
     /// for example a '-42', or one of the boolean idents).
-    pub fn can_begin_literal_or_bool(&self) -> bool {
+    crate fn can_begin_literal_or_bool(&self) -> bool {
         match *self {
             Literal(..)  => true,
             BinOp(Minus) => true,
             Ident(ident, false) if ident.name == keywords::True.name() => true,
             Ident(ident, false) if ident.name == keywords::False.name() => true,
+            Interpolated(ref nt) => match nt.0 {
+                NtLiteral(..) => true,
+                _             => false,
+            },
             _            => false,
         }
     }
@@ -333,37 +337,21 @@ impl Token {
         self.ident().is_some()
     }
     /// Returns `true` if the token is a lifetime.
-    pub fn is_lifetime(&self) -> bool {
+    crate fn is_lifetime(&self) -> bool {
         self.lifetime().is_some()
     }
 
     /// Returns `true` if the token is a identifier whose name is the given
     /// string slice.
-    pub fn is_ident_named(&self, name: &str) -> bool {
+    crate fn is_ident_named(&self, name: &str) -> bool {
         match self.ident() {
             Some((ident, _)) => ident.as_str() == name,
             None => false
         }
     }
 
-    /// Returns `true` if the token is a documentation comment.
-    pub fn is_doc_comment(&self) -> bool {
-        match *self {
-            DocComment(..)   => true,
-            _                => false,
-        }
-    }
-
-    /// Returns `true` if the token is interpolated.
-    pub fn is_interpolated(&self) -> bool {
-        match *self {
-            Interpolated(..) => true,
-            _                => false,
-        }
-    }
-
     /// Returns `true` if the token is an interpolated path.
-    pub fn is_path(&self) -> bool {
+    fn is_path(&self) -> bool {
         if let Interpolated(ref nt) = *self {
             if let NtPath(..) = nt.0 {
                 return true;
@@ -373,16 +361,16 @@ impl Token {
     }
 
     /// Returns `true` if the token is either the `mut` or `const` keyword.
-    pub fn is_mutability(&self) -> bool {
+    crate fn is_mutability(&self) -> bool {
         self.is_keyword(keywords::Mut) ||
         self.is_keyword(keywords::Const)
     }
 
-    pub fn is_qpath_start(&self) -> bool {
+    crate fn is_qpath_start(&self) -> bool {
         self == &Lt || self == &BinOp(Shl)
     }
 
-    pub fn is_path_start(&self) -> bool {
+    crate fn is_path_start(&self) -> bool {
         self == &ModSep || self.is_qpath_start() || self.is_path() ||
         self.is_path_segment_keyword() || self.is_ident() && !self.is_reserved_ident()
     }
@@ -409,7 +397,7 @@ impl Token {
     }
 
     /// Returns `true` if the token is a keyword used in the language.
-    pub fn is_used_keyword(&self) -> bool {
+    crate fn is_used_keyword(&self) -> bool {
         match self.ident() {
             Some((id, false)) => id.is_used_keyword(),
             _ => false,
@@ -417,7 +405,7 @@ impl Token {
     }
 
     /// Returns `true` if the token is a keyword reserved for possible future use.
-    pub fn is_unused_keyword(&self) -> bool {
+    crate fn is_unused_keyword(&self) -> bool {
         match self.ident() {
             Some((id, false)) => id.is_unused_keyword(),
             _ => false,
@@ -432,7 +420,7 @@ impl Token {
         }
     }
 
-    pub fn glue(self, joint: Token) -> Option<Token> {
+    crate fn glue(self, joint: Token) -> Option<Token> {
         Some(match self {
             Eq => match joint {
                 Eq => EqEq,
@@ -500,7 +488,7 @@ impl Token {
 
     /// Returns tokens that are likely to be typed accidentally instead of the current token.
     /// Enables better error recovery when the wrong token is found.
-    pub fn similar_tokens(&self) -> Option<Vec<Token>> {
+    crate fn similar_tokens(&self) -> Option<Vec<Token>> {
         match *self {
             Comma => Some(vec![Dot, Lt]),
             Semi => Some(vec![Colon]),
@@ -596,7 +584,7 @@ impl Token {
 
     // See comments in `interpolated_to_tokenstream` for why we care about
     // *probably* equal here rather than actual equality
-    pub fn probably_equal_for_proc_macro(&self, other: &Token) -> bool {
+    crate fn probably_equal_for_proc_macro(&self, other: &Token) -> bool {
         if mem::discriminant(self) != mem::discriminant(other) {
             return false
         }
@@ -655,7 +643,7 @@ impl Token {
     }
 }
 
-#[derive(Clone, RustcEncodable, RustcDecodable, Eq, Hash)]
+#[derive(Clone, RustcEncodable, RustcDecodable)]
 /// For interpolation during macro expansion.
 pub enum Nonterminal {
     NtItem(P<ast::Item>),
@@ -725,7 +713,7 @@ impl fmt::Debug for Nonterminal {
     }
 }
 
-pub fn is_op(tok: &Token) -> bool {
+crate fn is_op(tok: &Token) -> bool {
     match *tok {
         OpenDelim(..) | CloseDelim(..) | Literal(..) | DocComment(..) |
         Ident(..) | Lifetime(..) | Interpolated(..) |
@@ -751,11 +739,11 @@ impl fmt::Debug for LazyTokenStream {
 }
 
 impl LazyTokenStream {
-    pub fn new() -> Self {
+    fn new() -> Self {
         LazyTokenStream(Lock::new(None))
     }
 
-    pub fn force<F: FnOnce() -> TokenStream>(&self, f: F) -> TokenStream {
+    fn force<F: FnOnce() -> TokenStream>(&self, f: F) -> TokenStream {
         let mut opt_stream = self.0.lock();
         if opt_stream.is_none() {
             *opt_stream = Some(f());
@@ -794,11 +782,51 @@ fn prepend_attrs(sess: &ParseSess,
     for attr in attrs {
         assert_eq!(attr.style, ast::AttrStyle::Outer,
                    "inner attributes should prevent cached tokens from existing");
-        // FIXME: Avoid this pretty-print + reparse hack as bove
-        let name = FileName::MacroExpansion;
-        let source = pprust::attr_to_string(attr);
-        let stream = parse_stream_from_source_str(name, source, sess, Some(span));
-        builder.push(stream);
+
+        if attr.is_sugared_doc {
+            let stream = parse_stream_from_source_str(
+                FileName::MacroExpansion,
+                pprust::attr_to_string(attr),
+                sess,
+                Some(span),
+            );
+            builder.push(stream);
+            continue
+        }
+
+        // synthesize # [ $path $tokens ] manually here
+        let mut brackets = tokenstream::TokenStreamBuilder::new();
+
+        // For simple paths, push the identifier directly
+        if attr.path.segments.len() == 1 && attr.path.segments[0].args.is_none() {
+            let ident = attr.path.segments[0].ident;
+            let token = Ident(ident, ident.as_str().starts_with("r#"));
+            brackets.push(tokenstream::TokenTree::Token(ident.span, token));
+
+        // ... and for more complicated paths, fall back to a reparse hack that
+        // should eventually be removed.
+        } else {
+            let stream = parse_stream_from_source_str(
+                FileName::MacroExpansion,
+                pprust::path_to_string(&attr.path),
+                sess,
+                Some(span),
+            );
+            brackets.push(stream);
+        }
+
+        brackets.push(attr.tokens.clone());
+
+        let tokens = tokenstream::Delimited {
+            delim: DelimToken::Bracket,
+            tts: brackets.build().into(),
+        };
+        // The span we list here for `#` and for `[ ... ]` are both wrong in
+        // that it encompasses more than each token, but it hopefully is "good
+        // enough" for now at least.
+        builder.push(tokenstream::TokenTree::Token(attr.span, Pound));
+        let delim_span = DelimSpan::from_single(attr.span);
+        builder.push(tokenstream::TokenTree::Delimited(delim_span, tokens));
     }
     builder.push(tokens.clone());
     Some(builder.build())

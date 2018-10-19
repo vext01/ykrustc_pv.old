@@ -49,11 +49,12 @@ use rustc::dep_graph::debug::{DepNodeFilter, EdgeFilter};
 use rustc::hir::def_id::DefId;
 use rustc::ty::TyCtxt;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_data_structures::graph::{Direction, INCOMING, OUTGOING, NodeIndex};
+use rustc_data_structures::graph::implementation::{
+    Direction, INCOMING, OUTGOING, NodeIndex
+};
 use rustc::hir;
 use rustc::hir::intravisit::{self, NestedVisitorMap, Visitor};
 use rustc::ich::{ATTR_IF_THIS_CHANGED, ATTR_THEN_THIS_WOULD_NEED};
-use graphviz::IntoCow;
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
@@ -227,7 +228,7 @@ fn check_paths<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 }
 
 fn dump_graph(tcx: TyCtxt) {
-    let path: String = env::var("RUST_DEP_GRAPH").unwrap_or_else(|_| format!("dep_graph"));
+    let path: String = env::var("RUST_DEP_GRAPH").unwrap_or_else(|_| "dep_graph".to_string());
     let query = tcx.dep_graph.query();
 
     let nodes = match env::var("RUST_DEP_GRAPH_FILTER") {
@@ -272,10 +273,10 @@ impl<'a, 'tcx, 'q> dot::GraphWalk<'a> for GraphvizDepGraph<'q> {
     type Edge = (&'q DepNode, &'q DepNode);
     fn nodes(&self) -> dot::Nodes<&'q DepNode> {
         let nodes: Vec<_> = self.0.iter().cloned().collect();
-        nodes.into_cow()
+        nodes.into()
     }
     fn edges(&self) -> dot::Edges<(&'q DepNode, &'q DepNode)> {
-        self.1[..].into_cow()
+        self.1[..].into()
     }
     fn source(&self, edge: &(&'q DepNode, &'q DepNode)) -> &'q DepNode {
         edge.0

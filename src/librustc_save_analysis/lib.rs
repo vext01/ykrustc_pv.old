@@ -12,7 +12,7 @@
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
 #![feature(custom_attribute)]
-#![cfg_attr(stage0, feature(macro_lifetime_matcher))]
+#![feature(nll)]
 #![allow(unused_attributes)]
 
 #![recursion_limit="256"]
@@ -23,6 +23,7 @@ extern crate rustc;
 #[macro_use]
 extern crate log;
 extern crate rustc_data_structures;
+extern crate rustc_codegen_utils;
 extern crate rustc_serialize;
 extern crate rustc_target;
 extern crate rustc_typeck;
@@ -42,12 +43,13 @@ mod sig;
 
 use rustc::hir;
 use rustc::hir::def::Def as HirDef;
-use rustc::hir::map::{Node, NodeTraitItem, NodeImplItem};
+use rustc::hir::Node;
 use rustc::hir::def_id::{DefId, LOCAL_CRATE};
 use rustc::middle::cstore::ExternCrate;
-use rustc::session::config::CrateType::CrateTypeExecutable;
+use rustc::session::config::{CrateType, Input, OutputType};
 use rustc::ty::{self, TyCtxt};
 use rustc_typeck::hir_ty_to_ty;
+use rustc_codegen_utils::link::{filename_for_metadata, out_filename};
 
 use std::cell::Cell;
 use std::default::Default;
@@ -56,13 +58,14 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use syntax::ast::{self, Attribute, NodeId, PatKind};
+use syntax::source_map::Spanned;
 use syntax::parse::lexer::comments::strip_doc_comment_decoration;
 use syntax::parse::token;
 use syntax::print::pprust;
 use syntax::symbol::keywords;
 use syntax::visit::{self, Visitor};
 use syntax::print::pprust::{arg_to_string, ty_to_string};
-use syntax::codemap::MacroAttribute;
+use syntax::source_map::MacroAttribute;
 use syntax_pos::*;
 
 use json_dumper::JsonDumper;
@@ -94,12 +97,12 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
     fn span_from_span(&self, span: Span) -> SpanData {
         use rls_span::{Column, Row};
 
-        let cm = self.tcx.sess.codemap();
+        let cm = self.tcx.sess.source_map();
         let start = cm.lookup_char_pos(span.lo());
         let end = cm.lookup_char_pos(span.hi());
 
         SpanData {
-            file_name: start.file.name.clone().to_string().into(),
+            file_name: start.file.name.to_string().into(),
             byte_start: span.lo().0,
             byte_end: span.hi().0,
             line_start: Row::new_one_indexed(start.line as u32),
@@ -109,9 +112,27 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
         }
     }
 
+    // Returns path to the compilation output (e.g. libfoo-12345678.rmeta)
+    pub fn compilation_output(&self, crate_name: &str) -> PathBuf {
+        let sess = &self.tcx.sess;
+        // Save-analysis is emitted per whole session, not per each crate type
+        let crate_type = sess.crate_types.borrow()[0];
+        let outputs = &*self.tcx.output_filenames(LOCAL_CRATE);
+
+        if outputs.outputs.contains_key(&OutputType::Metadata) {
+            filename_for_metadata(sess, crate_name, outputs)
+        } else if outputs.outputs.should_codegen() {
+            out_filename(sess, crate_type, outputs, crate_name)
+        } else {
+            // Otherwise it's only a DepInfo, in which case we return early and
+            // not even reach the analysis stage.
+            unreachable!()
+        }
+    }
+
     // List external crates used by the current crate.
     pub fn get_external_crates(&self) -> Vec<ExternalCrateData> {
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(self.tcx.crates().len());
 
         for &n in self.tcx.crates().iter() {
             let span = match *self.tcx.extern_crate(n.as_def_id()) {
@@ -121,11 +142,11 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                     continue;
                 }
             };
-            let lo_loc = self.span_utils.sess.codemap().lookup_char_pos(span.lo());
+            let lo_loc = self.span_utils.sess.source_map().lookup_char_pos(span.lo());
             result.push(ExternalCrateData {
                 // FIXME: change file_name field to PathBuf in rls-data
                 // https://github.com/nrc/rls-data/issues/7
-                file_name: SpanUtils::make_path_string(&lo_loc.file.name),
+                file_name: self.span_utils.make_filename_string(&lo_loc.file),
                 num: n.as_u32(),
                 id: GlobalCrateId {
                     name: self.tcx.crate_name(n).to_string(),
@@ -146,7 +167,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                 filter!(self.span_utils, sub_span, item.span, None);
 
                 Some(Data::DefData(Def {
-                    kind: DefKind::Function,
+                    kind: DefKind::ForeignFunction,
                     id: id_from_node_id(item.id, self),
                     span: self.span_from_span(sub_span.unwrap()),
                     name: item.ident.to_string(),
@@ -169,7 +190,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                 let span = self.span_from_span(sub_span.unwrap());
 
                 Some(Data::DefData(Def {
-                    kind: DefKind::Static,
+                    kind: DefKind::ForeignStatic,
                     id,
                     span,
                     name: item.ident.to_string(),
@@ -267,7 +288,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             ast::ItemKind::Mod(ref m) => {
                 let qualname = format!("::{}", self.tcx.node_path_str(item.id));
 
-                let cm = self.tcx.sess.codemap();
+                let cm = self.tcx.sess.source_map();
                 let filename = cm.span_to_filename(m.inner);
 
                 let sub_span = self.span_utils
@@ -319,7 +340,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                     decl_id: None,
                     docs: self.docs_for_attrs(&item.attrs),
                     sig: sig::item_signature(item, self),
-                    attributes: lower_attributes(item.attrs.to_owned(), self),
+                    attributes: lower_attributes(item.attrs.clone(), self),
                 }))
             }
             ast::ItemKind::Impl(.., ref trait_ref, ref typ, ref impls) => {
@@ -418,16 +439,16 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
         let (qualname, parent_scope, decl_id, docs, attributes) =
             match self.tcx.impl_of_method(self.tcx.hir.local_def_id(id)) {
                 Some(impl_id) => match self.tcx.hir.get_if_local(impl_id) {
-                    Some(Node::NodeItem(item)) => match item.node {
-                        hir::ItemImpl(.., ref ty, _) => {
+                    Some(Node::Item(item)) => match item.node {
+                        hir::ItemKind::Impl(.., ref ty, _) => {
                             let mut qualname = String::from("<");
                             qualname.push_str(&self.tcx.hir.node_to_pretty_string(ty.id));
 
-                            let mut trait_id = self.tcx.trait_id_of_impl(impl_id);
+                            let trait_id = self.tcx.trait_id_of_impl(impl_id);
                             let mut decl_id = None;
                             let mut docs = String::new();
                             let mut attrs = vec![];
-                            if let Some(NodeImplItem(item)) = self.tcx.hir.find(id) {
+                            if let Some(Node::ImplItem(item)) = self.tcx.hir.find(id) {
                                 docs = self.docs_for_attrs(&item.attrs);
                                 attrs = item.attrs.to_vec();
                             }
@@ -438,7 +459,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                                 qualname.push_str(&self.tcx.item_path_str(def_id));
                                 self.tcx
                                     .associated_items(def_id)
-                                    .find(|item| item.name == name)
+                                    .find(|item| item.ident.name == name)
                                     .map(|item| decl_id = Some(item.def_id));
                             }
                             qualname.push_str(">");
@@ -469,7 +490,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                         let mut docs = String::new();
                         let mut attrs = vec![];
 
-                        if let Some(NodeTraitItem(item)) = self.tcx.hir.find(id) {
+                        if let Some(Node::TraitItem(item)) = self.tcx.hir.find(id) {
                             docs = self.docs_for_attrs(&item.attrs);
                             attrs = item.attrs.to_vec();
                         }
@@ -533,13 +554,13 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
     pub fn get_expr_data(&self, expr: &ast::Expr) -> Option<Data> {
         let hir_node = self.tcx.hir.expect_expr(expr.id);
         let ty = self.tables.expr_ty_adjusted_opt(&hir_node);
-        if ty.is_none() || ty.unwrap().sty == ty::TyError {
+        if ty.is_none() || ty.unwrap().sty == ty::Error {
             return None;
         }
         match expr.node {
             ast::ExprKind::Field(ref sub_ex, ident) => {
                 let hir_node = match self.tcx.hir.find(sub_ex.id) {
-                    Some(Node::NodeExpr(expr)) => expr,
+                    Some(Node::Expr(expr)) => expr,
                     _ => {
                         debug!(
                             "Missing or weird node for sub-expression {} in {:?}",
@@ -550,7 +571,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                     }
                 };
                 match self.tables.expr_ty_adjusted(&hir_node).sty {
-                    ty::TyAdt(def, _) if !def.is_enum() => {
+                    ty::Adt(def, _) if !def.is_enum() => {
                         let variant = &def.non_enum_variant();
                         let index = self.tcx.find_field_index(ident, variant).unwrap();
                         let sub_span = self.span_utils.span_for_last_ident(expr.span);
@@ -562,7 +583,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                             ref_id: id_from_def_id(variant.fields[index].did),
                         }));
                     }
-                    ty::TyTuple(..) => None,
+                    ty::Tuple(..) => None,
                     _ => {
                         debug!("Expected struct or union type, found {:?}", ty);
                         None
@@ -571,7 +592,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             }
             ast::ExprKind::Struct(ref path, ..) => {
                 match self.tables.expr_ty_adjusted(&hir_node).sty {
-                    ty::TyAdt(def, _) if !def.is_enum() => {
+                    ty::Adt(def, _) if !def.is_enum() => {
                         let sub_span = self.span_utils.span_for_last_ident(path.span);
                         filter!(self.span_utils, sub_span, path.span, None);
                         let span = self.span_from_span(sub_span.unwrap());
@@ -626,31 +647,32 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
 
     pub fn get_path_def(&self, id: NodeId) -> HirDef {
         match self.tcx.hir.get(id) {
-            Node::NodeTraitRef(tr) => tr.path.def,
+            Node::TraitRef(tr) => tr.path.def,
 
-            Node::NodeItem(&hir::Item {
-                node: hir::ItemUse(ref path, _),
+            Node::Item(&hir::Item {
+                node: hir::ItemKind::Use(ref path, _),
                 ..
             }) |
-            Node::NodeVisibility(&hir::Visibility::Restricted { ref path, .. }) => path.def,
+            Node::Visibility(&Spanned {
+                node: hir::VisibilityKind::Restricted { ref path, .. }, .. }) => path.def,
 
-            Node::NodeExpr(&hir::Expr {
-                node: hir::ExprStruct(ref qpath, ..),
+            Node::Expr(&hir::Expr {
+                node: hir::ExprKind::Struct(ref qpath, ..),
                 ..
             }) |
-            Node::NodeExpr(&hir::Expr {
-                node: hir::ExprPath(ref qpath),
+            Node::Expr(&hir::Expr {
+                node: hir::ExprKind::Path(ref qpath),
                 ..
             }) |
-            Node::NodePat(&hir::Pat {
+            Node::Pat(&hir::Pat {
                 node: hir::PatKind::Path(ref qpath),
                 ..
             }) |
-            Node::NodePat(&hir::Pat {
+            Node::Pat(&hir::Pat {
                 node: hir::PatKind::Struct(ref qpath, ..),
                 ..
             }) |
-            Node::NodePat(&hir::Pat {
+            Node::Pat(&hir::Pat {
                 node: hir::PatKind::TupleStruct(ref qpath, ..),
                 ..
             }) => {
@@ -658,13 +680,13 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                 self.tables.qpath_def(qpath, hir_id)
             }
 
-            Node::NodeBinding(&hir::Pat {
+            Node::Binding(&hir::Pat {
                 node: hir::PatKind::Binding(_, canonical_id, ..),
                 ..
             }) => HirDef::Local(canonical_id),
 
-            Node::NodeTy(ty) => if let hir::Ty {
-                node: hir::TyPath(ref qpath),
+            Node::Ty(ty) => if let hir::Ty {
+                node: hir::TyKind::Path(ref qpath),
                 ..
             } = *ty
             {
@@ -672,7 +694,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                     hir::QPath::Resolved(_, ref path) => path.def,
                     hir::QPath::TypeRelative(..) => {
                         let ty = hir_ty_to_ty(self.tcx, ty);
-                        if let ty::TyProjection(proj) = ty.sty {
+                        if let ty::Projection(proj) = ty.sty {
                             return HirDef::AssociatedTy(proj.item_def_id);
                         }
                         HirDef::Err
@@ -692,8 +714,8 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             if path.segments.len() != 1 {
                 return false;
             }
-            if let Some(ref params) = path.segments[0].parameters {
-                if let ast::PathParameters::Parenthesized(_) = **params {
+            if let Some(ref generic_args) = path.segments[0].args {
+                if let ast::GenericArgs::Parenthesized(_) = **generic_args {
                     return true;
                 }
             }
@@ -745,10 +767,12 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             HirDef::Union(def_id) |
             HirDef::Enum(def_id) |
             HirDef::TyAlias(def_id) |
-            HirDef::TyForeign(def_id) |
+            HirDef::ForeignTy(def_id) |
             HirDef::TraitAlias(def_id) |
+            HirDef::AssociatedExistential(def_id) |
             HirDef::AssociatedTy(def_id) |
             HirDef::Trait(def_id) |
+            HirDef::Existential(def_id) |
             HirDef::TyParam(def_id) => {
                 let span = self.span_from_span(sub_span);
                 Some(Ref {
@@ -774,7 +798,8 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
                     let ti = self.tcx.associated_item(decl_id);
                     self.tcx
                         .associated_items(ti.container.id())
-                        .find(|item| item.name == ti.name && item.defaultness.has_value())
+                        .find(|item| item.ident.name == ti.ident.name &&
+                                     item.defaultness.has_value())
                         .map(|item| item.def_id)
                 } else {
                     None
@@ -806,7 +831,9 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
             HirDef::SelfTy(..) |
             HirDef::Label(..) |
             HirDef::Macro(..) |
-            HirDef::GlobalAsm(..) |
+            HirDef::ToolMod |
+            HirDef::NonMacroAttr(..) |
+            HirDef::SelfCtor(..) |
             HirDef::Err => None,
         }
     }
@@ -843,7 +870,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
         let callsite = span.source_callsite();
         let callsite_span = self.span_from_span(callsite);
         let callee = span.source_callee()?;
-        let callee_span = callee.span?;
+        let callee_span = callee.def_site?;
 
         // Ignore attribute macros, their spans are usually mangled
         if let MacroAttribute(_) = callee.format {
@@ -871,7 +898,7 @@ impl<'l, 'tcx: 'l> SaveContext<'l, 'tcx> {
         let callee_span = self.span_from_span(callee_span);
         Some(MacroRef {
             span: callsite_span,
-            qualname: callee.name().to_string(), // FIXME: generate the real qualname
+            qualname: callee.format.name().to_string(), // FIXME: generate the real qualname
             callee_span,
         })
     }
@@ -933,10 +960,7 @@ fn make_signature(decl: &ast::FnDecl, generics: &ast::Generics) -> String {
         sig.push_str(&generics
             .params
             .iter()
-            .map(|param| match *param {
-                ast::GenericParam::Lifetime(ref l) => l.lifetime.ident.name.to_string(),
-                ast::GenericParam::Type(ref t) => t.ident.to_string(),
-            })
+            .map(|param| param.ident.to_string())
             .collect::<Vec<_>>()
             .join(", "));
         sig.push_str("> ");
@@ -1011,6 +1035,7 @@ pub trait SaveHandler {
         save_ctxt: SaveContext<'l, 'tcx>,
         krate: &ast::Crate,
         cratename: &str,
+        input: &'l Input,
     );
 }
 
@@ -1045,9 +1070,9 @@ impl<'a> DumpHandler<'a> {
                 let executable = sess.crate_types
                     .borrow()
                     .iter()
-                    .any(|ct| *ct == CrateTypeExecutable);
+                    .any(|ct| *ct == CrateType::Executable);
                 let mut out_name = if executable {
-                    "".to_owned()
+                    String::new()
                 } else {
                     "lib".to_owned()
                 };
@@ -1076,19 +1101,21 @@ impl<'a> SaveHandler for DumpHandler<'a> {
         save_ctxt: SaveContext<'l, 'tcx>,
         krate: &ast::Crate,
         cratename: &str,
+        input: &'l Input,
     ) {
         let output = &mut self.output_file(&save_ctxt);
         let mut dumper = JsonDumper::new(output, save_ctxt.config.clone());
         let mut visitor = DumpVisitor::new(save_ctxt, &mut dumper);
 
         visitor.dump_crate_info(cratename, krate);
+        visitor.dump_compilation_options(input, cratename);
         visit::walk_crate(&mut visitor, krate);
     }
 }
 
 /// Call a callback with the results of save-analysis.
 pub struct CallbackHandler<'b> {
-    pub callback: &'b mut FnMut(&rls_data::Analysis),
+    pub callback: &'b mut dyn FnMut(&rls_data::Analysis),
 }
 
 impl<'b> SaveHandler for CallbackHandler<'b> {
@@ -1097,6 +1124,7 @@ impl<'b> SaveHandler for CallbackHandler<'b> {
         save_ctxt: SaveContext<'l, 'tcx>,
         krate: &ast::Crate,
         cratename: &str,
+        input: &'l Input,
     ) {
         // We're using the JsonDumper here because it has the format of the
         // save-analysis results that we will pass to the callback. IOW, we are
@@ -1107,6 +1135,7 @@ impl<'b> SaveHandler for CallbackHandler<'b> {
         let mut visitor = DumpVisitor::new(save_ctxt, &mut dumper);
 
         visitor.dump_crate_info(cratename, krate);
+        visitor.dump_compilation_options(input, cratename);
         visit::walk_crate(&mut visitor, krate);
     }
 }
@@ -1116,6 +1145,7 @@ pub fn process_crate<'l, 'tcx, H: SaveHandler>(
     krate: &ast::Crate,
     analysis: &'l ty::CrateAnalysis,
     cratename: &str,
+    input: &'l Input,
     config: Option<Config>,
     mut handler: H,
 ) {
@@ -1133,7 +1163,7 @@ pub fn process_crate<'l, 'tcx, H: SaveHandler>(
             impl_counter: Cell::new(0),
         };
 
-        handler.save(save_ctxt, krate, cratename)
+        handler.save(save_ctxt, krate, cratename, input)
     })
 }
 
@@ -1158,7 +1188,7 @@ fn escape(s: String) -> String {
 // Helper function to determine if a span came from a
 // macro expansion or syntax extension.
 fn generated_code(span: Span) -> bool {
-    span.ctxt() != NO_EXPANSION || span == DUMMY_SP
+    span.ctxt() != NO_EXPANSION || span.is_dummy()
 }
 
 // DefId::index is a newtype and so the JSON serialisation is ugly. Therefore

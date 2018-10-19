@@ -15,10 +15,11 @@
 //!
 
 use hair::*;
+use hair::util::UserAnnotatedTyHelpers;
 
 use rustc_data_structures::indexed_vec::Idx;
 use rustc::hir::def_id::{DefId, LOCAL_CRATE};
-use rustc::hir::map::blocks::FnLikeNode;
+use rustc::hir::Node;
 use rustc::middle::region;
 use rustc::infer::InferCtxt;
 use rustc::ty::subst::Subst;
@@ -66,10 +67,7 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
         let constness = match body_owner_kind {
             hir::BodyOwnerKind::Const |
             hir::BodyOwnerKind::Static(_) => hir::Constness::Const,
-            hir::BodyOwnerKind::Fn => {
-                let fn_like = FnLikeNode::from_node(infcx.tcx.hir.get(src_id));
-                fn_like.map_or(hir::Constness::NotConst, |f| f.constness())
-            }
+            hir::BodyOwnerKind::Fn => hir::Constness::NotConst,
         };
 
         let attrs = tcx.hir.attrs(src_id);
@@ -82,7 +80,7 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
         // Respect -C overflow-checks.
         check_overflow |= tcx.sess.overflow_checks();
 
-        // Constants and const fn's always need overflow checks.
+        // Constants always need overflow checks.
         check_overflow |= constness == hir::Constness::Const;
 
         let lint_level = lint_level_for_hir_id(tcx, src_id);
@@ -112,10 +110,8 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
         self.tcx.types.usize
     }
 
-    pub fn usize_literal(&mut self, value: u64) -> Literal<'tcx> {
-        Literal::Value {
-            value: ty::Const::from_usize(self.tcx, value),
-        }
+    pub fn usize_literal(&mut self, value: u64) -> &'tcx ty::Const<'tcx> {
+        ty::Const::from_usize(self.tcx, value)
     }
 
     pub fn bool_ty(&mut self) -> Ty<'tcx> {
@@ -123,19 +119,15 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
     }
 
     pub fn unit_ty(&mut self) -> Ty<'tcx> {
-        self.tcx.mk_nil()
+        self.tcx.mk_unit()
     }
 
-    pub fn true_literal(&mut self) -> Literal<'tcx> {
-        Literal::Value {
-            value: ty::Const::from_bool(self.tcx, true),
-        }
+    pub fn true_literal(&mut self) -> &'tcx ty::Const<'tcx> {
+        ty::Const::from_bool(self.tcx, true)
     }
 
-    pub fn false_literal(&mut self) -> Literal<'tcx> {
-        Literal::Value {
-            value: ty::Const::from_bool(self.tcx, false),
-        }
+    pub fn false_literal(&mut self) -> &'tcx ty::Const<'tcx> {
+        ty::Const::from_bool(self.tcx, false)
     }
 
     // FIXME: Combine with rustc_mir::hair::pattern::lit_to_const
@@ -145,7 +137,7 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
         ty: Ty<'tcx>,
         sp: Span,
         neg: bool,
-    ) -> Literal<'tcx> {
+    ) -> &'tcx ty::Const<'tcx> {
         trace!("const_eval_literal: {:#?}, {:?}, {:?}, {:?}", lit, ty, sp, neg);
 
         let parse_float = |num, fty| -> ConstValue<'tcx> {
@@ -157,14 +149,14 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
 
         let trunc = |n| {
             let param_ty = self.param_env.and(self.tcx.lift_to_global(&ty).unwrap());
-            let bit_width = self.tcx.layout_of(param_ty).unwrap().size.bits();
-            trace!("trunc {} with size {} and shift {}", n, bit_width, 128 - bit_width);
-            let shift = 128 - bit_width;
+            let width = self.tcx.layout_of(param_ty).unwrap().size;
+            trace!("trunc {} with size {} and shift {}", n, width.bits(), 128 - width.bits());
+            let shift = 128 - width.bits();
             let result = (n << shift) >> shift;
             trace!("trunc result: {}", result);
             ConstValue::Scalar(Scalar::Bits {
                 bits: result,
-                defined: bit_width as u8,
+                size: width.bytes() as u8,
             })
         };
 
@@ -173,8 +165,7 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
             LitKind::Str(ref s, _) => {
                 let s = s.as_str();
                 let id = self.tcx.allocate_bytes(s.as_bytes());
-                let value = Scalar::Ptr(id.into()).to_value_with_len(s.len() as u64, self.tcx);
-                ConstValue::from_byval_value(value)
+                ConstValue::new_slice(Scalar::Ptr(id.into()), s.len() as u64, self.tcx)
             },
             LitKind::ByteStr(ref data) => {
                 let id = self.tcx.allocate_bytes(data);
@@ -182,7 +173,7 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
             },
             LitKind::Byte(n) => ConstValue::Scalar(Scalar::Bits {
                 bits: n as u128,
-                defined: 8,
+                size: 1,
             }),
             LitKind::Int(n, _) if neg => {
                 let n = n as i128;
@@ -195,29 +186,21 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
             }
             LitKind::FloatUnsuffixed(n) => {
                 let fty = match ty.sty {
-                    ty::TyFloat(fty) => fty,
+                    ty::Float(fty) => fty,
                     _ => bug!()
                 };
                 parse_float(n, fty)
             }
-            LitKind::Bool(b) => ConstValue::Scalar(Scalar::Bits {
-                bits: b as u128,
-                defined: 8,
-            }),
-            LitKind::Char(c) => ConstValue::Scalar(Scalar::Bits {
-                bits: c as u128,
-                defined: 32,
-            }),
+            LitKind::Bool(b) => ConstValue::Scalar(Scalar::from_bool(b)),
+            LitKind::Char(c) => ConstValue::Scalar(Scalar::from_char(c)),
         };
-        Literal::Value {
-            value: ty::Const::from_const_value(self.tcx, lit, ty)
-        }
+        ty::Const::from_const_value(self.tcx, lit, ty)
     }
 
     pub fn pattern_from_hir(&mut self, p: &hir::Pat) -> Pattern<'tcx> {
         let tcx = self.tcx.global_tcx();
         let p = match tcx.hir.get(p.id) {
-            hir::map::NodePat(p) | hir::map::NodeBinding(p) => p,
+            Node::Pat(p) | Node::Binding(p) => p,
             node => bug!("pattern became {:?}", node)
         };
         Pattern::from_hir(tcx,
@@ -231,17 +214,14 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
                         method_name: &str,
                         self_ty: Ty<'tcx>,
                         params: &[Kind<'tcx>])
-                        -> (Ty<'tcx>, Literal<'tcx>) {
+                        -> (Ty<'tcx>, &'tcx ty::Const<'tcx>) {
         let method_name = Symbol::intern(method_name);
         let substs = self.tcx.mk_substs_trait(self_ty, params);
         for item in self.tcx.associated_items(trait_def_id) {
-            if item.kind == ty::AssociatedKind::Method && item.name == method_name {
+            if item.kind == ty::AssociatedKind::Method && item.ident.name == method_name {
                 let method_ty = self.tcx.type_of(item.def_id);
                 let method_ty = method_ty.subst(self.tcx, substs);
-                return (method_ty,
-                        Literal::Value {
-                            value: ty::Const::zero_sized(self.tcx, method_ty)
-                        });
+                return (method_ty, ty::Const::zero_sized(self.tcx, method_ty));
             }
         }
 
@@ -290,6 +270,16 @@ impl<'a, 'gcx, 'tcx> Cx<'a, 'gcx, 'tcx> {
 
     pub fn type_moves_by_default(&self, ty: Ty<'tcx>, span: Span) -> bool {
         self.infcx.type_moves_by_default(self.param_env, ty, span)
+    }
+}
+
+impl UserAnnotatedTyHelpers<'gcx, 'tcx> for Cx<'_, 'gcx, 'tcx> {
+    fn tcx(&self) -> TyCtxt<'_, 'gcx, 'tcx> {
+        self.tcx()
+    }
+
+    fn tables(&self) -> &ty::TypeckTables<'tcx> {
+        self.tables()
     }
 }
 

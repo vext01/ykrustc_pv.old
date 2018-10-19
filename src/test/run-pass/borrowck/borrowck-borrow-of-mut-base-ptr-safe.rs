@@ -8,6 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(dead_code)]
+#![allow(unused_mut)]
+#![allow(unused_variables)]
 // Test that freezing an `&mut` pointer while referent is
 // frozen is legal.
 //

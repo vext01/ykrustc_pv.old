@@ -12,10 +12,12 @@
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Bitcode/BitcodeWriterPass.h"
+#include "llvm/Support/Signals.h"
 
 #include "llvm/IR/CallSite.h"
 
@@ -24,6 +26,8 @@
 #else
 #include <cstdlib>
 #endif
+
+#include <iostream>
 
 //===----------------------------------------------------------------------===
 //
@@ -60,6 +64,27 @@ static AtomicOrdering fromRust(LLVMAtomicOrdering Ordering) {
 }
 
 static LLVM_THREAD_LOCAL char *LastError;
+
+// Custom error handler for fatal LLVM errors.
+//
+// Notably it exits the process with code 101, unlike LLVM's default of 1.
+static void FatalErrorHandler(void *UserData,
+                              const std::string& Reason,
+                              bool GenCrashDiag) {
+  // Do the same thing that the default error handler does.
+  std::cerr << "LLVM ERROR: " << Reason << std::endl;
+
+  // Since this error handler exits the process, we have to run any cleanup that
+  // LLVM would run after handling the error. This might change with an LLVM
+  // upgrade.
+  sys::RunInterruptHandlers();
+
+  exit(101);
+}
+
+extern "C" void LLVMRustInstallFatalErrorHandler() {
+  install_fatal_error_handler(FatalErrorHandler);
+}
 
 extern "C" LLVMMemoryBufferRef
 LLVMRustCreateMemoryBufferWithContentsOfFile(const char *Path) {
@@ -116,6 +141,15 @@ LLVMRustGetOrInsertGlobal(LLVMModuleRef M, const char *Name, LLVMTypeRef Ty) {
   return wrap(unwrap(M)->getOrInsertGlobal(Name, unwrap(Ty)));
 }
 
+extern "C" LLVMValueRef
+LLVMRustInsertPrivateGlobal(LLVMModuleRef M, LLVMTypeRef Ty) {
+  return wrap(new GlobalVariable(*unwrap(M),
+                                 unwrap(Ty),
+                                 false,
+                                 GlobalValue::PrivateLinkage,
+                                 nullptr));
+}
+
 extern "C" LLVMTypeRef LLVMRustMetadataTypeInContext(LLVMContextRef C) {
   return wrap(Type::getMetadataTy(*unwrap(C)));
 }
@@ -168,6 +202,8 @@ static Attribute::AttrKind fromRust(LLVMRustAttribute Kind) {
     return Attribute::SanitizeAddress;
   case SanitizeMemory:
     return Attribute::SanitizeMemory;
+  case NonLazyBind:
+    return Attribute::NonLazyBind;
   }
   report_fatal_error("bad AttributeKind");
 }
@@ -416,6 +452,11 @@ extern "C" LLVMValueRef LLVMRustInlineAsm(LLVMTypeRef Ty, char *AsmString,
                              HasSideEffects, IsAlignStack, fromRust(Dialect)));
 }
 
+extern "C" bool LLVMRustInlineAsmVerify(LLVMTypeRef Ty,
+                                          char *Constraints) {
+  return InlineAsm::Verify(unwrap<FunctionType>(Ty), Constraints);
+}
+
 extern "C" void LLVMRustAppendModuleInlineAsm(LLVMModuleRef M, const char *Asm) {
   unwrap(M)->appendModuleInlineAsm(StringRef(Asm));
 }
@@ -492,13 +533,8 @@ inline LLVMRustDIFlags visibility(LLVMRustDIFlags F) {
   return static_cast<LLVMRustDIFlags>(static_cast<uint32_t>(F) & 0x3);
 }
 
-#if LLVM_VERSION_GE(4, 0)
 static DINode::DIFlags fromRust(LLVMRustDIFlags Flags) {
   DINode::DIFlags Result = DINode::DIFlags::FlagZero;
-#else
-static unsigned fromRust(LLVMRustDIFlags Flags) {
-  unsigned Result = 0;
-#endif
 
   switch (visibility(Flags)) {
   case LLVMRustDIFlags::FlagPrivate:
@@ -565,14 +601,12 @@ static unsigned fromRust(LLVMRustDIFlags Flags) {
   if (isSet(Flags & LLVMRustDIFlags::FlagBitField)) {
     Result |= DINode::DIFlags::FlagBitField;
   }
-#if LLVM_RUSTLLVM || LLVM_VERSION_GE(4, 0)
   if (isSet(Flags & LLVMRustDIFlags::FlagNoReturn)) {
     Result |= DINode::DIFlags::FlagNoReturn;
   }
   if (isSet(Flags & LLVMRustDIFlags::FlagMainSubprogram)) {
     Result |= DINode::DIFlags::FlagMainSubprogram;
   }
-#endif
 
   return Result;
 }
@@ -612,14 +646,8 @@ extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateCompileUnit(
     unsigned RuntimeVer, const char *SplitName) {
   auto *File = unwrapDI<DIFile>(FileRef);
 
-#if LLVM_VERSION_GE(4, 0)
   return wrap(Builder->createCompileUnit(Lang, File, Producer, isOptimized,
                                          Flags, RuntimeVer, SplitName));
-#else
-  return wrap(Builder->createCompileUnit(Lang, File->getFilename(),
-      File->getDirectory(), Producer, isOptimized,
-      Flags, RuntimeVer, SplitName));
-#endif
 }
 
 extern "C" LLVMMetadataRef
@@ -657,11 +685,7 @@ extern "C" LLVMMetadataRef
 LLVMRustDIBuilderCreateBasicType(LLVMRustDIBuilderRef Builder, const char *Name,
                                  uint64_t SizeInBits, uint32_t AlignInBits,
                                  unsigned Encoding) {
-  return wrap(Builder->createBasicType(Name, SizeInBits,
-#if LLVM_VERSION_LE(3, 9)
-                                       AlignInBits,
-#endif
-                                       Encoding));
+  return wrap(Builder->createBasicType(Name, SizeInBits, Encoding));
 }
 
 extern "C" LLVMMetadataRef LLVMRustDIBuilderCreatePointerType(
@@ -722,7 +746,6 @@ extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateStaticVariable(
     LLVMMetadataRef Decl = nullptr, uint32_t AlignInBits = 0) {
   llvm::GlobalVariable *InitVal = cast<llvm::GlobalVariable>(unwrap(V));
 
-#if LLVM_VERSION_GE(4, 0)
   llvm::DIExpression *InitExpr = nullptr;
   if (llvm::ConstantInt *IntVal = llvm::dyn_cast<llvm::ConstantInt>(InitVal)) {
     InitExpr = Builder->createConstantValueExpression(
@@ -741,12 +764,6 @@ extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateStaticVariable(
   InitVal->setMetadata("dbg", VarExpr);
 
   return wrap(VarExpr);
-#else
-  return wrap(Builder->createGlobalVariable(
-      unwrapDI<DIDescriptor>(Context), Name, LinkageName,
-      unwrapDI<DIFile>(File), LineNo, unwrapDI<DIType>(Ty), IsLocalToUnit,
-      InitVal, unwrapDIPtr<MDNode>(Decl)));
-#endif
 }
 
 extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateVariable(
@@ -757,12 +774,7 @@ extern "C" LLVMMetadataRef LLVMRustDIBuilderCreateVariable(
   if (Tag == 0x100) { // DW_TAG_auto_variable
     return wrap(Builder->createAutoVariable(
         unwrapDI<DIDescriptor>(Scope), Name, unwrapDI<DIFile>(File), LineNo,
-        unwrapDI<DIType>(Ty), AlwaysPreserve, fromRust(Flags)
-#if LLVM_VERSION_GE(4, 0)
-        ,
-  AlignInBits
-#endif
-        ));
+        unwrapDI<DIType>(Ty), AlwaysPreserve, fromRust(Flags), AlignInBits));
   } else {
     return wrap(Builder->createParameterVariable(
         unwrapDI<DIDescriptor>(Scope), Name, ArgNo, unwrapDI<DIFile>(File),
@@ -777,15 +789,6 @@ LLVMRustDIBuilderCreateArrayType(LLVMRustDIBuilderRef Builder, uint64_t Size,
   return wrap(
       Builder->createArrayType(Size, AlignInBits, unwrapDI<DIType>(Ty),
                                DINodeArray(unwrapDI<MDTuple>(Subscripts))));
-}
-
-extern "C" LLVMMetadataRef
-LLVMRustDIBuilderCreateVectorType(LLVMRustDIBuilderRef Builder, uint64_t Size,
-                                  uint32_t AlignInBits, LLVMMetadataRef Ty,
-                                  LLVMMetadataRef Subscripts) {
-  return wrap(
-      Builder->createVectorType(Size, AlignInBits, unwrapDI<DIType>(Ty),
-                                DINodeArray(unwrapDI<MDTuple>(Subscripts))));
 }
 
 extern "C" LLVMMetadataRef
@@ -1022,6 +1025,7 @@ enum class LLVMRustDiagnosticKind {
   OptimizationRemarkOther,
   OptimizationFailure,
   PGOProfile,
+  Linker,
 };
 
 static LLVMRustDiagnosticKind toRust(DiagnosticKind Kind) {
@@ -1046,6 +1050,8 @@ static LLVMRustDiagnosticKind toRust(DiagnosticKind Kind) {
     return LLVMRustDiagnosticKind::OptimizationRemarkAnalysisAliasing;
   case DK_PGOProfile:
     return LLVMRustDiagnosticKind::PGOProfile;
+  case DK_Linker:
+    return LLVMRustDiagnosticKind::Linker;
   default:
     return (Kind >= DK_FirstRemark && Kind <= DK_LastRemark)
                ? LLVMRustDiagnosticKind::OptimizationRemarkOther

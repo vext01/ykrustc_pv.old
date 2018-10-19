@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use bitvec::BitMatrix;
+use bit_set::BitMatrix;
 use fx::FxHashMap;
 use sync::Lock;
 use rustc_serialize::{Encodable, Encoder, Decodable, Decoder};
@@ -39,7 +39,7 @@ pub struct TransitiveRelation<T: Clone + Debug + Eq + Hash> {
     // are added with new elements. Perhaps better would be to ask the
     // user for a batch of edges to minimize this effect, but I
     // already wrote the code this way. :P -nmatsakis
-    closure: Lock<Option<BitMatrix>>,
+    closure: Lock<Option<BitMatrix<usize, usize>>>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, RustcEncodable, RustcDecodable, Debug)]
@@ -77,7 +77,7 @@ impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
             ..
         } = self;
 
-        map.entry(a.clone())
+        *map.entry(a.clone())
            .or_insert_with(|| {
                elements.push(a);
 
@@ -86,7 +86,6 @@ impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
 
                Index(elements.len() - 1)
            })
-           .clone()
     }
 
     /// Applies the (partial) function to each edge and returns a new
@@ -98,14 +97,7 @@ impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
     {
         let mut result = TransitiveRelation::new();
         for edge in &self.edges {
-            let r = f(&self.elements[edge.source.0]).and_then(|source| {
-                f(&self.elements[edge.target.0]).and_then(|target| {
-                    Some(result.add(source, target))
-                })
-            });
-            if r.is_none() {
-                return None;
-            }
+            result.add(f(&self.elements[edge.source.0])?, f(&self.elements[edge.target.0])?);
         }
         Some(result)
     }
@@ -287,7 +279,7 @@ impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
             //
             // This same algorithm is used in `parents` below.
 
-            let mut candidates = closure.intersection(a.0, b.0); // (1)
+            let mut candidates = closure.intersect_rows(a.0, b.0); // (1)
             pare_down(&mut candidates, closure); // (2)
             candidates.reverse(); // (3a)
             pare_down(&mut candidates, closure); // (3b)
@@ -329,7 +321,7 @@ impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
         // with a slight tweak. In the case where `a R a`, we remove
         // that from the set of candidates.
         let ancestors = self.with_closure(|closure| {
-            let mut ancestors = closure.intersection(a.0, a.0);
+            let mut ancestors = closure.intersect_rows(a.0, a.0);
 
             // Remove anything that can reach `a`. If this is a
             // reflexive relation, this will include `a` itself.
@@ -354,7 +346,7 @@ impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
     }
 
     fn with_closure<OP, R>(&self, op: OP) -> R
-        where OP: FnOnce(&BitMatrix) -> R
+        where OP: FnOnce(&BitMatrix<usize, usize>) -> R
     {
         let mut closure_cell = self.closure.borrow_mut();
         let mut closure = closure_cell.take();
@@ -366,18 +358,18 @@ impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
         result
     }
 
-    fn compute_closure(&self) -> BitMatrix {
+    fn compute_closure(&self) -> BitMatrix<usize, usize> {
         let mut matrix = BitMatrix::new(self.elements.len(),
                                         self.elements.len());
         let mut changed = true;
         while changed {
             changed = false;
-            for edge in self.edges.iter() {
+            for edge in &self.edges {
                 // add an edge from S -> T
-                changed |= matrix.add(edge.source.0, edge.target.0);
+                changed |= matrix.insert(edge.source.0, edge.target.0);
 
                 // add all outgoing edges from T into S
-                changed |= matrix.merge(edge.target.0, edge.source.0);
+                changed |= matrix.union_rows(edge.target.0, edge.source.0);
             }
         }
         matrix
@@ -396,7 +388,7 @@ impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
 /// - Input: `[a, b, x]`. Output: `[a, x]`.
 /// - Input: `[b, a, x]`. Output: `[b, a, x]`.
 /// - Input: `[a, x, b, y]`. Output: `[a, x]`.
-fn pare_down(candidates: &mut Vec<usize>, closure: &BitMatrix) {
+fn pare_down(candidates: &mut Vec<usize>, closure: &BitMatrix<usize, usize>) {
     let mut i = 0;
     while i < candidates.len() {
         let candidate_i = candidates[i];

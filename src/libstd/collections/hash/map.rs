@@ -11,7 +11,7 @@
 use self::Entry::*;
 use self::VacantEntryState::*;
 
-use alloc::CollectionAllocErr;
+use collections::CollectionAllocErr;
 use cell::Cell;
 use borrow::Borrow;
 use cmp::max;
@@ -166,14 +166,14 @@ impl DefaultResizePolicy {
 // Our hash generation scheme consists of generating a 64-bit hash and
 // truncating the most significant bits. When moving to the new table, we
 // simply introduce a new bit to the front of the hash. Therefore, if an
-// elements has ideal index i in the old table, it can have one of two ideal
+// element has ideal index i in the old table, it can have one of two ideal
 // locations in the new table. If the new bit is 0, then the new ideal index
 // is i. If the new bit is 1, then the new ideal index is n + i. Intuitively,
 // we are producing two independent tables of size n, and for each element we
 // independently choose which table to insert it into with equal probability.
-// However the rather than wrapping around themselves on overflowing their
-// indexes, the first table overflows into the first, and the first into the
-// second. Visually, our new table will look something like:
+// However, rather than wrapping around themselves on overflowing their
+// indexes, the first table overflows into the second, and the second into the
+// first. Visually, our new table will look something like:
 //
 // [yy_xxx_xxxx_xxx|xx_yyy_yyyy_yyy]
 //
@@ -276,17 +276,31 @@ const DISPLACEMENT_THRESHOLD: usize = 128;
 /// ```
 /// use std::collections::HashMap;
 ///
-/// // type inference lets us omit an explicit type signature (which
-/// // would be `HashMap<&str, &str>` in this example).
+/// // Type inference lets us omit an explicit type signature (which
+/// // would be `HashMap<String, String>` in this example).
 /// let mut book_reviews = HashMap::new();
 ///
-/// // review some books.
-/// book_reviews.insert("Adventures of Huckleberry Finn",    "My favorite book.");
-/// book_reviews.insert("Grimms' Fairy Tales",               "Masterpiece.");
-/// book_reviews.insert("Pride and Prejudice",               "Very enjoyable.");
-/// book_reviews.insert("The Adventures of Sherlock Holmes", "Eye lyked it alot.");
+/// // Review some books.
+/// book_reviews.insert(
+///     "Adventures of Huckleberry Finn".to_string(),
+///     "My favorite book.".to_string(),
+/// );
+/// book_reviews.insert(
+///     "Grimms' Fairy Tales".to_string(),
+///     "Masterpiece.".to_string(),
+/// );
+/// book_reviews.insert(
+///     "Pride and Prejudice".to_string(),
+///     "Very enjoyable.".to_string(),
+/// );
+/// book_reviews.insert(
+///     "The Adventures of Sherlock Holmes".to_string(),
+///     "Eye lyked it alot.".to_string(),
+/// );
 ///
-/// // check for a specific one.
+/// // Check for a specific one.
+/// // When collections store owned values (String), they can still be
+/// // queried using references (&str).
 /// if !book_reviews.contains_key("Les Misérables") {
 ///     println!("We've got {} reviews, but Les Misérables ain't one.",
 ///              book_reviews.len());
@@ -295,16 +309,16 @@ const DISPLACEMENT_THRESHOLD: usize = 128;
 /// // oops, this review has a lot of spelling mistakes, let's delete it.
 /// book_reviews.remove("The Adventures of Sherlock Holmes");
 ///
-/// // look up the values associated with some keys.
+/// // Look up the values associated with some keys.
 /// let to_find = ["Pride and Prejudice", "Alice's Adventure in Wonderland"];
-/// for book in &to_find {
+/// for &book in &to_find {
 ///     match book_reviews.get(book) {
 ///         Some(review) => println!("{}: {}", book, review),
 ///         None => println!("{} is unreviewed.", book)
 ///     }
 /// }
 ///
-/// // iterate over everything.
+/// // Iterate over everything.
 /// for (book, review) in &book_reviews {
 ///     println!("{}: \"{}\"", book, review);
 /// }
@@ -2161,14 +2175,13 @@ impl<'a, K, V> Entry<'a, K, V> {
 }
 
 impl<'a, K, V: Default> Entry<'a, K, V> {
-    #[unstable(feature = "entry_or_default", issue = "44324")]
+    #[stable(feature = "entry_or_default", since = "1.28.0")]
     /// Ensures a value is in the entry by inserting the default value if empty,
     /// and returns a mutable reference to the value in the entry.
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(entry_or_default)]
     /// # fn main() {
     /// use std::collections::HashMap;
     ///
@@ -2184,7 +2197,6 @@ impl<'a, K, V: Default> Entry<'a, K, V> {
             Vacant(entry) => entry.insert(Default::default()),
         }
     }
-
 }
 
 impl<'a, K, V> OccupiedEntry<'a, K, V> {
@@ -2643,9 +2655,8 @@ impl DefaultHasher {
 
 #[stable(feature = "hashmap_default_hasher", since = "1.13.0")]
 impl Default for DefaultHasher {
-    /// Creates a new `DefaultHasher` using [`new`]. See its documentation for more.
-    ///
-    /// [`new`]: #method.new
+    /// Creates a new `DefaultHasher` using [`new`][DefaultHasher::new].
+    /// See its documentation for more.
     fn default() -> DefaultHasher {
         DefaultHasher::new()
     }
@@ -3521,12 +3532,11 @@ mod test_map {
             m.insert(x, ());
         }
 
-        for i in 0..1000 {
+        for _ in 0..1000 {
             let x = rng.gen_range(-10, 10);
             match m.entry(x) {
                 Vacant(_) => {}
                 Occupied(e) => {
-                    println!("{}: remove {}", i, x);
                     e.remove();
                 }
             }

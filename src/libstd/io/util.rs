@@ -23,6 +23,11 @@ use mem;
 /// On success, the total number of bytes that were copied from
 /// `reader` to `writer` is returned.
 ///
+/// If you’re wanting to copy the contents of one file to another and you’re
+/// working with filesystem paths, see the [`fs::copy`] function.
+///
+/// [`fs::copy`]: ../fs/fn.copy.html
+///
 /// # Errors
 ///
 /// This function will return an error immediately if any call to `read` or
@@ -223,7 +228,7 @@ mod tests {
         assert_eq!(copy(&mut r, &mut w).unwrap(), 4);
 
         let mut r = repeat(0).take(1 << 17);
-        assert_eq!(copy(&mut r as &mut Read, &mut w as &mut Write).unwrap(), 1 << 17);
+        assert_eq!(copy(&mut r as &mut dyn Read, &mut w as &mut dyn Write).unwrap(), 1 << 17);
     }
 
     #[test]

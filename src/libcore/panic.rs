@@ -30,16 +30,20 @@ use fmt;
 /// use std::panic;
 ///
 /// panic::set_hook(Box::new(|panic_info| {
-///     println!("panic occurred: {:?}", panic_info.payload().downcast_ref::<&str>().unwrap());
+///     if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+///         println!("panic occurred: {:?}", s);
+///     } else {
+///         println!("panic occurred");
+///     }
 /// }));
 ///
 /// panic!("Normal panic");
 /// ```
-#[cfg_attr(not(stage0), lang = "panic_info")]
+#[lang = "panic_info"]
 #[stable(feature = "panic_hooks", since = "1.10.0")]
 #[derive(Debug)]
 pub struct PanicInfo<'a> {
-    payload: &'a (Any + Send),
+    payload: &'a (dyn Any + Send),
     message: Option<&'a fmt::Arguments<'a>>,
     location: Location<'a>,
 }
@@ -60,7 +64,7 @@ impl<'a> PanicInfo<'a> {
 
     #[doc(hidden)]
     #[inline]
-    pub fn set_payload(&mut self, info: &'a (Any + Send)) {
+    pub fn set_payload(&mut self, info: &'a (dyn Any + Send)) {
         self.payload = info;
     }
 
@@ -82,7 +86,7 @@ impl<'a> PanicInfo<'a> {
     /// panic!("Normal panic");
     /// ```
     #[stable(feature = "panic_hooks", since = "1.10.0")]
-    pub fn payload(&self) -> &(Any + Send) {
+    pub fn payload(&self) -> &(dyn Any + Send) {
         self.payload
     }
 
@@ -129,7 +133,7 @@ impl<'a> PanicInfo<'a> {
 }
 
 #[stable(feature = "panic_hook_display", since = "1.26.0")]
-impl<'a> fmt::Display for PanicInfo<'a> {
+impl fmt::Display for PanicInfo<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         formatter.write_str("panicked at ")?;
         if let Some(message) = self.message {
@@ -254,7 +258,7 @@ impl<'a> Location<'a> {
 }
 
 #[stable(feature = "panic_hook_display", since = "1.26.0")]
-impl<'a> fmt::Display for Location<'a> {
+impl fmt::Display for Location<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         write!(formatter, "{}:{}:{}", self.file, self.line, self.col)
     }
@@ -266,6 +270,6 @@ impl<'a> fmt::Display for Location<'a> {
 #[unstable(feature = "std_internals", issue = "0")]
 #[doc(hidden)]
 pub unsafe trait BoxMeUp {
-    fn box_me_up(&mut self) -> *mut (Any + Send);
-    fn get(&mut self) -> &(Any + Send);
+    fn box_me_up(&mut self) -> *mut (dyn Any + Send);
+    fn get(&mut self) -> &(dyn Any + Send);
 }

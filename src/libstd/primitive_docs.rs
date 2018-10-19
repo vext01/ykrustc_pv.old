@@ -208,7 +208,7 @@ mod prim_bool { }
 /// # `!` and traits
 ///
 /// When writing your own traits, `!` should have an `impl` whenever there is an obvious `impl`
-/// which doesn't `panic!`. As is turns out, most traits can have an `impl` for `!`. Take [`Debug`]
+/// which doesn't `panic!`. As it turns out, most traits can have an `impl` for `!`. Take [`Debug`]
 /// for example:
 ///
 /// ```
@@ -228,9 +228,9 @@ mod prim_bool { }
 /// [`fmt::Result`]. Since this method takes a `&!` as an argument we know that it can never be
 /// called (because there is no value of type `!` for it to be called with). Writing `*self`
 /// essentially tells the compiler "We know that this code can never be run, so just treat the
-/// entire function body has having type [`fmt::Result`]". This pattern can be used a lot when
+/// entire function body as having type [`fmt::Result`]". This pattern can be used a lot when
 /// implementing traits for `!`. Generally, any trait which only has methods which take a `self`
-/// parameter should have such as impl.
+/// parameter should have such an impl.
 ///
 /// On the other hand, one trait which would not be appropriate to implement is [`Default`]:
 ///
@@ -250,6 +250,7 @@ mod prim_bool { }
 /// [`Default`]: default/trait.Default.html
 /// [`default()`]: default/trait.Default.html#tymethod.default
 ///
+#[unstable(feature = "never_type", issue = "35121")]
 mod prim_never { }
 
 #[doc(primitive = "char")]
@@ -907,10 +908,35 @@ mod prim_usize { }
 /// `&mut T` references can be freely coerced into `&T` references with the same referent type, and
 /// references with longer lifetimes can be freely coerced into references with shorter ones.
 ///
+/// Reference equality by address, instead of comparing the values pointed to, is accomplished via
+/// implicit reference-pointer coercion and raw pointer equality via [`ptr::eq`], while
+/// [`PartialEq`] compares values.
+///
+/// [`ptr::eq`]: ptr/fn.eq.html
+/// [`PartialEq`]: cmp/trait.PartialEq.html
+///
+/// ```
+/// use std::ptr;
+///
+/// let five = 5;
+/// let other_five = 5;
+/// let five_ref = &five;
+/// let same_five_ref = &five;
+/// let other_five_ref = &other_five;
+///
+/// assert!(five_ref == same_five_ref);
+/// assert!(five_ref == other_five_ref);
+///
+/// assert!(ptr::eq(five_ref, same_five_ref));
+/// assert!(!ptr::eq(five_ref, other_five_ref));
+/// ```
+///
 /// For more information on how to use references, see [the book's section on "References and
 /// Borrowing"][book-refs].
 ///
 /// [book-refs]: ../book/second-edition/ch04-02-references-and-borrowing.html
+///
+/// # Trait implementations
 ///
 /// The following traits are implemented for all `&T`, regardless of the type of its referent:
 ///

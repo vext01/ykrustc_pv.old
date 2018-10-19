@@ -80,8 +80,8 @@ pub fn add_constraints_from_crate<'a, 'tcx>(terms_cx: TermsContext<'a, 'tcx>)
 impl<'a, 'tcx, 'v> ItemLikeVisitor<'v> for ConstraintContext<'a, 'tcx> {
     fn visit_item(&mut self, item: &hir::Item) {
         match item.node {
-            hir::ItemStruct(ref struct_def, _) |
-            hir::ItemUnion(ref struct_def, _) => {
+            hir::ItemKind::Struct(ref struct_def, _) |
+            hir::ItemKind::Union(ref struct_def, _) => {
                 self.visit_node_helper(item.id);
 
                 if let hir::VariantData::Tuple(..) = *struct_def {
@@ -89,7 +89,7 @@ impl<'a, 'tcx, 'v> ItemLikeVisitor<'v> for ConstraintContext<'a, 'tcx> {
                 }
             }
 
-            hir::ItemEnum(ref enum_def, _) => {
+            hir::ItemKind::Enum(ref enum_def, _) => {
                 self.visit_node_helper(item.id);
 
                 for variant in &enum_def.variants {
@@ -99,13 +99,13 @@ impl<'a, 'tcx, 'v> ItemLikeVisitor<'v> for ConstraintContext<'a, 'tcx> {
                 }
             }
 
-            hir::ItemFn(..) => {
+            hir::ItemKind::Fn(..) => {
                 self.visit_node_helper(item.id);
             }
 
-            hir::ItemForeignMod(ref foreign_mod) => {
+            hir::ItemKind::ForeignMod(ref foreign_mod) => {
                 for foreign_item in &foreign_mod.items {
-                    if let hir::ForeignItemFn(..) = foreign_item.node {
+                    if let hir::ForeignItemKind::Fn(..) = foreign_item.node {
                         self.visit_node_helper(foreign_item.id);
                     }
                 }
@@ -152,7 +152,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
         let inferred_start = self.terms_cx.inferred_starts[&id];
         let current_item = &CurrentItem { inferred_start };
         match tcx.type_of(def_id).sty {
-            ty::TyAdt(def, _) => {
+            ty::Adt(def, _) => {
                 // Not entirely obvious: constraints on structs/enums do not
                 // affect the variance of their type parameters. See discussion
                 // in comment at top of module.
@@ -166,7 +166,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 }
             }
 
-            ty::TyFnDef(..) => {
+            ty::FnDef(..) => {
                 self.add_constraints_from_sig(current_item,
                                               tcx.fn_sig(def_id),
                                               self.covariant);
@@ -261,61 +261,61 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                variance);
 
         match ty.sty {
-            ty::TyBool | ty::TyChar | ty::TyInt(_) | ty::TyUint(_) | ty::TyFloat(_) |
-            ty::TyStr | ty::TyNever | ty::TyForeign(..) => {
+            ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Float(_) |
+            ty::Str | ty::Never | ty::Foreign(..) => {
                 // leaf type -- noop
             }
 
-            ty::TyFnDef(..) |
-            ty::TyGenerator(..) |
-            ty::TyClosure(..) => {
+            ty::FnDef(..) |
+            ty::Generator(..) |
+            ty::Closure(..) => {
                 bug!("Unexpected closure type in variance computation");
             }
 
-            ty::TyRef(region, ty, mutbl) => {
+            ty::Ref(region, ty, mutbl) => {
                 let contra = self.contravariant(variance);
                 self.add_constraints_from_region(current, region, contra);
                 self.add_constraints_from_mt(current, &ty::TypeAndMut { ty, mutbl }, variance);
             }
 
-            ty::TyArray(typ, _) |
-            ty::TySlice(typ) => {
+            ty::Array(typ, _) |
+            ty::Slice(typ) => {
                 self.add_constraints_from_ty(current, typ, variance);
             }
 
-            ty::TyRawPtr(ref mt) => {
+            ty::RawPtr(ref mt) => {
                 self.add_constraints_from_mt(current, mt, variance);
             }
 
-            ty::TyTuple(subtys) => {
+            ty::Tuple(subtys) => {
                 for &subty in subtys {
                     self.add_constraints_from_ty(current, subty, variance);
                 }
             }
 
-            ty::TyAdt(def, substs) => {
+            ty::Adt(def, substs) => {
                 self.add_constraints_from_substs(current, def.did, substs, variance);
             }
 
-            ty::TyProjection(ref data) => {
+            ty::Projection(ref data) => {
                 let tcx = self.tcx();
                 self.add_constraints_from_trait_ref(current, data.trait_ref(tcx), variance);
             }
 
-            ty::TyAnon(_, substs) => {
+            ty::Opaque(_, substs) => {
                 self.add_constraints_from_invariant_substs(current, substs, variance);
             }
 
-            ty::TyDynamic(ref data, r) => {
+            ty::Dynamic(ref data, r) => {
                 // The type `Foo<T+'a>` is contravariant w/r/t `'a`:
                 let contra = self.contravariant(variance);
                 self.add_constraints_from_region(current, r, contra);
 
-                if let Some(p) = data.principal() {
-                    let poly_trait_ref = p.with_self_ty(self.tcx(), self.tcx().types.err);
-                    self.add_constraints_from_trait_ref(
-                        current, *poly_trait_ref.skip_binder(), variance);
-                }
+                let poly_trait_ref = data
+                    .principal()
+                    .with_self_ty(self.tcx(), self.tcx().types.err);
+                self.add_constraints_from_trait_ref(
+                    current, *poly_trait_ref.skip_binder(), variance);
 
                 for projection in data.projection_bounds() {
                     self.add_constraints_from_ty(
@@ -323,21 +323,22 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
                 }
             }
 
-            ty::TyParam(ref data) => {
+            ty::Param(ref data) => {
                 self.add_constraint(current, data.idx, variance);
             }
 
-            ty::TyFnPtr(sig) => {
+            ty::FnPtr(sig) => {
                 self.add_constraints_from_sig(current, sig, variance);
             }
 
-            ty::TyError => {
+            ty::Error => {
                 // we encounter this when walking the trait references for object
-                // types, where we use TyError as the Self type
+                // types, where we use Error as the Self type
             }
 
-            ty::TyGeneratorWitness(..) |
-            ty::TyInfer(..) => {
+            ty::UnnormalizedProjection(..) |
+            ty::GeneratorWitness(..) |
+            ty::Infer(..) => {
                 bug!("unexpected type encountered in \
                       variance inference: {}",
                      ty);
@@ -430,7 +431,7 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
             ty::ReClosureBound(..) |
             ty::ReScope(..) |
             ty::ReVar(..) |
-            ty::ReSkolemized(..) |
+            ty::RePlaceholder(..) |
             ty::ReEmpty |
             ty::ReErased => {
                 // We don't expect to see anything but 'static or bound

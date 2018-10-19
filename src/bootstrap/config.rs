@@ -23,7 +23,6 @@ use std::cmp;
 
 use num_cpus;
 use toml;
-use util::exe;
 use cache::{INTERNER, Interned};
 use flags::Flags;
 pub use flags::Subcommand;
@@ -64,7 +63,7 @@ pub struct Config {
 
     pub on_fail: Option<String>,
     pub stage: Option<u32>,
-    pub keep_stage: Option<u32>,
+    pub keep_stage: Vec<u32>,
     pub src: PathBuf,
     pub jobs: Option<u32>,
     pub cmd: Subcommand,
@@ -78,6 +77,7 @@ pub struct Config {
     pub llvm_enabled: bool,
     pub llvm_assertions: bool,
     pub llvm_optimize: bool,
+    pub llvm_thin_lto: bool,
     pub llvm_release_debuginfo: bool,
     pub llvm_version_check: bool,
     pub llvm_static_stdcpp: bool,
@@ -86,8 +86,11 @@ pub struct Config {
     pub llvm_targets: Option<String>,
     pub llvm_experimental_targets: String,
     pub llvm_link_jobs: Option<u32>,
+    pub llvm_version_suffix: Option<String>,
 
     pub lld_enabled: bool,
+    pub lldb_enabled: bool,
+    pub llvm_tools_enabled: bool,
 
     // rust codegen options
     pub rust_optimize: bool,
@@ -105,6 +108,8 @@ pub struct Config {
     pub rust_dist_src: bool,
     pub rust_codegen_backends: Vec<Interned<String>>,
     pub rust_codegen_backends_dir: String,
+    pub rust_verify_llvm_ir: bool,
+    pub rust_remap_debuginfo: bool,
 
     pub build: Interned<String>,
     pub hosts: Vec<Interned<String>>,
@@ -125,10 +130,11 @@ pub struct Config {
     // misc
     pub low_priority: bool,
     pub channel: String,
-    pub quiet_tests: bool,
+    pub verbose_tests: bool,
     pub test_miri: bool,
     pub save_toolstates: Option<PathBuf>,
     pub print_step_timings: bool,
+    pub missing_tools: bool,
 
     // Fallback musl-root for all targets
     pub musl_root: Option<PathBuf>,
@@ -157,10 +163,13 @@ pub struct Config {
 pub struct Target {
     /// Some(path to llvm-config) if using an external LLVM.
     pub llvm_config: Option<PathBuf>,
+    /// Some(path to FileCheck) if one was specified.
+    pub llvm_filecheck: Option<PathBuf>,
     pub jemalloc: Option<PathBuf>,
     pub cc: Option<PathBuf>,
     pub cxx: Option<PathBuf>,
     pub ar: Option<PathBuf>,
+    pub ranlib: Option<PathBuf>,
     pub linker: Option<PathBuf>,
     pub ndk: Option<PathBuf>,
     pub crt_static: Option<bool>,
@@ -244,6 +253,7 @@ struct Llvm {
     ninja: Option<bool>,
     assertions: Option<bool>,
     optimize: Option<bool>,
+    thin_lto: Option<bool>,
     release_debuginfo: Option<bool>,
     version_check: Option<bool>,
     static_libstdcpp: Option<bool>,
@@ -251,6 +261,7 @@ struct Llvm {
     experimental_targets: Option<String>,
     link_jobs: Option<u32>,
     link_shared: Option<bool>,
+    version_suffix: Option<String>,
     clang_cl: Option<String>
 }
 
@@ -261,6 +272,7 @@ struct Dist {
     gpg_password_file: Option<String>,
     upload_addr: Option<String>,
     src_tarball: Option<bool>,
+    missing_tools: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -301,7 +313,7 @@ struct Rust {
     ignore_git: Option<bool>,
     debug: Option<bool>,
     dist_src: Option<bool>,
-    quiet_tests: Option<bool>,
+    verbose_tests: Option<bool>,
     test_miri: Option<bool>,
     incremental: Option<bool>,
     save_toolstates: Option<String>,
@@ -309,8 +321,12 @@ struct Rust {
     codegen_backends_dir: Option<String>,
     wasm_syscall: Option<bool>,
     lld: Option<bool>,
+    lldb: Option<bool>,
+    llvm_tools: Option<bool>,
     deny_warnings: Option<bool>,
     backtrace_on_ice: Option<bool>,
+    verify_llvm_ir: Option<bool>,
+    remap_debuginfo: Option<bool>,
 }
 
 /// TOML representation of how each build target is configured.
@@ -318,10 +334,12 @@ struct Rust {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct TomlTarget {
     llvm_config: Option<String>,
+    llvm_filecheck: Option<String>,
     jemalloc: Option<String>,
     cc: Option<String>,
     cxx: Option<String>,
     ar: Option<String>,
+    ranlib: Option<String>,
     linker: Option<String>,
     android_ndk: Option<String>,
     crt_static: Option<bool>,
@@ -359,15 +377,15 @@ impl Config {
         config.rust_codegen_backends = vec![INTERNER.intern_str("llvm")];
         config.rust_codegen_backends_dir = "codegen-backends".to_owned();
         config.deny_warnings = true;
+        config.missing_tools = false;
 
         // set by bootstrap.py
         config.build = INTERNER.intern_str(&env::var("BUILD").expect("'BUILD' to be set"));
         config.src = Config::path_from_python("SRC");
         config.out = Config::path_from_python("BUILD_DIR");
 
-        let stage0_root = config.out.join(&config.build).join("stage0/bin");
-        config.initial_rustc = stage0_root.join(exe("rustc", &config.build));
-        config.initial_cargo = stage0_root.join(exe("cargo", &config.build));
+        config.initial_rustc = Config::path_from_python("RUSTC");
+        config.initial_cargo = Config::path_from_python("CARGO");
 
         config
     }
@@ -499,14 +517,16 @@ impl Config {
             set(&mut config.llvm_enabled, llvm.enabled);
             llvm_assertions = llvm.assertions;
             set(&mut config.llvm_optimize, llvm.optimize);
+            set(&mut config.llvm_thin_lto, llvm.thin_lto);
             set(&mut config.llvm_release_debuginfo, llvm.release_debuginfo);
             set(&mut config.llvm_version_check, llvm.version_check);
             set(&mut config.llvm_static_stdcpp, llvm.static_libstdcpp);
             set(&mut config.llvm_link_shared, llvm.link_shared);
             config.llvm_targets = llvm.targets.clone();
             config.llvm_experimental_targets = llvm.experimental_targets.clone()
-                .unwrap_or("WebAssembly".to_string());
+                .unwrap_or("WebAssembly;RISCV".to_string());
             config.llvm_link_jobs = llvm.link_jobs;
+            config.llvm_version_suffix = llvm.version_suffix.clone();
             config.llvm_clang_cl = llvm.clang_cl.clone();
         }
 
@@ -528,7 +548,7 @@ impl Config {
             set(&mut config.backtrace, rust.backtrace);
             set(&mut config.channel, rust.channel.clone());
             set(&mut config.rust_dist_src, rust.dist_src);
-            set(&mut config.quiet_tests, rust.quiet_tests);
+            set(&mut config.verbose_tests, rust.verbose_tests);
             set(&mut config.test_miri, rust.test_miri);
             // in the case "false" is set explicitly, do not overwrite the command line args
             if let Some(true) = rust.incremental {
@@ -536,12 +556,16 @@ impl Config {
             }
             set(&mut config.wasm_syscall, rust.wasm_syscall);
             set(&mut config.lld_enabled, rust.lld);
+            set(&mut config.lldb_enabled, rust.lldb);
+            set(&mut config.llvm_tools_enabled, rust.llvm_tools);
             config.rustc_parallel_queries = rust.experimental_parallel_queries.unwrap_or(false);
             config.rustc_default_linker = rust.default_linker.clone();
             config.musl_root = rust.musl_root.clone().map(PathBuf::from);
             config.save_toolstates = rust.save_toolstates.clone().map(PathBuf::from);
             set(&mut config.deny_warnings, rust.deny_warnings.or(flags.warnings));
             set(&mut config.backtrace_on_ice, rust.backtrace_on_ice);
+            set(&mut config.rust_verify_llvm_ir, rust.verify_llvm_ir);
+            set(&mut config.rust_remap_debuginfo, rust.remap_debuginfo);
 
             if let Some(ref backends) = rust.codegen_backends {
                 config.rust_codegen_backends = backends.iter()
@@ -565,6 +589,9 @@ impl Config {
                 if let Some(ref s) = cfg.llvm_config {
                     target.llvm_config = Some(config.src.join(s));
                 }
+                if let Some(ref s) = cfg.llvm_filecheck {
+                    target.llvm_filecheck = Some(config.src.join(s));
+                }
                 if let Some(ref s) = cfg.jemalloc {
                     target.jemalloc = Some(config.src.join(s));
                 }
@@ -574,6 +601,7 @@ impl Config {
                 target.cc = cfg.cc.clone().map(PathBuf::from);
                 target.cxx = cfg.cxx.clone().map(PathBuf::from);
                 target.ar = cfg.ar.clone().map(PathBuf::from);
+                target.ranlib = cfg.ranlib.clone().map(PathBuf::from);
                 target.linker = cfg.linker.clone().map(PathBuf::from);
                 target.crt_static = cfg.crt_static.clone();
                 target.musl_root = cfg.musl_root.clone().map(PathBuf::from);
@@ -588,6 +616,7 @@ impl Config {
             config.dist_gpg_password_file = t.gpg_password_file.clone().map(PathBuf::from);
             config.dist_upload_addr = t.upload_addr.clone();
             set(&mut config.rust_dist_src, t.src_tarball);
+            set(&mut config.missing_tools, t.missing_tools);
         }
 
         // Now that we've reached the end of our configuration, infer the
@@ -598,6 +627,9 @@ impl Config {
 
         let default = false;
         config.llvm_assertions = llvm_assertions.unwrap_or(default);
+
+        let default = true;
+        config.rust_optimize = optimize.unwrap_or(default);
 
         let default = match &config.channel[..] {
             "stable" | "beta" | "nightly" => true,
@@ -611,7 +643,6 @@ impl Config {
         config.debug_jemalloc = debug_jemalloc.unwrap_or(default);
         config.rust_debuginfo = debuginfo.unwrap_or(default);
         config.rust_debug_assertions = debug_assertions.unwrap_or(default);
-        config.rust_optimize = optimize.unwrap_or(!default);
 
         let default = config.channel == "dev";
         config.ignore_git = ignore_git.unwrap_or(default);

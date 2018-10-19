@@ -10,7 +10,7 @@
 
 //! Check license of third-party deps by inspecting src/vendor
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet, HashMap};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -18,7 +18,7 @@ use std::process::Command;
 
 use serde_json;
 
-static LICENSES: &'static [&'static str] = &[
+const LICENSES: &[&str] = &[
     "MIT/Apache-2.0",
     "MIT / Apache-2.0",
     "Apache-2.0/MIT",
@@ -26,13 +26,14 @@ static LICENSES: &'static [&'static str] = &[
     "MIT OR Apache-2.0",
     "MIT",
     "Unlicense/MIT",
+    "Unlicense OR MIT",
 ];
 
 /// These are exceptions to Rust's permissive licensing policy, and
 /// should be considered bugs. Exceptions are only allowed in Rust
 /// tooling. It is _crucial_ that no exception crates be dependencies
 /// of the Rust runtime (std / test).
-static EXCEPTIONS: &'static [&'static str] = &[
+const EXCEPTIONS: &[&str] = &[
     "mdbook",             // MPL2, mdbook
     "openssl",            // BSD+advertising clause, cargo, mdbook
     "pest",               // MPL2, mdbook via handlebars
@@ -47,18 +48,21 @@ static EXCEPTIONS: &'static [&'static str] = &[
     "selectors",          // MPL-2.0, rustdoc
     "clippy_lints",       // MPL-2.0, rls
     "colored",            // MPL-2.0, rustfmt
+    "ordslice",           // Apache-2.0, rls
+    "cloudabi",           // BSD-2-Clause, (rls -> crossbeam-channel 0.2 -> rand 0.5)
+    "ryu",                // Apache-2.0, rls/cargo/... (b/c of serde)
+    "bytesize",           // Apache-2.0, cargo
 ];
 
 /// Which crates to check against the whitelist?
-static WHITELIST_CRATES: &'static [CrateVersion] = &[
+const WHITELIST_CRATES: &[CrateVersion] = &[
     CrateVersion("rustc", "0.0.0"),
     CrateVersion("rustc_codegen_llvm", "0.0.0"),
 ];
 
 /// Whitelist of crates rustc is allowed to depend on. Avoid adding to the list if possible.
-static WHITELIST: &'static [Crate] = &[
+const WHITELIST: &[Crate] = &[
     Crate("aho-corasick"),
-    Crate("ar"),
     Crate("arrayvec"),
     Crate("atty"),
     Crate("backtrace"),
@@ -66,9 +70,10 @@ static WHITELIST: &'static [Crate] = &[
     Crate("bitflags"),
     Crate("byteorder"),
     Crate("cc"),
+    Crate("cfg-if"),
     Crate("chalk-engine"),
     Crate("chalk-macros"),
-    Crate("cfg-if"),
+    Crate("cloudabi"),
     Crate("cmake"),
     Crate("crossbeam-deque"),
     Crate("crossbeam-epoch"),
@@ -87,9 +92,11 @@ static WHITELIST: &'static [Crate] = &[
     Crate("kernel32-sys"),
     Crate("lazy_static"),
     Crate("libc"),
+    Crate("lock_api"),
     Crate("log"),
     Crate("log_settings"),
     Crate("memchr"),
+    Crate("memmap"),
     Crate("memoffset"),
     Crate("miniz-sys"),
     Crate("nodrop"),
@@ -97,10 +104,11 @@ static WHITELIST: &'static [Crate] = &[
     Crate("owning_ref"),
     Crate("parking_lot"),
     Crate("parking_lot_core"),
-    Crate("polonius-engine"),
     Crate("pkg-config"),
+    Crate("polonius-engine"),
     Crate("quick-error"),
     Crate("rand"),
+    Crate("rand_core"),
     Crate("redox_syscall"),
     Crate("redox_termios"),
     Crate("regex"),
@@ -114,7 +122,7 @@ static WHITELIST: &'static [Crate] = &[
     Crate("scopeguard"),
     Crate("smallvec"),
     Crate("stable_deref_trait"),
-    Crate("tempdir"),
+    Crate("tempfile"),
     Crate("termcolor"),
     Crate("terminon"),
     Crate("termion"),
@@ -123,10 +131,12 @@ static WHITELIST: &'static [Crate] = &[
     Crate("unicode-width"),
     Crate("unreachable"),
     Crate("utf8-ranges"),
+    Crate("version_check"),
     Crate("void"),
     Crate("winapi"),
     Crate("winapi-build"),
     Crate("winapi-i686-pc-windows-gnu"),
+    Crate("winapi-util"),
     Crate("winapi-x86_64-pc-windows-gnu"),
     Crate("wincolor"),
 ];
@@ -165,7 +175,7 @@ impl<'a> Crate<'a> {
 impl<'a> CrateVersion<'a> {
     /// Returns the struct and whether or not the dep is in-tree
     pub fn from_str(s: &'a str) -> (Self, bool) {
-        let mut parts = s.split(" ");
+        let mut parts = s.split(' ');
         let name = parts.next().unwrap();
         let version = parts.next().unwrap();
         let path = parts.next().unwrap();
@@ -199,12 +209,13 @@ pub fn check(path: &Path, bad: &mut bool) {
         let dir = t!(dir);
 
         // skip our exceptions
-        if EXCEPTIONS.iter().any(|exception| {
+        let is_exception = EXCEPTIONS.iter().any(|exception| {
             dir.path()
                 .to_str()
                 .unwrap()
                 .contains(&format!("src/vendor/{}", exception))
-        }) {
+        });
+        if is_exception {
             continue;
         }
 
@@ -233,13 +244,15 @@ pub fn check_whitelist(path: &Path, cargo: &Path, bad: &mut bool) {
         unapproved.append(&mut bad);
     }
 
-    if unapproved.len() > 0 {
+    if !unapproved.is_empty() {
         println!("Dependencies not on the whitelist:");
         for dep in unapproved {
             println!("* {}", dep.id_str());
         }
         *bad = true;
     }
+
+    check_crate_duplicate(&resolve, bad);
 }
 
 fn check_license(path: &Path) -> bool {
@@ -341,4 +354,31 @@ fn check_crate_whitelist<'a, 'b>(
     }
 
     unapproved
+}
+
+fn check_crate_duplicate(resolve: &Resolve, bad: &mut bool) {
+    const FORBIDDEN_TO_HAVE_DUPLICATES: &[&str] = &[
+        // These two crates take quite a long time to build, let's not let two
+        // versions of them accidentally sneak into our dependency graph to
+        // ensure we keep our CI times under control
+        // "cargo", // FIXME(#53005)
+        "rustc-ap-syntax",
+    ];
+    let mut name_to_id: HashMap<_, Vec<_>> = HashMap::new();
+    for node in resolve.nodes.iter() {
+        name_to_id.entry(node.id.split_whitespace().next().unwrap())
+            .or_default()
+            .push(&node.id);
+    }
+
+    for name in FORBIDDEN_TO_HAVE_DUPLICATES {
+        if name_to_id[name].len() <= 1 {
+            continue
+        }
+        println!("crate `{}` is duplicated in `Cargo.lock`", name);
+        for id in name_to_id[name].iter() {
+            println!("  * {}", id);
+        }
+        *bad = true;
+    }
 }

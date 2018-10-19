@@ -48,7 +48,6 @@ impl<T> RawArray<T> {
 /// # Safety
 ///
 /// The specified range must be valid for reading and writing.
-/// The type `T` must have non-zero size.
 ///
 /// # Algorithm
 ///
@@ -73,12 +72,13 @@ pub unsafe fn ptr_rotate<T>(mut left: usize, mid: *mut T, mut right: usize) {
     loop {
         let delta = cmp::min(left, right);
         if delta <= RawArray::<T>::cap() {
+            // We will always hit this immediately for ZST.
             break;
         }
 
         ptr::swap_nonoverlapping(
-            mid.offset(-(left as isize)),
-            mid.offset((right-delta) as isize),
+            mid.sub(left),
+            mid.add(right - delta),
             delta);
 
         if left <= right {
@@ -91,15 +91,15 @@ pub unsafe fn ptr_rotate<T>(mut left: usize, mid: *mut T, mut right: usize) {
     let rawarray = RawArray::new();
     let buf = rawarray.ptr();
 
-    let dim = mid.offset(-(left as isize)).offset(right as isize);
+    let dim = mid.sub(left).add(right);
     if left <= right {
-        ptr::copy_nonoverlapping(mid.offset(-(left as isize)), buf, left);
-        ptr::copy(mid, mid.offset(-(left as isize)), right);
+        ptr::copy_nonoverlapping(mid.sub(left), buf, left);
+        ptr::copy(mid, mid.sub(left), right);
         ptr::copy_nonoverlapping(buf, dim, left);
     }
     else {
         ptr::copy_nonoverlapping(mid, buf, right);
-        ptr::copy(mid.offset(-(left as isize)), dim, left);
-        ptr::copy_nonoverlapping(buf, mid.offset(-(left as isize)), right);
+        ptr::copy(mid.sub(left), dim, left);
+        ptr::copy_nonoverlapping(buf, mid.sub(left), right);
     }
 }

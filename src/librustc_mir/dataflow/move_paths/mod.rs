@@ -97,6 +97,20 @@ pub struct MovePath<'tcx> {
     pub place: Place<'tcx>,
 }
 
+impl<'tcx> MovePath<'tcx> {
+    pub fn parents(&self, move_paths: &IndexVec<MovePathIndex, MovePath>) -> Vec<MovePathIndex> {
+        let mut parents = Vec::new();
+
+        let mut curr_parent = self.parent;
+        while let Some(parent_mpi) = curr_parent {
+            parents.push(parent_mpi);
+            curr_parent = move_paths[parent_mpi].parent;
+        }
+
+        parents
+    }
+}
+
 impl<'tcx> fmt::Debug for MovePath<'tcx> {
     fn fmt(&self, w: &mut fmt::Formatter) -> fmt::Result {
         write!(w, "MovePath {{")?;
@@ -196,10 +210,19 @@ impl fmt::Debug for MoveOut {
 pub struct Init {
     /// path being initialized
     pub path: MovePathIndex,
-    /// span of initialization
-    pub span: Span,
+    /// location of initialization
+    pub location: InitLocation,
     /// Extra information about this initialization
     pub kind: InitKind,
+}
+
+
+/// Initializations can be from an argument or from a statement. Arguments
+/// do not have locations, in those cases the `Local` is kept..
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum InitLocation {
+    Argument(Local),
+    Statement(Location),
 }
 
 /// Additional information about the initialization.
@@ -209,13 +232,22 @@ pub enum InitKind {
     Deep,
     /// Only does a shallow init
     Shallow,
-    /// This doesn't initialize the variabe on panic (and a panic is possible).
+    /// This doesn't initialize the variable on panic (and a panic is possible).
     NonPanicPathOnly,
 }
 
 impl fmt::Debug for Init {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "{:?}@{:?} ({:?})", self.path, self.span, self.kind)
+        write!(fmt, "{:?}@{:?} ({:?})", self.path, self.location, self.kind)
+    }
+}
+
+impl Init {
+    crate fn span<'gcx>(&self, mir: &Mir<'gcx>) -> Span {
+        match self.location {
+            InitLocation::Argument(local) => mir.local_decls[local].source_info.span,
+            InitLocation::Statement(location) => mir.source_info(location).span,
+        }
     }
 }
 
@@ -249,6 +281,7 @@ impl<'tcx> MovePathLookup<'tcx> {
     pub fn find(&self, place: &Place<'tcx>) -> LookupResult {
         match *place {
             Place::Local(local) => LookupResult::Exact(self.locals[local]),
+            Place::Promoted(_) |
             Place::Static(..) => LookupResult::Parent(None),
             Place::Projection(ref proj) => {
                 match self.find(&proj.base) {
@@ -271,15 +304,29 @@ impl<'tcx> MovePathLookup<'tcx> {
 
 #[derive(Debug)]
 pub struct IllegalMoveOrigin<'tcx> {
-    pub(crate) span: Span,
+    pub(crate) location: Location,
     pub(crate) kind: IllegalMoveOriginKind<'tcx>,
 }
 
 #[derive(Debug)]
 pub(crate) enum IllegalMoveOriginKind<'tcx> {
+    /// Illegal move due to attempt to move from `static` variable.
     Static,
-    BorrowedContent,
+
+    /// Illegal move due to attempt to move from behind a reference.
+    BorrowedContent {
+        /// The place the reference refers to: if erroneous code was trying to
+        /// move from `(*x).f` this will be `*x`.
+        target_place: Place<'tcx>,
+    },
+
+    /// Illegal move due to attempt to move from field of an ADT that
+    /// implements `Drop`. Rust maintains invariant that all `Drop`
+    /// ADT's remain fully-initialized so that user-defined destructor
+    /// can safely read from all of the ADT's fields.
     InteriorOfTypeWithDestructor { container_ty: ty::Ty<'tcx> },
+
+    /// Illegal move due to attempt to move out of a slice or array.
     InteriorOfSliceOrArray { ty: ty::Ty<'tcx>, is_index: bool, },
 }
 
@@ -290,15 +337,25 @@ pub enum MoveError<'tcx> {
 }
 
 impl<'tcx> MoveError<'tcx> {
-    fn cannot_move_out_of(span: Span, kind: IllegalMoveOriginKind<'tcx>) -> Self {
-        let origin = IllegalMoveOrigin { span, kind };
+    fn cannot_move_out_of(location: Location, kind: IllegalMoveOriginKind<'tcx>) -> Self {
+        let origin = IllegalMoveOrigin { location, kind };
         MoveError::IllegalMove { cannot_move_out_of: origin }
     }
 }
 
 impl<'a, 'gcx, 'tcx> MoveData<'tcx> {
     pub fn gather_moves(mir: &Mir<'tcx>, tcx: TyCtxt<'a, 'gcx, 'tcx>)
-                        -> Result<Self, (Self, Vec<MoveError<'tcx>>)> {
+                        -> Result<Self, (Self, Vec<(Place<'tcx>, MoveError<'tcx>)>)> {
         builder::gather_moves(mir, tcx)
+    }
+
+    /// For the move path `mpi`, returns the root local variable (if any) that starts the path.
+    /// (e.g., for a path like `a.b.c` returns `Some(a)`)
+    pub fn base_local(&self, mut mpi: MovePathIndex) -> Option<Local> {
+        loop {
+            let path = &self.move_paths[mpi];
+            if let Place::Local(l) = path.place { return Some(l); }
+            if let Some(parent) = path.parent { mpi = parent; continue } else { return None }
+        }
     }
 }

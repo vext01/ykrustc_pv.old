@@ -8,9 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+
 // aux-build:msvc-imp-present.rs
 // compile-flags: -Z thinlto -C codegen-units=8
-// min-llvm-version: 4.0
 // no-prefer-dynamic
 
 // On MSVC we have a "hack" where we emit symbols that look like `_imp_$name`

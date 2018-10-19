@@ -18,9 +18,10 @@ use attributes;
 use common::{self, CodegenCx};
 use consts;
 use declare;
-use llvm::{self, ValueRef};
+use llvm;
 use monomorphize::Instance;
 use type_of::LayoutLlvmExt;
+use value::Value;
 
 use rustc::hir::def_id::DefId;
 use rustc::ty::{self, TypeFoldable};
@@ -34,10 +35,10 @@ use rustc::ty::subst::Substs;
 ///
 /// - `cx`: the crate context
 /// - `instance`: the instance to be instantiated
-pub fn get_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
-                        instance: Instance<'tcx>)
-                        -> ValueRef
-{
+pub fn get_fn(
+    cx: &CodegenCx<'ll, 'tcx>,
+    instance: Instance<'tcx>,
+) -> &'ll Value {
     let tcx = cx.tcx;
 
     debug!("get_fn(instance={:?})", instance);
@@ -95,9 +96,9 @@ pub fn get_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
         debug!("get_fn: not casting pointer!");
 
         if instance.def.is_inline(tcx) {
-            attributes::inline(llfn, attributes::InlineAttr::Hint);
+            attributes::inline(cx, llfn, attributes::InlineAttr::Hint);
         }
-        attributes::from_fn_attrs(cx, llfn, instance.def.def_id());
+        attributes::from_fn_attrs(cx, llfn, Some(instance.def.def_id()));
 
         let instance_def_id = instance.def_id();
 
@@ -132,7 +133,7 @@ pub fn get_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
                 // This is a monomorphization. Its expected visibility depends
                 // on whether we are in share-generics mode.
 
-                if cx.tcx.share_generics() {
+                if cx.tcx.sess.opts.share_generics() {
                     // We are in share_generics mode.
 
                     if instance_def_id.is_local() {
@@ -204,11 +205,11 @@ pub fn get_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
     llfn
 }
 
-pub fn resolve_and_get_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
-                                    def_id: DefId,
-                                    substs: &'tcx Substs<'tcx>)
-                                    -> ValueRef
-{
+pub fn resolve_and_get_fn(
+    cx: &CodegenCx<'ll, 'tcx>,
+    def_id: DefId,
+    substs: &'tcx Substs<'tcx>,
+) -> &'ll Value {
     get_fn(
         cx,
         ty::Instance::resolve(

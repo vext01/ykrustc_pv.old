@@ -19,13 +19,13 @@
 #![feature(box_patterns)]
 #![feature(box_syntax)]
 #![feature(custom_attribute)]
+#![feature(nll)]
 #![allow(unused_attributes)]
 #![feature(quote)]
 #![feature(rustc_diagnostic_macros)]
 
 #![recursion_limit="256"]
 
-extern crate ar;
 extern crate flate2;
 #[macro_use]
 extern crate log;
@@ -38,8 +38,7 @@ extern crate rustc_incremental;
 extern crate syntax;
 extern crate syntax_pos;
 #[macro_use] extern crate rustc_data_structures;
-
-pub extern crate rustc as __rustc;
+extern crate rustc_metadata_utils;
 
 use rustc::ty::TyCtxt;
 

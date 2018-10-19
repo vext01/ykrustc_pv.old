@@ -11,7 +11,7 @@
 // no-prefer-dynamic
 
 #![crate_type = "proc-macro"]
-#![feature(proc_macro, proc_macro_non_items)]
+#![feature(proc_macro_hygiene)]
 
 extern crate proc_macro;
 
@@ -19,7 +19,7 @@ use proc_macro::*;
 
 #[proc_macro_attribute]
 pub fn attr_tru(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let name = item.into_iter().skip(1).next().unwrap();
+    let name = item.into_iter().nth(1).unwrap();
     quote!(fn $name() -> bool { true })
 }
 

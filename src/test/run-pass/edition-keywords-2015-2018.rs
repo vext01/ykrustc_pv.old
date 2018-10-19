@@ -8,10 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags: --edition=2015
+#![allow(unused_mut)]
+#![allow(unused_assignments)]
+#![allow(unused_variables)]
+// edition:2015
 // aux-build:edition-kw-macro-2018.rs
-
-#![feature(raw_identifiers)]
 
 #[macro_use]
 extern crate edition_kw_macro_2018;

@@ -22,15 +22,13 @@
 #![feature(box_syntax)]
 
 use std::any::Any;
-use std::io::prelude::*;
-use std::io::{self, Cursor};
+use std::io::{self, Write};
 use std::fs::File;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use rustc_data_structures::owning_ref::OwningRef;
 use rustc_data_structures::sync::Lrc;
-use ar::{Archive, Builder, Header};
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
 
@@ -39,14 +37,14 @@ use rustc::hir::def_id::LOCAL_CRATE;
 use rustc::session::{Session, CompileIncomplete};
 use rustc::session::config::{CrateType, OutputFilenames, PrintRequest};
 use rustc::ty::TyCtxt;
-use rustc::ty::maps::Providers;
+use rustc::ty::query::Providers;
 use rustc::middle::cstore::EncodedMetadata;
 use rustc::middle::cstore::MetadataLoader;
 use rustc::dep_graph::DepGraph;
 use rustc_target::spec::Target;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_mir::monomorphize::collector;
-use link::{build_link_meta, out_filename};
+use link::out_filename;
 
 pub use rustc_data_structures::sync::MetadataRef;
 
@@ -58,112 +56,44 @@ pub trait CodegenBackend {
     fn print_version(&self) {}
     fn diagnostics(&self) -> &[(&'static str, &'static str)] { &[] }
 
-    fn metadata_loader(&self) -> Box<MetadataLoader + Sync>;
+    fn metadata_loader(&self) -> Box<dyn MetadataLoader + Sync>;
     fn provide(&self, _providers: &mut Providers);
     fn provide_extern(&self, _providers: &mut Providers);
     fn codegen_crate<'a, 'tcx>(
         &self,
         tcx: TyCtxt<'a, 'tcx, 'tcx>,
-        rx: mpsc::Receiver<Box<Any + Send>>
-    ) -> Box<Any>;
+        rx: mpsc::Receiver<Box<dyn Any + Send>>
+    ) -> Box<dyn Any>;
 
-    /// This is called on the returned `Box<Any>` from `codegen_backend`
+    /// This is called on the returned `Box<dyn Any>` from `codegen_backend`
     ///
     /// # Panics
     ///
-    /// Panics when the passed `Box<Any>` was not returned by `codegen_backend`.
+    /// Panics when the passed `Box<dyn Any>` was not returned by `codegen_backend`.
     fn join_codegen_and_link(
         &self,
-        ongoing_codegen: Box<Any>,
+        ongoing_codegen: Box<dyn Any>,
         sess: &Session,
         dep_graph: &DepGraph,
         outputs: &OutputFilenames,
     ) -> Result<(), CompileIncomplete>;
 }
 
-pub struct DummyCodegenBackend;
-
-impl CodegenBackend for DummyCodegenBackend {
-    fn metadata_loader(&self) -> Box<MetadataLoader + Sync> {
-        box DummyMetadataLoader(())
-    }
-
-    fn provide(&self, _providers: &mut Providers) {
-        bug!("DummyCodegenBackend::provide");
-    }
-
-    fn provide_extern(&self, _providers: &mut Providers) {
-        bug!("DummyCodegenBackend::provide_extern");
-    }
-
-    fn codegen_crate<'a, 'tcx>(
-        &self,
-        _tcx: TyCtxt<'a, 'tcx, 'tcx>,
-        _rx: mpsc::Receiver<Box<Any + Send>>
-    ) -> Box<Any> {
-        bug!("DummyCodegenBackend::codegen_backend");
-    }
-
-    fn join_codegen_and_link(
-        &self,
-        _ongoing_codegen: Box<Any>,
-        _sess: &Session,
-        _dep_graph: &DepGraph,
-        _outputs: &OutputFilenames,
-    ) -> Result<(), CompileIncomplete> {
-        bug!("DummyCodegenBackend::join_codegen_and_link");
-    }
-}
-
-pub struct DummyMetadataLoader(());
-
-impl MetadataLoader for DummyMetadataLoader {
-    fn get_rlib_metadata(
-        &self,
-        _target: &Target,
-        _filename: &Path
-    ) -> Result<MetadataRef, String> {
-        bug!("DummyMetadataLoader::get_rlib_metadata");
-    }
-
-    fn get_dylib_metadata(
-        &self,
-        _target: &Target,
-        _filename: &Path
-    ) -> Result<MetadataRef, String> {
-        bug!("DummyMetadataLoader::get_dylib_metadata");
-    }
-}
-
 pub struct NoLlvmMetadataLoader;
 
 impl MetadataLoader for NoLlvmMetadataLoader {
     fn get_rlib_metadata(&self, _: &Target, filename: &Path) -> Result<MetadataRef, String> {
-        let file = File::open(filename)
+        let mut file = File::open(filename)
             .map_err(|e| format!("metadata file open err: {:?}", e))?;
-        let mut archive = Archive::new(file);
 
-        while let Some(entry_result) = archive.next_entry() {
-            let mut entry = entry_result
-                .map_err(|e| format!("metadata section read err: {:?}", e))?;
-            if entry.header().identifier() == "rust.metadata.bin" {
-                let mut buf = Vec::new();
-                io::copy(&mut entry, &mut buf).unwrap();
-                let buf: OwningRef<Vec<u8>, [u8]> = OwningRef::new(buf).into();
-                return Ok(rustc_erase_owner!(buf.map_owner_box()));
-            }
-        }
-
-        Err("Couldn't find metadata section".to_string())
+        let mut buf = Vec::new();
+        io::copy(&mut file, &mut buf).unwrap();
+        let buf: OwningRef<Vec<u8>, [u8]> = OwningRef::new(buf).into();
+        return Ok(rustc_erase_owner!(buf.map_owner_box()));
     }
 
-    fn get_dylib_metadata(
-        &self,
-        _target: &Target,
-        _filename: &Path,
-    ) -> Result<MetadataRef, String> {
-        // FIXME: Support reading dylibs from llvm enabled rustc
-        self.get_rlib_metadata(_target, _filename)
+    fn get_dylib_metadata(&self, target: &Target, filename: &Path) -> Result<MetadataRef, String> {
+        self.get_rlib_metadata(target, filename)
     }
 }
 
@@ -175,7 +105,7 @@ pub struct OngoingCodegen {
 }
 
 impl MetadataOnlyCodegenBackend {
-    pub fn new() -> Box<CodegenBackend> {
+    pub fn new() -> Box<dyn CodegenBackend> {
         box MetadataOnlyCodegenBackend(())
     }
 }
@@ -184,10 +114,9 @@ impl CodegenBackend for MetadataOnlyCodegenBackend {
     fn init(&self, sess: &Session) {
         for cty in sess.opts.crate_types.iter() {
             match *cty {
-                CrateType::CrateTypeRlib | CrateType::CrateTypeDylib |
-                CrateType::CrateTypeExecutable => {},
+                CrateType::Rlib | CrateType::Dylib | CrateType::Executable => {},
                 _ => {
-                    sess.parse_sess.span_diagnostic.warn(
+                    sess.diagnostic().warn(
                         &format!("LLVM unsupported, so output type {} is not supported", cty)
                     );
                 },
@@ -195,7 +124,7 @@ impl CodegenBackend for MetadataOnlyCodegenBackend {
         }
     }
 
-    fn metadata_loader(&self) -> Box<MetadataLoader + Sync> {
+    fn metadata_loader(&self) -> Box<dyn MetadataLoader + Sync> {
         box NoLlvmMetadataLoader
     }
 
@@ -205,14 +134,18 @@ impl CodegenBackend for MetadataOnlyCodegenBackend {
         providers.target_features_whitelist = |_tcx, _cnum| {
             Lrc::new(FxHashMap()) // Just a dummy
         };
+        providers.is_reachable_non_generic = |_tcx, _defid| true;
+        providers.exported_symbols = |_tcx, _crate| Arc::new(Vec::new());
     }
-    fn provide_extern(&self, _providers: &mut Providers) {}
+    fn provide_extern(&self, providers: &mut Providers) {
+        providers.is_reachable_non_generic = |_tcx, _defid| true;
+    }
 
     fn codegen_crate<'a, 'tcx>(
         &self,
         tcx: TyCtxt<'a, 'tcx, 'tcx>,
-        _rx: mpsc::Receiver<Box<Any + Send>>
-    ) -> Box<Any> {
+        _rx: mpsc::Receiver<Box<dyn Any + Send>>
+    ) -> Box<dyn Any> {
         use rustc_mir::monomorphize::item::MonoItem;
 
         ::check_for_rustc_errors_attr(tcx);
@@ -225,7 +158,8 @@ impl CodegenBackend for MetadataOnlyCodegenBackend {
                 collector::MonoItemCollectionMode::Eager
             ).0.iter()
         );
-        ::rustc::middle::dependency_format::calculate(tcx);
+        // FIXME: Fix this
+        // ::rustc::middle::dependency_format::calculate(tcx);
         let _ = tcx.link_args(LOCAL_CRATE);
         let _ = tcx.native_libraries(LOCAL_CRATE);
         for mono_item in
@@ -246,8 +180,7 @@ impl CodegenBackend for MetadataOnlyCodegenBackend {
         }
         tcx.sess.abort_if_errors();
 
-        let link_meta = build_link_meta(tcx.crate_hash(LOCAL_CRATE));
-        let metadata = tcx.encode_metadata(&link_meta);
+        let metadata = tcx.encode_metadata();
 
         box OngoingCodegen {
             metadata: metadata,
@@ -258,21 +191,22 @@ impl CodegenBackend for MetadataOnlyCodegenBackend {
 
     fn join_codegen_and_link(
         &self,
-        ongoing_codegen: Box<Any>,
+        ongoing_codegen: Box<dyn Any>,
         sess: &Session,
         _dep_graph: &DepGraph,
         outputs: &OutputFilenames,
     ) -> Result<(), CompileIncomplete> {
         let ongoing_codegen = ongoing_codegen.downcast::<OngoingCodegen>()
-            .expect("Expected MetadataOnlyCodegenBackend's OngoingCodegen, found Box<Any>");
+            .expect("Expected MetadataOnlyCodegenBackend's OngoingCodegen, found Box<dyn Any>");
         for &crate_type in sess.opts.crate_types.iter() {
-            if crate_type != CrateType::CrateTypeRlib && crate_type != CrateType::CrateTypeDylib {
+            if crate_type != CrateType::Rlib &&
+               crate_type != CrateType::Dylib {
                 continue;
             }
             let output_name =
                 out_filename(sess, crate_type, &outputs, &ongoing_codegen.crate_name.as_str());
             let mut compressed = ongoing_codegen.metadata_version.clone();
-            let metadata = if crate_type == CrateType::CrateTypeDylib {
+            let metadata = if crate_type == CrateType::Dylib {
                 DeflateEncoder::new(&mut compressed, Compression::fast())
                     .write_all(&ongoing_codegen.metadata.raw_data)
                     .unwrap();
@@ -280,14 +214,13 @@ impl CodegenBackend for MetadataOnlyCodegenBackend {
             } else {
                 &ongoing_codegen.metadata.raw_data
             };
-            let mut builder = Builder::new(File::create(&output_name).unwrap());
-            let header = Header::new("rust.metadata.bin".to_string(), metadata.len() as u64);
-            builder.append(&header, Cursor::new(metadata)).unwrap();
+            let mut file = File::create(&output_name).unwrap();
+            file.write_all(metadata).unwrap();
         }
 
         sess.abort_if_errors();
-        if !sess.opts.crate_types.contains(&CrateType::CrateTypeRlib)
-            && !sess.opts.crate_types.contains(&CrateType::CrateTypeDylib)
+        if !sess.opts.crate_types.contains(&CrateType::Rlib)
+            && !sess.opts.crate_types.contains(&CrateType::Dylib)
         {
             sess.fatal("Executables are not supported by the metadata-only backend.");
         }

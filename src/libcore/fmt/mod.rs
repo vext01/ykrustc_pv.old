@@ -96,9 +96,8 @@ pub type Result = result::Result<(), Error>;
 /// use std::fmt::{self, write};
 ///
 /// let mut output = String::new();
-/// match write(&mut output, format_args!("Hello {}!", "world")) {
-///     Err(fmt::Error) => panic!("An error occurred"),
-///     _ => (),
+/// if let Err(fmt::Error) = write(&mut output, format_args!("Hello {}!", "world")) {
+///     panic!("An error occurred");
 /// }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -208,7 +207,7 @@ pub trait Write {
         // requiring a `Sized` bound.
         struct Adapter<'a,T: ?Sized +'a>(&'a mut T);
 
-        impl<'a, T: ?Sized> Write for Adapter<'a, T>
+        impl<T: ?Sized> Write for Adapter<'_, T>
             where T: Write
         {
             fn write_str(&mut self, s: &str) -> Result {
@@ -229,7 +228,7 @@ pub trait Write {
 }
 
 #[stable(feature = "fmt_write_blanket_impl", since = "1.4.0")]
-impl<'a, W: Write + ?Sized> Write for &'a mut W {
+impl<W: Write + ?Sized> Write for &mut W {
     fn write_str(&mut self, s: &str) -> Result {
         (**self).write_str(s)
     }
@@ -255,7 +254,7 @@ pub struct Formatter<'a> {
     width: Option<usize>,
     precision: Option<usize>,
 
-    buf: &'a mut (Write+'a),
+    buf: &'a mut (dyn Write+'a),
     curarg: slice::Iter<'a, ArgumentV1<'a>>,
     args: &'a [ArgumentV1<'a>],
 }
@@ -272,7 +271,7 @@ struct Void {
     ///
     /// It was added after #45197 showed that one could share a `!Sync`
     /// object across threads by passing it into `format_args!`.
-    _oibit_remover: PhantomData<*mut Fn()>,
+    _oibit_remover: PhantomData<*mut dyn Fn()>,
 }
 
 /// This struct represents the generic "argument" which is taken by the Xprintf
@@ -291,8 +290,8 @@ pub struct ArgumentV1<'a> {
 
 #[unstable(feature = "fmt_internals", reason = "internal to format_args!",
            issue = "0")]
-impl<'a> Clone for ArgumentV1<'a> {
-    fn clone(&self) -> ArgumentV1<'a> {
+impl Clone for ArgumentV1<'_> {
+    fn clone(&self) -> Self {
         *self
     }
 }
@@ -436,14 +435,14 @@ pub struct Arguments<'a> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a> Debug for Arguments<'a> {
+impl Debug for Arguments<'_> {
     fn fmt(&self, fmt: &mut Formatter) -> Result {
         Display::fmt(self, fmt)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a> Display for Arguments<'a> {
+impl Display for Arguments<'_> {
     fn fmt(&self, fmt: &mut Formatter) -> Result {
         write(fmt.buf, *self)
     }
@@ -1020,7 +1019,7 @@ pub trait UpperExp {
 ///
 /// [`write!`]: ../../std/macro.write.html
 #[stable(feature = "rust1", since = "1.0.0")]
-pub fn write(output: &mut Write, args: Arguments) -> Result {
+pub fn write(output: &mut dyn Write, args: Arguments) -> Result {
     let mut formatter = Formatter {
         flags: 0,
         width: None,
@@ -1062,7 +1061,7 @@ pub fn write(output: &mut Write, args: Arguments) -> Result {
 
 impl<'a> Formatter<'a> {
     fn wrap_buf<'b, 'c, F>(&'b mut self, wrap: F) -> Formatter<'c>
-        where 'b: 'c, F: FnOnce(&'b mut (Write+'b)) -> &'c mut (Write+'c)
+        where 'b: 'c, F: FnOnce(&'b mut (dyn Write+'b)) -> &'c mut (dyn Write+'c)
     {
         Formatter {
             // We want to change this
@@ -1132,6 +1131,36 @@ impl<'a> Formatter<'a> {
     ///
     /// This function will correctly account for the flags provided as well as
     /// the minimum width. It will not take precision into account.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::fmt;
+    ///
+    /// struct Foo { nb: i32 };
+    ///
+    /// impl Foo {
+    ///     fn new(nb: i32) -> Foo {
+    ///         Foo {
+    ///             nb,
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// impl fmt::Display for Foo {
+    ///     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+    ///         // We need to remove "-" from the number output.
+    ///         let tmp = self.nb.abs().to_string();
+    ///
+    ///         formatter.pad_integral(self.nb > 0, "Foo ", &tmp)
+    ///     }
+    /// }
+    ///
+    /// assert_eq!(&format!("{}", Foo::new(2)), "2");
+    /// assert_eq!(&format!("{}", Foo::new(-1)), "-1");
+    /// assert_eq!(&format!("{:#}", Foo::new(-1)), "-Foo 1");
+    /// assert_eq!(&format!("{:0>#8}", Foo::new(-1)), "00-Foo 1");
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn pad_integral(&mut self,
                         is_nonnegative: bool,
@@ -1232,7 +1261,7 @@ impl<'a> Formatter<'a> {
             // If our string is longer that the precision, then we must have
             // truncation. However other flags like `fill`, `width` and `align`
             // must act as always.
-            if let Some((i, _)) = s.char_indices().skip(max).next() {
+            if let Some((i, _)) = s.char_indices().nth(max) {
                 // LLVM here can't prove that `..i` won't panic `&s[..i]`, but
                 // we know that it can't panic. Use `get` + `unwrap_or` to avoid
                 // `unsafe` and otherwise don't emit any panic-related code
@@ -1342,7 +1371,7 @@ impl<'a> Formatter<'a> {
     }
 
     fn write_formatted_parts(&mut self, formatted: &flt2dec::Formatted) -> Result {
-        fn write_bytes(buf: &mut Write, s: &[u8]) -> Result {
+        fn write_bytes(buf: &mut dyn Write, s: &[u8]) -> Result {
             buf.write_str(unsafe { str::from_utf8_unchecked(s) })
         }
 
@@ -1381,12 +1410,48 @@ impl<'a> Formatter<'a> {
 
     /// Writes some data to the underlying buffer contained within this
     /// formatter.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::fmt;
+    ///
+    /// struct Foo;
+    ///
+    /// impl fmt::Display for Foo {
+    ///     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+    ///         formatter.write_str("Foo")
+    ///         // This is equivalent to:
+    ///         // write!(formatter, "Foo")
+    ///     }
+    /// }
+    ///
+    /// assert_eq!(&format!("{}", Foo), "Foo");
+    /// assert_eq!(&format!("{:0>8}", Foo), "Foo");
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn write_str(&mut self, data: &str) -> Result {
         self.buf.write_str(data)
     }
 
     /// Writes some formatted information into this instance.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::fmt;
+    ///
+    /// struct Foo(i32);
+    ///
+    /// impl fmt::Display for Foo {
+    ///     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+    ///         formatter.write_fmt(format_args!("Foo {}", self.0))
+    ///     }
+    /// }
+    ///
+    /// assert_eq!(&format!("{}", Foo(-1)), "Foo -1");
+    /// assert_eq!(&format!("{:0>8}", Foo(2)), "Foo 2");
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn write_fmt(&mut self, fmt: Arguments) -> Result {
         write(self.buf, fmt)
@@ -1818,7 +1883,7 @@ impl<'a> Formatter<'a> {
 }
 
 #[stable(since = "1.2.0", feature = "formatter_write")]
-impl<'a> Write for Formatter<'a> {
+impl Write for Formatter<'_> {
     fn write_str(&mut self, s: &str) -> Result {
         self.buf.write_str(s)
     }
@@ -1845,11 +1910,11 @@ macro_rules! fmt_refs {
     ($($tr:ident),*) => {
         $(
         #[stable(feature = "rust1", since = "1.0.0")]
-        impl<'a, T: ?Sized + $tr> $tr for &'a T {
+        impl<T: ?Sized + $tr> $tr for &T {
             fn fmt(&self, f: &mut Formatter) -> Result { $tr::fmt(&**self, f) }
         }
         #[stable(feature = "rust1", since = "1.0.0")]
-        impl<'a, T: ?Sized + $tr> $tr for &'a mut T {
+        impl<T: ?Sized + $tr> $tr for &mut T {
             fn fmt(&self, f: &mut Formatter) -> Result { $tr::fmt(&**self, f) }
         }
         )*
@@ -1973,14 +2038,14 @@ impl<T: ?Sized> Pointer for *mut T {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> Pointer for &'a T {
+impl<T: ?Sized> Pointer for &T {
     fn fmt(&self, f: &mut Formatter) -> Result {
         Pointer::fmt(&(*self as *const T), f)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T: ?Sized> Pointer for &'a mut T {
+impl<T: ?Sized> Pointer for &mut T {
     fn fmt(&self, f: &mut Formatter) -> Result {
         Pointer::fmt(&(&**self as *const T), f)
     }
@@ -2087,14 +2152,14 @@ impl<T: ?Sized + Debug> Debug for RefCell<T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'b, T: ?Sized + Debug> Debug for Ref<'b, T> {
+impl<T: ?Sized + Debug> Debug for Ref<'_, T> {
     fn fmt(&self, f: &mut Formatter) -> Result {
         Debug::fmt(&**self, f)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'b, T: ?Sized + Debug> Debug for RefMut<'b, T> {
+impl<T: ?Sized + Debug> Debug for RefMut<'_, T> {
     fn fmt(&self, f: &mut Formatter) -> Result {
         Debug::fmt(&*(self.deref()), f)
     }

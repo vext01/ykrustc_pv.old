@@ -11,13 +11,13 @@
 // pp-exact
 // Tests literals in attributes.
 
-#![feature(custom_attribute, attr_literals)]
+#![feature(custom_attribute)]
 
 fn main() {
     #![hello("hi", 1, 2, 1.012, pi = 3.14, bye, name("John"))]
     #[align = 8]
     fn f() { }
 
-    #[vec(1, 2, 3)]
+    #[vector(1, 2, 3)]
     fn g() { }
 }

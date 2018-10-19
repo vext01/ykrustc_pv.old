@@ -10,12 +10,14 @@
 
 use borrow_check::place_ext::PlaceExt;
 use dataflow::indexes::BorrowIndex;
+use dataflow::move_paths::MoveData;
 use rustc::mir::traversal;
 use rustc::mir::visit::{PlaceContext, Visitor};
-use rustc::mir::{self, Location, Mir, Place};
+use rustc::mir::{self, Location, Mir, Place, Local};
 use rustc::ty::{Region, TyCtxt};
 use rustc::util::nodemap::{FxHashMap, FxHashSet};
 use rustc_data_structures::indexed_vec::IndexVec;
+use rustc_data_structures::bit_set::BitSet;
 use std::fmt;
 use std::hash::Hash;
 use std::ops::Index;
@@ -43,6 +45,8 @@ crate struct BorrowSet<'tcx> {
 
     /// Map from local to all the borrows on that local
     crate local_map: FxHashMap<mir::Local, FxHashSet<BorrowIndex>>,
+
+    crate locals_state_at_exit: LocalsStateAtExit,
 }
 
 impl<'tcx> Index<BorrowIndex> for BorrowSet<'tcx> {
@@ -53,15 +57,13 @@ impl<'tcx> Index<BorrowIndex> for BorrowSet<'tcx> {
     }
 }
 
-/// Every two-phase borrow has *exactly one* use (or else it is not a
-/// proper two-phase borrow under our current definition). However, not
-/// all uses are actually ones that activate the reservation.. In
-/// particular, a shared borrow of a `&mut` does not activate the
-/// reservation.
+/// Location where a two phase borrow is activated, if a borrow
+/// is in fact a two phase borrow.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-crate enum TwoPhaseUse {
-    MutActivate,
-    SharedUse,
+crate enum TwoPhaseActivation {
+    NotTwoPhase,
+    NotActivated,
+    ActivatedAt(Location),
 }
 
 #[derive(Debug)]
@@ -69,9 +71,8 @@ crate struct BorrowData<'tcx> {
     /// Location where the borrow reservation starts.
     /// In many cases, this will be equal to the activation location but not always.
     crate reserve_location: Location,
-    /// Location where the borrow is activated. None if this is not a
-    /// 2-phase borrow.
-    crate activation_location: Option<(TwoPhaseUse, Location)>,
+    /// Location where the borrow is activated.
+    crate activation_location: TwoPhaseActivation,
     /// What kind of borrow this is
     crate kind: mir::BorrowKind,
     /// The region for which this borrow is live
@@ -86,10 +87,11 @@ impl<'tcx> fmt::Display for BorrowData<'tcx> {
     fn fmt(&self, w: &mut fmt::Formatter) -> fmt::Result {
         let kind = match self.kind {
             mir::BorrowKind::Shared => "",
+            mir::BorrowKind::Shallow => "shallow ",
             mir::BorrowKind::Unique => "uniq ",
             mir::BorrowKind::Mut { .. } => "mut ",
         };
-        let region = format!("{}", self.region);
+        let region = self.region.to_string();
         let region = if region.len() > 0 {
             format!("{} ", region)
         } else {
@@ -99,8 +101,52 @@ impl<'tcx> fmt::Display for BorrowData<'tcx> {
     }
 }
 
+crate enum LocalsStateAtExit {
+    AllAreInvalidated,
+    SomeAreInvalidated { has_storage_dead_or_moved: BitSet<Local> }
+}
+
+impl LocalsStateAtExit {
+    fn build(
+        locals_are_invalidated_at_exit: bool,
+        mir: &Mir<'tcx>,
+        move_data: &MoveData<'tcx>
+    ) -> Self {
+        struct HasStorageDead(BitSet<Local>);
+
+        impl<'tcx> Visitor<'tcx> for HasStorageDead {
+            fn visit_local(&mut self, local: &Local, ctx: PlaceContext<'tcx>, _: Location) {
+                if ctx == PlaceContext::StorageDead {
+                    self.0.insert(*local);
+                }
+            }
+        }
+
+        if locals_are_invalidated_at_exit {
+            LocalsStateAtExit::AllAreInvalidated
+        } else {
+            let mut has_storage_dead = HasStorageDead(BitSet::new_empty(mir.local_decls.len()));
+            has_storage_dead.visit_mir(mir);
+            let mut has_storage_dead_or_moved = has_storage_dead.0;
+            for move_out in &move_data.moves {
+                if let Some(index) = move_data.base_local(move_out.path) {
+                    has_storage_dead_or_moved.insert(index);
+
+                }
+            }
+            LocalsStateAtExit::SomeAreInvalidated{ has_storage_dead_or_moved }
+        }
+    }
+}
+
 impl<'tcx> BorrowSet<'tcx> {
-    pub fn build(tcx: TyCtxt<'_, '_, 'tcx>, mir: &Mir<'tcx>) -> Self {
+    pub fn build(
+        tcx: TyCtxt<'_, '_, 'tcx>,
+        mir: &Mir<'tcx>,
+        locals_are_invalidated_at_exit: bool,
+        move_data: &MoveData<'tcx>
+    ) -> Self {
+
         let mut visitor = GatherBorrows {
             tcx,
             mir,
@@ -110,24 +156,13 @@ impl<'tcx> BorrowSet<'tcx> {
             region_map: FxHashMap(),
             local_map: FxHashMap(),
             pending_activations: FxHashMap(),
+            locals_state_at_exit:
+                LocalsStateAtExit::build(locals_are_invalidated_at_exit, mir, move_data),
         };
 
         for (block, block_data) in traversal::preorder(mir) {
             visitor.visit_basic_block_data(block, block_data);
         }
-
-        // Double check: We should have found an activation for every pending
-        // activation.
-        assert_eq!(
-            visitor
-                .pending_activations
-                .iter()
-                .find(|&(_local, &borrow_index)| visitor.idx_vec[borrow_index]
-                    .activation_location
-                    .is_none()),
-            None,
-            "never found an activation for this borrow!",
-        );
 
         BorrowSet {
             borrows: visitor.idx_vec,
@@ -135,6 +170,7 @@ impl<'tcx> BorrowSet<'tcx> {
             activation_map: visitor.activation_map,
             region_map: visitor.region_map,
             local_map: visitor.local_map,
+            locals_state_at_exit: visitor.locals_state_at_exit,
         }
     }
 
@@ -164,6 +200,8 @@ struct GatherBorrows<'a, 'gcx: 'tcx, 'tcx: 'a> {
     /// the borrow. When we find a later use of this activation, we
     /// remove from the map (and add to the "tombstone" set below).
     pending_activations: FxHashMap<mir::Local, BorrowIndex>,
+
+    locals_state_at_exit: LocalsStateAtExit,
 }
 
 impl<'a, 'gcx, 'tcx> Visitor<'tcx> for GatherBorrows<'a, 'gcx, 'tcx> {
@@ -175,7 +213,8 @@ impl<'a, 'gcx, 'tcx> Visitor<'tcx> for GatherBorrows<'a, 'gcx, 'tcx> {
         location: mir::Location,
     ) {
         if let mir::Rvalue::Ref(region, kind, ref borrowed_place) = *rvalue {
-            if borrowed_place.is_unsafe_place(self.tcx, self.mir) {
+            if borrowed_place.ignore_borrow(
+                self.tcx, self.mir, &self.locals_state_at_exit) {
                 return;
             }
 
@@ -183,7 +222,7 @@ impl<'a, 'gcx, 'tcx> Visitor<'tcx> for GatherBorrows<'a, 'gcx, 'tcx> {
                 kind,
                 region,
                 reserve_location: location,
-                activation_location: None,
+                activation_location: TwoPhaseActivation::NotTwoPhase,
                 borrowed_place: borrowed_place.clone(),
                 assigned_place: assigned_place.clone(),
             };
@@ -232,38 +271,44 @@ impl<'a, 'gcx, 'tcx> Visitor<'tcx> for GatherBorrows<'a, 'gcx, 'tcx> {
                         return;
                     }
 
-                    if let Some(other_activation) = borrow_data.activation_location {
+                    if let TwoPhaseActivation::ActivatedAt(other_location) =
+                            borrow_data.activation_location {
                         span_bug!(
                             self.mir.source_info(location).span,
                             "found two uses for 2-phase borrow temporary {:?}: \
                              {:?} and {:?}",
                             temp,
                             location,
-                            other_activation,
+                            other_location,
                         );
                     }
 
                     // Otherwise, this is the unique later use
                     // that we expect.
-
-                    let two_phase_use;
-
-                    match context {
+                    borrow_data.activation_location = match context {
                         // The use of TMP in a shared borrow does not
                         // count as an actual activation.
-                        PlaceContext::Borrow { kind: mir::BorrowKind::Shared, .. } => {
-                            two_phase_use = TwoPhaseUse::SharedUse;
+                        PlaceContext::Borrow { kind: mir::BorrowKind::Shared, .. }
+                        | PlaceContext::Borrow { kind: mir::BorrowKind::Shallow, .. } => {
+                            TwoPhaseActivation::NotActivated
                         }
                         _ => {
-                            two_phase_use = TwoPhaseUse::MutActivate;
+                            // Double check: This borrow is indeed a two-phase borrow (that is,
+                            // we are 'transitioning' from `NotActivated` to `ActivatedAt`) and
+                            // we've not found any other activations (checked above).
+                            assert_eq!(
+                                borrow_data.activation_location,
+                                TwoPhaseActivation::NotActivated,
+                                "never found an activation for this borrow!",
+                            );
+
                             self.activation_map
                                 .entry(location)
-                                .or_insert(Vec::new())
+                                .or_default()
                                 .push(borrow_index);
+                            TwoPhaseActivation::ActivatedAt(location)
                         }
-                    }
-
-                    borrow_data.activation_location = Some((two_phase_use, location));
+                    };
                 }
 
                 None => {}
@@ -342,11 +387,23 @@ impl<'a, 'gcx, 'tcx> GatherBorrows<'a, 'gcx, 'tcx> {
             );
         };
 
+        // Consider the borrow not activated to start. When we find an activation, we'll update
+        // this field.
+        {
+            let borrow_data = &mut self.idx_vec[borrow_index];
+            borrow_data.activation_location = TwoPhaseActivation::NotActivated;
+        }
+
         // Insert `temp` into the list of pending activations. From
         // now on, we'll be on the lookout for a use of it. Note that
         // we are guaranteed that this use will come after the
         // assignment.
         let old_value = self.pending_activations.insert(temp, borrow_index);
-        assert!(old_value.is_none());
+        if let Some(old_index) = old_value {
+            span_bug!(self.mir.source_info(start_location).span,
+                      "found already pending activation for temp: {:?} \
+                       at borrow_index: {:?} with associated data {:?}",
+                      temp, old_index, self.idx_vec[old_index]);
+        }
     }
 }
