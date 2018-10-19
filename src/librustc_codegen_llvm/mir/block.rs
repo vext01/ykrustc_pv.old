@@ -66,8 +66,8 @@ impl FunctionCx<'a, 'll, 'tcx> {
             // any given compilation session.
             let did = self.instance.def.def_id();
             let k_hash = bx.tcx().crate_hash(did.krate).as_u64();
-            let lbl_name = CString::new(format!("__YK_START_BLK_{}_{}_{}",
-                                        k_hash, did.index.as_raw_u32(), bb.index())).unwrap();
+            let lbl_name = CString::new(
+                format!("__YK_LOC_{}_{}_{}", k_hash, did.index.as_raw_u32(), bb.index())).unwrap();
 
             // Get the sub_program.
             let loc = Location{block: bb, statement_index: 0};

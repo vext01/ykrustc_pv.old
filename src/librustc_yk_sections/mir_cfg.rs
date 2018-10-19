@@ -12,7 +12,7 @@ use rustc::util::nodemap::DefIdSet;
 use std::path::PathBuf;
 use mkstemp::TempFile;
 use rustc_yk_link::YkExtraLinkObject;
-//use std::fs; //::{self, File};
+use std::fs;
 use byteorder::{NativeEndian, WriteBytesExt};
 
 // Edge kinds.
@@ -42,6 +42,7 @@ const SENTINAL: u8 = 255;
 
 const MIR_CFG_SECTION_NAME: &'static str = ".yk_mir_cfg";
 const MIR_CFG_TEMPLATE: &'static str = ".ykcfg.XXXXXXXX";
+const SECTION_VERSION: u16 = 0;
 
 /// Serialises the control flow for the given `DefId`s into a ELF object file and returns a handle for linking.
 pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, def_ids: &DefIdSet) -> YkExtraLinkObject {
@@ -49,6 +50,9 @@ pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, def
     let mut template = std::env::temp_dir();
     template.push(MIR_CFG_TEMPLATE);
     let mut fh = TempFile::new(template.to_str().unwrap(), false).unwrap();
+
+    // Write a version field for sanity checking when deserialising.
+    fh.write_u16::<NativeEndian>(SECTION_VERSION).unwrap();
 
     for def_id in def_ids {
         if tcx.is_mir_available(*def_id) {
@@ -74,12 +78,7 @@ pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, def
 /// For each block in the given MIR write out one CFG edge record.
 fn process_mir(fh: &mut TempFile, tcx: &TyCtxt, def_id: &DefId, mir: &Mir) {
     for (bb, maybe_bb_data) in mir.basic_blocks().iter_enumerated() {
-        if maybe_bb_data.terminator.is_none() {
-            continue; // XXX find out what that would mean? Assert it can't?
-        }
-
         let bb_data = maybe_bb_data.terminator.as_ref().unwrap();
-
         match bb_data.kind {
             TerminatorKind::Goto{target: target_bb} => {
                 write_rec_header(fh, tcx, GOTO, def_id, bb);
