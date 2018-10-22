@@ -365,26 +365,10 @@ impl FunctionCx<'a, 'll, 'tcx> {
 
             mir::TerminatorKind::Assert { ref cond, expected, ref msg, target, cleanup } => {
                 let cond = self.codegen_operand(&bx, cond).immediate();
-                let mut const_cond = common::const_to_opt_u128(cond, false).map(|c| c == 1);
 
-                // This case can currently arise only from functions marked
-                // with #[rustc_inherit_overflow_checks] and inlined from
-                // another crate (mostly core::num generic/#[inline] fns),
-                // while the current crate doesn't use overflow checks.
-                // NOTE: Unlike binops, negation doesn't have its own
-                // checked operation, just a comparison with the minimum
-                // value, so we have to check for the assert message.
-                if !bx.cx.check_overflow {
-                    if let mir::interpret::EvalErrorKind::OverflowNeg = *msg {
-                        const_cond = Some(expected);
-                    }
-                }
-
-                // Don't codegen the panic block if success if known.
-                if const_cond == Some(expected) {
-                    funclet_br(self, bx, target);
-                    return;
-                }
+                // In upstream Rust, there was code here to merge blocks if the assertion has a
+                // statically known target. We disable this for Yorick because we want to keep the
+                // structure of the generated code as close to that of the MIR as possible.
 
                 // Pass the condition through llvm.expect for branch hinting.
                 let expect = bx.cx.get_intrinsic(&"llvm.expect.i1");
