@@ -2,6 +2,8 @@
 
 This is a modified version of the Rust compiler for the Yorick meta-tracer.
 
+For Yorick-specific notes, see `README_YORICK.md`.
+
 ## Quick Start
 [quick-start]: #quick-start
 
