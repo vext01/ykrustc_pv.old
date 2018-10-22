@@ -913,6 +913,17 @@ extern "C" bool LLVMRustAddYkBlockLabel(LLVMBuilderRef Builder,
     return true;
 }
 
+// Insert a label at the end of the given block.
+extern "C" bool LLVMRustAddYkBlockLabelAtEnd(LLVMBuilderRef Builder,
+                                             LLVMRustDIBuilderRef DBuilder,
+                                             DISubprogram *SP,
+                                             BasicBlock *Block, char *Name) {
+    auto Loc = DebugLoc::get(0, 0, SP);
+    DILabel *label = DBuilder->createLabel(SP, Name, SP->getFile(), 0, true);
+    DBuilder->insertLabel(label, Loc, Block);
+    return true;
+}
+
 extern "C" void LLVMRustWriteTypeToString(LLVMTypeRef Ty, RustStringRef Str) {
   RawRustStringOstream OS(Str);
   unwrap<llvm::Type>(Ty)->print(OS);

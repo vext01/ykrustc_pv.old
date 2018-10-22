@@ -10,7 +10,7 @@
 
 use llvm::{self, BasicBlock, LLVMGetFirstInstruction,
            LLVMPositionBuilderBefore, LLVMPositionBuilderAtEnd,
-           LLVMRustAddYkBlockLabel};
+           LLVMRustAddYkBlockLabel, LLVMRustAddYkBlockLabelAtEnd};
 use std::ffi::CString;
 //use rustc_data_structures::indexed_vec::Idx;
 
@@ -54,11 +54,8 @@ impl FunctionCx<'a, 'll, 'tcx> {
 
         // Insert a DWARF label at the start of each non-empty block.
         // Yorick uses this at runtime to map virtual addresses to MIR blocks.
-        let first_instr_o = unsafe { LLVMGetFirstInstruction(bx.llbb()) };
-        if self.cx.has_debug() && first_instr_o.is_some() {
-            let first_instr = first_instr_o.unwrap();
+        if self.cx.has_debug()  {
             let di_bldr = DIB(self.cx);
-            unsafe { LLVMPositionBuilderBefore(bx.llbuilder, first_instr) }
 
             // Make an appropriate name for the label.
             // The label identifies the crate by its hash. It might be tempting to use the crate
@@ -75,13 +72,26 @@ impl FunctionCx<'a, 'll, 'tcx> {
             let (_, span) = self.debug_loc(*source_info);
             let di_sp = self.fn_metadata(span);
 
-            unsafe {
-                LLVMRustAddYkBlockLabel(bx.llbuilder, di_bldr, di_sp, first_instr,
-                                        lbl_name.as_ptr());
+            match unsafe { LLVMGetFirstInstruction(bx.llbb()) } {
+                Some(instr) => {
+                    // The block is non-empty, so put a label on the first instruction.
+                    unsafe {
+                        LLVMPositionBuilderBefore(bx.llbuilder, instr);
+                        LLVMRustAddYkBlockLabel(bx.llbuilder, di_bldr, di_sp, instr,
+                                                lbl_name.as_ptr());
+                        LLVMPositionBuilderAtEnd(bx.llbuilder, bx.llbb());
+                    }
+                },
+                None => {
+                    // The block is empty. Append a label to the block.
+                    unsafe {
+                        LLVMRustAddYkBlockLabelAtEnd(bx.llbuilder, di_bldr, di_sp, bx.llbb(),
+                                                     lbl_name.as_ptr());
+                    }
+                }
             }
         }
 
-        unsafe { LLVMPositionBuilderAtEnd(bx.llbuilder, bx.llbb()); }
         self.codegen_terminator(bx, bb, data.terminator());
     }
 
