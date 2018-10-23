@@ -13,14 +13,18 @@ use std::mem;
 
 use clean::{self, AttributesExt, NestedAttributesExt};
 use clean::Item;
-use plugins;
+use core::DocContext;
 use fold;
 use fold::DocFolder;
-use fold::FoldItem::Strip;
-use passes::ImplStripper;
+use fold::StripItem;
+use passes::{ImplStripper, Pass};
+
+pub const STRIP_HIDDEN: Pass =
+    Pass::early("strip-hidden", strip_hidden,
+                "strips all doc(hidden) items from the output");
 
 /// Strip items marked `#[doc(hidden)]`
-pub fn strip_hidden(krate: clean::Crate) -> plugins::PluginResult {
+pub fn strip_hidden(krate: clean::Crate, _: &DocContext) -> clean::Crate {
     let mut retained = DefIdSet();
 
     // strip all #[doc(hidden)] items
@@ -31,7 +35,9 @@ pub fn strip_hidden(krate: clean::Crate) -> plugins::PluginResult {
 
     // strip all impls referencing stripped items
     let mut stripper = ImplStripper { retained: &retained };
-    stripper.fold_crate(krate)
+    let krate = stripper.fold_crate(krate);
+
+    krate
 }
 
 struct Stripper<'a> {
@@ -42,7 +48,7 @@ struct Stripper<'a> {
 impl<'a> fold::DocFolder for Stripper<'a> {
     fn fold_item(&mut self, i: Item) -> Option<Item> {
         if i.attrs.lists("doc").has_word("hidden") {
-            debug!("found one in strip_hidden; removing");
+            debug!("strip_hidden: stripping {} {:?}", i.type_(), i.name);
             // use a dedicated hidden item for given item type if any
             match i.inner {
                 clean::StructFieldItem(..) | clean::ModuleItem(..) => {
@@ -50,7 +56,7 @@ impl<'a> fold::DocFolder for Stripper<'a> {
                     // strip things like impl methods but when doing so
                     // we must not add any items to the `retained` set.
                     let old = mem::replace(&mut self.update_retained, false);
-                    let ret = Strip(self.fold_item_recur(i).unwrap()).fold();
+                    let ret = StripItem(self.fold_item_recur(i).unwrap()).strip();
                     self.update_retained = old;
                     return ret;
                 }

@@ -8,11 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+
 // aux-build:custom.rs
 // aux-build:helper.rs
 // no-prefer-dynamic
 
-#![feature(global_allocator, heap_api, allocator_api)]
+#![feature(allocator_api)]
 
 extern crate custom;
 extern crate helper;

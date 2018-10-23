@@ -99,6 +99,7 @@ objdir=$root_dir/obj
 
 mkdir -p $HOME/.cargo
 mkdir -p $objdir/tmp
+mkdir -p $objdir/cores
 
 args=
 if [ "$SCCACHE_BUCKET" != "" ]; then
@@ -117,10 +118,6 @@ fi
 # we'll need `--privileged` for at least the `x86_64-gnu` builder, so this just
 # goes ahead and sets it for all builders.
 args="$args --privileged"
-
-if [ "$CI" != "" ]; then
-    args="$args --dns 8.8.8.8 --dns 8.8.4.4 --dns 1.1.1.1 --dns 1.0.0.1"
-fi
 
 exec docker \
   run \

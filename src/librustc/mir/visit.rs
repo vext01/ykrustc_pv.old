@@ -10,7 +10,7 @@
 
 use hir::def_id::DefId;
 use ty::subst::Substs;
-use ty::{CanonicalTy, ClosureSubsts, GeneratorSubsts, Region, Ty};
+use ty::{ClosureSubsts, GeneratorSubsts, Region, Ty};
 use mir::*;
 use syntax_pos::Span;
 
@@ -144,11 +144,12 @@ macro_rules! make_mir_visitor {
                 self.super_operand(operand, location);
             }
 
-            fn visit_user_assert_ty(&mut self,
-                                    c_ty: & $($mutability)* CanonicalTy<'tcx>,
-                                    local: & $($mutability)* Local,
-                                    location: Location) {
-                self.super_user_assert_ty(c_ty, local, location);
+            fn visit_ascribe_user_ty(&mut self,
+                                     place: & $($mutability)* Place<'tcx>,
+                                     variance: & $($mutability)* ty::Variance,
+                                     user_ty: & $($mutability)* UserTypeAnnotation<'tcx>,
+                                     location: Location) {
+                self.super_ascribe_user_ty(place, variance, user_ty, location);
             }
 
             fn visit_place(&mut self,
@@ -191,12 +192,6 @@ macro_rules! make_mir_visitor {
                 self.super_constant(constant, location);
             }
 
-            fn visit_literal(&mut self,
-                             literal: & $($mutability)* Literal<'tcx>,
-                             location: Location) {
-                self.super_literal(literal, location);
-            }
-
             fn visit_def_id(&mut self,
                             def_id: & $($mutability)* DefId,
                             _: Location) {
@@ -217,6 +212,13 @@ macro_rules! make_mir_visitor {
                         ty: & $($mutability)* Ty<'tcx>,
                         _: TyContext) {
                 self.super_ty(ty);
+            }
+
+            fn visit_user_type_annotation(
+                &mut self,
+                ty: & $($mutability)* UserTypeAnnotation<'tcx>,
+            ) {
+                self.super_user_type_annotation(ty);
             }
 
             fn visit_region(&mut self,
@@ -355,7 +357,7 @@ macro_rules! make_mir_visitor {
                                           ref $($mutability)* rvalue) => {
                         self.visit_assign(block, place, rvalue, location);
                     }
-                    StatementKind::ReadForMatch(ref $($mutability)* place) => {
+                    StatementKind::FakeRead(_, ref $($mutability)* place) => {
                         self.visit_place(place,
                                          PlaceContext::Inspect,
                                          location);
@@ -388,9 +390,12 @@ macro_rules! make_mir_visitor {
                             self.visit_operand(input, location);
                         }
                     }
-                    StatementKind::UserAssertTy(ref $($mutability)* c_ty,
-                                                ref $($mutability)* local) => {
-                        self.visit_user_assert_ty(c_ty, local, location);
+                    StatementKind::AscribeUserType(
+                        ref $($mutability)* place,
+                        ref $($mutability)* variance,
+                        ref $($mutability)* user_ty,
+                    ) => {
+                        self.visit_ascribe_user_ty(place, variance, user_ty, location);
                     }
                     StatementKind::Nop => {}
                 }
@@ -466,7 +471,8 @@ macro_rules! make_mir_visitor {
                     TerminatorKind::Call { ref $($mutability)* func,
                                            ref $($mutability)* args,
                                            ref $($mutability)* destination,
-                                           cleanup } => {
+                                           cleanup,
+                                           from_hir_call: _, } => {
                         self.visit_operand(func, source_location);
                         for arg in args {
                             self.visit_operand(arg, source_location);
@@ -591,6 +597,7 @@ macro_rules! make_mir_visitor {
                             AggregateKind::Adt(_adt_def,
                                                _variant_index,
                                                ref $($mutability)* substs,
+                                               _user_substs,
                                                _active_field_index) => {
                                 self.visit_substs(substs, location);
                             }
@@ -630,11 +637,13 @@ macro_rules! make_mir_visitor {
                 }
             }
 
-            fn super_user_assert_ty(&mut self,
-                                    _c_ty: & $($mutability)* CanonicalTy<'tcx>,
-                                    local: & $($mutability)* Local,
-                                    location: Location) {
-                self.visit_local(local, PlaceContext::Validate, location);
+            fn super_ascribe_user_ty(&mut self,
+                                     place: & $($mutability)* Place<'tcx>,
+                                     _variance: & $($mutability)* ty::Variance,
+                                     user_ty: & $($mutability)* UserTypeAnnotation<'tcx>,
+                                     location: Location) {
+                self.visit_place(place, PlaceContext::Validate, location);
+                self.visit_user_type_annotation(user_ty);
             }
 
             fn super_place(&mut self,
@@ -648,6 +657,9 @@ macro_rules! make_mir_visitor {
                     Place::Static(ref $($mutability)* static_) => {
                         self.visit_static(static_, context, location);
                     }
+                    Place::Promoted(ref $($mutability)* promoted) => {
+                        self.visit_ty(& $($mutability)* promoted.1, TyContext::Location(location));
+                    },
                     Place::Projection(ref $($mutability)* proj) => {
                         self.visit_projection(proj, context, location);
                     }
@@ -713,17 +725,22 @@ macro_rules! make_mir_visitor {
                 let LocalDecl {
                     mutability: _,
                     ref $($mutability)* ty,
+                    ref $($mutability)* user_ty,
                     name: _,
                     ref $($mutability)* source_info,
                     ref $($mutability)* visibility_scope,
                     internal: _,
                     is_user_variable: _,
+                    is_block_tail: _,
                 } = *local_decl;
 
                 self.visit_ty(ty, TyContext::LocalDecl {
                     local,
                     source_info: *source_info,
                 });
+                if let Some((user_ty, _)) = user_ty {
+                    self.visit_user_type_annotation(user_ty);
+                }
                 self.visit_source_info(source_info);
                 self.visit_source_scope(visibility_scope);
             }
@@ -743,23 +760,14 @@ macro_rules! make_mir_visitor {
                 let Constant {
                     ref $($mutability)* span,
                     ref $($mutability)* ty,
+                    ref $($mutability)* user_ty,
                     ref $($mutability)* literal,
                 } = *constant;
 
                 self.visit_span(span);
                 self.visit_ty(ty, TyContext::Location(location));
-                self.visit_literal(literal, location);
-            }
-
-            fn super_literal(&mut self,
-                             literal: & $($mutability)* Literal<'tcx>,
-                             location: Location) {
-                match *literal {
-                    Literal::Value { ref $($mutability)* value } => {
-                        self.visit_const(value, location);
-                    }
-                    Literal::Promoted { index: _ } => {}
-                }
+                drop(user_ty); // no visit method for this
+                self.visit_const(literal, location);
             }
 
             fn super_def_id(&mut self, _def_id: & $($mutability)* DefId) {
@@ -776,6 +784,12 @@ macro_rules! make_mir_visitor {
 
                 self.visit_span(span);
                 self.visit_source_scope(scope);
+            }
+
+            fn super_user_type_annotation(
+                &mut self,
+                _ty: & $($mutability)* UserTypeAnnotation<'tcx>,
+            ) {
             }
 
             fn super_ty(&mut self, _ty: & $($mutability)* Ty<'tcx>) {
@@ -957,6 +971,7 @@ impl<'tcx> PlaceContext<'tcx> {
 
             PlaceContext::Inspect |
             PlaceContext::Borrow { kind: BorrowKind::Shared, .. } |
+            PlaceContext::Borrow { kind: BorrowKind::Shallow, .. } |
             PlaceContext::Borrow { kind: BorrowKind::Unique, .. } |
             PlaceContext::Projection(Mutability::Not) |
             PlaceContext::Copy | PlaceContext::Move |
@@ -968,7 +983,9 @@ impl<'tcx> PlaceContext<'tcx> {
     /// Returns true if this place context represents a use that does not change the value.
     pub fn is_nonmutating_use(&self) -> bool {
         match *self {
-            PlaceContext::Inspect | PlaceContext::Borrow { kind: BorrowKind::Shared, .. } |
+            PlaceContext::Inspect |
+            PlaceContext::Borrow { kind: BorrowKind::Shared, .. } |
+            PlaceContext::Borrow { kind: BorrowKind::Shallow, .. } |
             PlaceContext::Borrow { kind: BorrowKind::Unique, .. } |
             PlaceContext::Projection(Mutability::Not) |
             PlaceContext::Copy | PlaceContext::Move => true,

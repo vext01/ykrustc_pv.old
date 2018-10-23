@@ -36,6 +36,7 @@ impl<'tcx> IsPrefixOf<'tcx> for Place<'tcx> {
             }
 
             match *cursor {
+                Place::Promoted(_) |
                 Place::Local(_) | Place::Static(_) => return false,
                 Place::Projection(ref proj) => {
                     cursor = &proj.base;
@@ -78,7 +79,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
             next: Some(place),
             kind,
             mir: self.mir,
-            tcx: self.tcx,
+            tcx: self.infcx.tcx,
         }
     }
 }
@@ -98,6 +99,7 @@ impl<'cx, 'gcx, 'tcx> Iterator for Prefixes<'cx, 'gcx, 'tcx> {
 
         'cursor: loop {
             let proj = match *cursor {
+                Place::Promoted(_) |
                 Place::Local(_) | // search yielded this leaf
                 Place::Static(_) => {
                     self.next = None;
@@ -153,8 +155,8 @@ impl<'cx, 'gcx, 'tcx> Iterator for Prefixes<'cx, 'gcx, 'tcx> {
 
             let ty = proj.base.ty(self.mir, self.tcx).to_ty(self.tcx);
             match ty.sty {
-                ty::TyRawPtr(_) |
-                ty::TyRef(
+                ty::RawPtr(_) |
+                ty::Ref(
                     _, /*rgn*/
                     _, /*ty*/
                     hir::MutImmutable
@@ -164,7 +166,7 @@ impl<'cx, 'gcx, 'tcx> Iterator for Prefixes<'cx, 'gcx, 'tcx> {
                     return Some(cursor);
                 }
 
-                ty::TyRef(
+                ty::Ref(
                     _, /*rgn*/
                     _, /*ty*/
                     hir::MutMutable,
@@ -173,7 +175,7 @@ impl<'cx, 'gcx, 'tcx> Iterator for Prefixes<'cx, 'gcx, 'tcx> {
                     return Some(cursor);
                 }
 
-                ty::TyAdt(..) if ty.is_box() => {
+                ty::Adt(..) if ty.is_box() => {
                     self.next = Some(&proj.base);
                     return Some(cursor);
                 }

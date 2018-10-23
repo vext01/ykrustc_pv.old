@@ -27,13 +27,13 @@ use rustc::session::{self, CompileIncomplete, config};
 use rustc::session::config::{OutputType, OutputTypes, Externs, CodegenOptions};
 use rustc::session::search_paths::{SearchPaths, PathKind};
 use rustc_metadata::dynamic_lib::DynamicLibrary;
-use tempdir::TempDir;
+use tempfile::Builder as TempFileBuilder;
 use rustc_driver::{self, driver, target_features, Compilation};
 use rustc_driver::driver::phase_2_configure_and_expand;
 use rustc_metadata::cstore::CStore;
 use rustc_resolve::MakeGlobMap;
 use syntax::ast;
-use syntax::codemap::CodeMap;
+use syntax::source_map::SourceMap;
 use syntax::edition::Edition;
 use syntax::feature_gate::UnstableFeatures;
 use syntax::with_globals;
@@ -42,7 +42,7 @@ use errors;
 use errors::emitter::ColorConfig;
 
 use clean::Attributes;
-use html::markdown;
+use html::markdown::{self, ErrorCodes, LangString};
 
 #[derive(Clone, Default)]
 pub struct TestOptions {
@@ -73,7 +73,7 @@ pub fn run(input_path: &Path,
         maybe_sysroot: maybe_sysroot.clone().or_else(
             || Some(env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf())),
         search_paths: libs.clone(),
-        crate_types: vec![config::CrateTypeDylib],
+        crate_types: vec![config::CrateType::Dylib],
         cg: cg.clone(),
         externs: externs.clone(),
         unstable_features: UnstableFeatures::from_environment(),
@@ -83,17 +83,17 @@ pub fn run(input_path: &Path,
             ..config::basic_debugging_options()
         },
         edition,
-        ..config::basic_options().clone()
+        ..config::Options::default()
     };
     driver::spawn_thread_pool(sessopts, |sessopts| {
-        let codemap = Lrc::new(CodeMap::new(sessopts.file_path_mapping()));
+        let source_map = Lrc::new(SourceMap::new(sessopts.file_path_mapping()));
         let handler =
             errors::Handler::with_tty_emitter(ColorConfig::Auto,
                                             true, false,
-                                            Some(codemap.clone()));
+                                            Some(source_map.clone()));
 
         let mut sess = session::build_session_(
-            sessopts, Some(input_path.to_owned()), handler, codemap.clone(),
+            sessopts, Some(input_path.to_owned()), handler, source_map.clone(),
         );
         let codegen_backend = rustc_driver::get_codegen_backend(&sess);
         let cstore = CStore::new(codegen_backend.metadata_loader());
@@ -133,7 +133,7 @@ pub fn run(input_path: &Path,
             false,
             opts,
             maybe_sysroot,
-            Some(codemap),
+            Some(source_map),
              None,
             linker,
             edition
@@ -145,7 +145,8 @@ pub fn run(input_path: &Path,
             let mut hir_collector = HirCollector {
                 sess: &sess,
                 collector: &mut collector,
-                map: &map
+                map: &map,
+                codes: ErrorCodes::from(sess.opts.unstable_features.is_nightly_build()),
             };
             hir_collector.visit_testable("".to_string(), &krate.attrs, |this| {
                 intravisit::walk_crate(this, krate);
@@ -204,7 +205,7 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
     // never wrap the test in `fn main() { ... }`
     let (test, line_offset) = make_test(test, Some(cratename), as_test_harness, opts);
     // FIXME(#44940): if doctests ever support path remapping, then this filename
-    // needs to be the result of CodeMap::span_to_unmapped_path
+    // needs to be the result of SourceMap::span_to_unmapped_path
     let input = config::Input::Str {
         name: filename.to_owned(),
         input: test.to_owned(),
@@ -215,11 +216,10 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
         maybe_sysroot: maybe_sysroot.or_else(
             || Some(env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf())),
         search_paths: libs,
-        crate_types: vec![config::CrateTypeExecutable],
+        crate_types: vec![config::CrateType::Executable],
         output_types: outputs,
         externs,
         cg: config::CodegenOptions {
-            prefer_dynamic: true,
             linker,
             ..cg
         },
@@ -229,55 +229,59 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
             ..config::basic_debugging_options()
         },
         edition,
-        ..config::basic_options().clone()
+        ..config::Options::default()
     };
 
-    let (libdir, outdir) = driver::spawn_thread_pool(sessopts, |sessopts| {
-        // Shuffle around a few input and output handles here. We're going to pass
-        // an explicit handle into rustc to collect output messages, but we also
-        // want to catch the error message that rustc prints when it fails.
-        //
-        // We take our thread-local stderr (likely set by the test runner) and replace
-        // it with a sink that is also passed to rustc itself. When this function
-        // returns the output of the sink is copied onto the output of our own thread.
-        //
-        // The basic idea is to not use a default Handler for rustc, and then also
-        // not print things by default to the actual stderr.
-        struct Sink(Arc<Mutex<Vec<u8>>>);
-        impl Write for Sink {
-            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-                Write::write(&mut *self.0.lock().unwrap(), data)
-            }
-            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    // Shuffle around a few input and output handles here. We're going to pass
+    // an explicit handle into rustc to collect output messages, but we also
+    // want to catch the error message that rustc prints when it fails.
+    //
+    // We take our thread-local stderr (likely set by the test runner) and replace
+    // it with a sink that is also passed to rustc itself. When this function
+    // returns the output of the sink is copied onto the output of our own thread.
+    //
+    // The basic idea is to not use a default Handler for rustc, and then also
+    // not print things by default to the actual stderr.
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            Write::write(&mut *self.0.lock().unwrap(), data)
         }
-        struct Bomb(Arc<Mutex<Vec<u8>>>, Box<Write+Send>);
-        impl Drop for Bomb {
-            fn drop(&mut self) {
-                let _ = self.1.write_all(&self.0.lock().unwrap());
-            }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+    struct Bomb(Arc<Mutex<Vec<u8>>>, Box<dyn Write+Send>);
+    impl Drop for Bomb {
+        fn drop(&mut self) {
+            let _ = self.1.write_all(&self.0.lock().unwrap());
         }
-        let data = Arc::new(Mutex::new(Vec::new()));
-        let codemap = Lrc::new(CodeMap::new_doctest(
+    }
+    let data = Arc::new(Mutex::new(Vec::new()));
+
+    let old = io::set_panic(Some(box Sink(data.clone())));
+    let _bomb = Bomb(data.clone(), old.unwrap_or(box io::stdout()));
+
+    let (libdir, outdir, compile_result) = driver::spawn_thread_pool(sessopts, |sessopts| {
+        let source_map = Lrc::new(SourceMap::new_doctest(
             sessopts.file_path_mapping(), filename.clone(), line as isize - line_offset as isize
         ));
         let emitter = errors::emitter::EmitterWriter::new(box Sink(data.clone()),
-                                                        Some(codemap.clone()),
+                                                        Some(source_map.clone()),
                                                         false,
                                                         false);
-        let old = io::set_panic(Some(box Sink(data.clone())));
-        let _bomb = Bomb(data.clone(), old.unwrap_or(box io::stdout()));
 
         // Compile the code
         let diagnostic_handler = errors::Handler::with_emitter(true, false, box emitter);
 
         let mut sess = session::build_session_(
-            sessopts, None, diagnostic_handler, codemap,
+            sessopts, None, diagnostic_handler, source_map,
         );
         let codegen_backend = rustc_driver::get_codegen_backend(&sess);
         let cstore = CStore::new(codegen_backend.metadata_loader());
         rustc_lint::register_builtins(&mut sess.lint_store.borrow_mut(), Some(&sess));
 
-        let outdir = Mutex::new(TempDir::new("rustdoctest").ok().expect("rustdoc needs a tempdir"));
+        let outdir = Mutex::new(
+            TempFileBuilder::new().prefix("rustdoctest").tempdir().expect("rustdoc needs a tempdir")
+        );
         let libdir = sess.target_filesearch(PathKind::All).get_lib_path();
         let mut control = driver::CompileController::basic();
 
@@ -310,28 +314,28 @@ fn run_test(test: &str, cratename: &str, filename: &FileName, line: usize,
             Err(_) | Ok(Err(CompileIncomplete::Errored(_))) => Err(())
         };
 
-        match (compile_result, compile_fail) {
-            (Ok(()), true) => {
-                panic!("test compiled while it wasn't supposed to")
-            }
-            (Ok(()), false) => {}
-            (Err(()), true) => {
-                if error_codes.len() > 0 {
-                    let out = String::from_utf8(data.lock().unwrap().to_vec()).unwrap();
-                    error_codes.retain(|err| !out.contains(err));
-                }
-            }
-            (Err(()), false) => {
-                panic!("couldn't compile the test")
-            }
-        }
-
-        if error_codes.len() > 0 {
-            panic!("Some expected error codes were not found: {:?}", error_codes);
-        }
-
-        (libdir, outdir)
+        (libdir, outdir, compile_result)
     });
+
+    match (compile_result, compile_fail) {
+        (Ok(()), true) => {
+            panic!("test compiled while it wasn't supposed to")
+        }
+        (Ok(()), false) => {}
+        (Err(()), true) => {
+            if error_codes.len() > 0 {
+                let out = String::from_utf8(data.lock().unwrap().to_vec()).unwrap();
+                error_codes.retain(|err| !out.contains(err));
+            }
+        }
+        (Err(()), false) => {
+            panic!("couldn't compile the test")
+        }
+    }
+
+    if error_codes.len() > 0 {
+        panic!("Some expected error codes were not found: {:?}", error_codes);
+    }
 
     if no_run { return }
 
@@ -495,7 +499,7 @@ pub struct Collector {
     opts: TestOptions,
     maybe_sysroot: Option<PathBuf>,
     position: Span,
-    codemap: Option<Lrc<CodeMap>>,
+    source_map: Option<Lrc<SourceMap>>,
     filename: Option<PathBuf>,
     linker: Option<PathBuf>,
     edition: Edition,
@@ -504,7 +508,7 @@ pub struct Collector {
 impl Collector {
     pub fn new(cratename: String, cfgs: Vec<String>, libs: SearchPaths, cg: CodegenOptions,
                externs: Externs, use_headers: bool, opts: TestOptions,
-               maybe_sysroot: Option<PathBuf>, codemap: Option<Lrc<CodeMap>>,
+               maybe_sysroot: Option<PathBuf>, source_map: Option<Lrc<SourceMap>>,
                filename: Option<PathBuf>, linker: Option<PathBuf>, edition: Edition) -> Collector {
         Collector {
             tests: Vec::new(),
@@ -518,7 +522,7 @@ impl Collector {
             opts,
             maybe_sysroot,
             position: DUMMY_SP,
-            codemap,
+            source_map,
             filename,
             linker,
             edition,
@@ -529,10 +533,8 @@ impl Collector {
         format!("{} - {} (line {})", filename, self.names.join("::"), line)
     }
 
-    pub fn add_test(&mut self, test: String,
-                    should_panic: bool, no_run: bool, should_ignore: bool,
-                    as_test_harness: bool, compile_fail: bool, error_codes: Vec<String>,
-                    line: usize, filename: FileName, allow_fail: bool) {
+    pub fn add_test(&mut self, test: String, config: LangString, line: usize) {
+        let filename = self.get_filename();
         let name = self.generate_name(line, &filename);
         let cfgs = self.cfgs.clone();
         let libs = self.libs.clone();
@@ -542,21 +544,21 @@ impl Collector {
         let opts = self.opts.clone();
         let maybe_sysroot = self.maybe_sysroot.clone();
         let linker = self.linker.clone();
-        let edition = self.edition;
+        let edition = config.edition.unwrap_or(self.edition);
         debug!("Creating test {}: {}", name, test);
         self.tests.push(testing::TestDescAndFn {
             desc: testing::TestDesc {
-                name: testing::DynTestName(name),
-                ignore: should_ignore,
+                name: testing::DynTestName(name.clone()),
+                ignore: config.ignore,
                 // compiler failures are test failures
                 should_panic: testing::ShouldPanic::No,
-                allow_fail,
+                allow_fail: config.allow_fail,
             },
             testfn: testing::DynTestFn(box move || {
                 let panic = io::set_panic(None);
                 let print = io::set_print(None);
                 match {
-                    rustc_driver::in_rustc_thread(move || with_globals(move || {
+                    rustc_driver::in_named_rustc_thread(name, move || with_globals(move || {
                         io::set_panic(panic);
                         io::set_print(print);
                         run_test(&test,
@@ -567,11 +569,11 @@ impl Collector {
                                  libs,
                                  cg,
                                  externs,
-                                 should_panic,
-                                 no_run,
-                                 as_test_harness,
-                                 compile_fail,
-                                 error_codes,
+                                 config.should_panic,
+                                 config.no_run,
+                                 config.test_harness,
+                                 config.compile_fail,
+                                 config.error_codes,
                                  &opts,
                                  maybe_sysroot,
                                  linker,
@@ -586,9 +588,9 @@ impl Collector {
     }
 
     pub fn get_line(&self) -> usize {
-        if let Some(ref codemap) = self.codemap {
+        if let Some(ref source_map) = self.source_map {
             let line = self.position.lo().to_usize();
-            let line = codemap.lookup_char_pos(BytePos(line as u32)).line;
+            let line = source_map.lookup_char_pos(BytePos(line as u32)).line;
             if line > 0 { line - 1 } else { line }
         } else {
             0
@@ -599,9 +601,9 @@ impl Collector {
         self.position = position;
     }
 
-    pub fn get_filename(&self) -> FileName {
-        if let Some(ref codemap) = self.codemap {
-            let filename = codemap.span_to_filename(self.position);
+    fn get_filename(&self) -> FileName {
+        if let Some(ref source_map) = self.source_map {
+            let filename = source_map.span_to_filename(self.position);
             if let FileName::Real(ref filename) = filename {
                 if let Ok(cur_dir) = env::current_dir() {
                     if let Ok(path) = filename.strip_prefix(&cur_dir) {
@@ -659,7 +661,8 @@ impl Collector {
 struct HirCollector<'a, 'hir: 'a> {
     sess: &'a session::Session,
     collector: &'a mut Collector,
-    map: &'a hir::map::Map<'hir>
+    map: &'a hir::map::Map<'hir>,
+    codes: ErrorCodes,
 }
 
 impl<'a, 'hir> HirCollector<'a, 'hir> {
@@ -684,10 +687,12 @@ impl<'a, 'hir> HirCollector<'a, 'hir> {
         // the collapse-docs pass won't combine sugared/raw doc attributes, or included files with
         // anything else, this will combine them for us
         if let Some(doc) = attrs.collapsed_doc_value() {
-            markdown::find_testable_code(&doc,
-                                         self.collector,
-                                         attrs.span.unwrap_or(DUMMY_SP),
-                                         Some(self.sess));
+            self.collector.set_position(attrs.span.unwrap_or(DUMMY_SP));
+            let res = markdown::find_testable_code(&doc, self.collector, self.codes);
+            if let Err(err) = res {
+                self.sess.diagnostic().span_warn(attrs.span.unwrap_or(DUMMY_SP),
+                    &err.to_string());
+            }
         }
 
         nested(self);
@@ -704,7 +709,7 @@ impl<'a, 'hir> intravisit::Visitor<'hir> for HirCollector<'a, 'hir> {
     }
 
     fn visit_item(&mut self, item: &'hir hir::Item) {
-        let name = if let hir::ItemImpl(.., ref ty, _) = item.node {
+        let name = if let hir::ItemKind::Impl(.., ref ty, _) = item.node {
             self.map.node_to_pretty_string(ty.id)
         } else {
             item.name.to_string()
@@ -716,13 +721,13 @@ impl<'a, 'hir> intravisit::Visitor<'hir> for HirCollector<'a, 'hir> {
     }
 
     fn visit_trait_item(&mut self, item: &'hir hir::TraitItem) {
-        self.visit_testable(item.name.to_string(), &item.attrs, |this| {
+        self.visit_testable(item.ident.to_string(), &item.attrs, |this| {
             intravisit::walk_trait_item(this, item);
         });
     }
 
     fn visit_impl_item(&mut self, item: &'hir hir::ImplItem) {
-        self.visit_testable(item.name.to_string(), &item.attrs, |this| {
+        self.visit_testable(item.ident.to_string(), &item.attrs, |this| {
             intravisit::walk_impl_item(this, item);
         });
     }
@@ -769,7 +774,7 @@ fn main() {
 assert_eq!(2+2, 4);
 }".to_string();
         let output = make_test(input, None, false, &opts);
-        assert_eq!(output, (expected.clone(), 2));
+        assert_eq!(output, (expected, 2));
     }
 
     #[test]
@@ -967,7 +972,7 @@ fn main() {
 assert_eq!(2+2, 4);
 }".to_string();
         let output = make_test(input, None, false, &opts);
-        assert_eq!(output, (expected.clone(), 2));
+        assert_eq!(output, (expected, 2));
     }
 
     #[test]
@@ -982,7 +987,7 @@ assert_eq!(2+2, 4);";
 //Ceci n'est pas une `fn main`
 assert_eq!(2+2, 4);".to_string();
         let output = make_test(input, None, true, &opts);
-        assert_eq!(output, (expected.clone(), 1));
+        assert_eq!(output, (expected, 1));
     }
 
     #[test]
@@ -997,6 +1002,6 @@ assert_eq!(2+2, 4);".to_string();
 assert_eq!(2+2, 4);
 }".to_string();
         let output = make_test(input, None, false, &opts);
-        assert_eq!(output, (expected.clone(), 1));
+        assert_eq!(output, (expected, 1));
     }
 }

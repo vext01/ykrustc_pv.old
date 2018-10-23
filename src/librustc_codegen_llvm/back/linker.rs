@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::collections::HashMap;
+use rustc_data_structures::fx::FxHashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::prelude::*;
@@ -21,16 +21,17 @@ use back::symbol_export;
 use rustc::hir::def_id::{LOCAL_CRATE, CrateNum};
 use rustc::middle::dependency_format::Linkage;
 use rustc::session::Session;
-use rustc::session::config::{self, CrateType, OptLevel, DebugInfoLevel,
+use rustc::session::config::{self, CrateType, OptLevel, DebugInfo,
                              CrossLangLto};
 use rustc::ty::TyCtxt;
 use rustc_target::spec::{LinkerFlavor, LldFlavor};
 use serialize::{json, Encoder};
+use llvm_util;
 
 /// For all the linkers we support, and information they might
 /// need out of the shared crate context before we get rid of it.
 pub struct LinkerInfo {
-    exports: HashMap<CrateType, Vec<String>>,
+    exports: FxHashMap<CrateType, Vec<String>>,
 }
 
 impl LinkerInfo {
@@ -44,22 +45,23 @@ impl LinkerInfo {
 
     pub fn to_linker<'a>(&'a self,
                          cmd: Command,
-                         sess: &'a Session) -> Box<Linker+'a> {
-        match sess.linker_flavor() {
+                         sess: &'a Session,
+                         flavor: LinkerFlavor) -> Box<dyn Linker+'a> {
+        match flavor {
             LinkerFlavor::Lld(LldFlavor::Link) |
             LinkerFlavor::Msvc => {
                 Box::new(MsvcLinker {
                     cmd,
                     sess,
                     info: self
-                }) as Box<Linker>
+                }) as Box<dyn Linker>
             }
             LinkerFlavor::Em =>  {
                 Box::new(EmLinker {
                     cmd,
                     sess,
                     info: self
-                }) as Box<Linker>
+                }) as Box<dyn Linker>
             }
             LinkerFlavor::Gcc =>  {
                 Box::new(GccLinker {
@@ -68,7 +70,7 @@ impl LinkerInfo {
                     info: self,
                     hinted_static: false,
                     is_ld: false,
-                }) as Box<Linker>
+                }) as Box<dyn Linker>
             }
 
             LinkerFlavor::Lld(LldFlavor::Ld) |
@@ -80,13 +82,15 @@ impl LinkerInfo {
                     info: self,
                     hinted_static: false,
                     is_ld: true,
-                }) as Box<Linker>
+                }) as Box<dyn Linker>
             }
 
             LinkerFlavor::Lld(LldFlavor::Wasm) => {
                 Box::new(WasmLd {
                     cmd,
-                }) as Box<Linker>
+                    sess,
+                    info: self
+                }) as Box<dyn Linker>
             }
         }
     }
@@ -182,11 +186,44 @@ impl<'a> GccLinker<'a> {
             self.hinted_static = false;
         }
     }
+
+    fn push_cross_lang_lto_args(&mut self, plugin_path: Option<&OsStr>) {
+        if let Some(plugin_path) = plugin_path {
+            let mut arg = OsString::from("-plugin=");
+            arg.push(plugin_path);
+            self.linker_arg(&arg);
+        }
+
+        let opt_level = match self.sess.opts.optimize {
+            config::OptLevel::No => "O0",
+            config::OptLevel::Less => "O1",
+            config::OptLevel::Default => "O2",
+            config::OptLevel::Aggressive => "O3",
+            config::OptLevel::Size => "Os",
+            config::OptLevel::SizeMin => "Oz",
+        };
+
+        self.linker_arg(&format!("-plugin-opt={}", opt_level));
+        self.linker_arg(&format!("-plugin-opt=mcpu={}", llvm_util::target_cpu(self.sess)));
+
+        match self.sess.lto() {
+            config::Lto::Thin |
+            config::Lto::ThinLocal => {
+                self.linker_arg("-plugin-opt=thin");
+            }
+            config::Lto::Fat |
+            config::Lto::No => {
+                // default to regular LTO
+            }
+        }
+    }
 }
 
 impl<'a> Linker for GccLinker<'a> {
-    fn link_dylib(&mut self, lib: &str) { self.hint_dynamic(); self.cmd.arg("-l").arg(lib); }
-    fn link_staticlib(&mut self, lib: &str) { self.hint_static(); self.cmd.arg("-l").arg(lib); }
+    fn link_dylib(&mut self, lib: &str) { self.hint_dynamic(); self.cmd.arg(format!("-l{}",lib)); }
+    fn link_staticlib(&mut self, lib: &str) {
+        self.hint_static(); self.cmd.arg(format!("-l{}",lib));
+    }
     fn link_rlib(&mut self, lib: &Path) { self.hint_static(); self.cmd.arg(lib); }
     fn include_path(&mut self, path: &Path) { self.cmd.arg("-L").arg(path); }
     fn framework_path(&mut self, path: &Path) { self.cmd.arg("-F").arg(path); }
@@ -194,15 +231,15 @@ impl<'a> Linker for GccLinker<'a> {
     fn add_object(&mut self, path: &Path) { self.cmd.arg(path); }
     fn position_independent_executable(&mut self) { self.cmd.arg("-pie"); }
     fn no_position_independent_executable(&mut self) { self.cmd.arg("-no-pie"); }
-    fn full_relro(&mut self) { self.linker_arg("-z,relro,-z,now"); }
-    fn partial_relro(&mut self) { self.linker_arg("-z,relro"); }
-    fn no_relro(&mut self) { self.linker_arg("-z,norelro"); }
+    fn full_relro(&mut self) { self.linker_arg("-zrelro"); self.linker_arg("-znow"); }
+    fn partial_relro(&mut self) { self.linker_arg("-zrelro"); }
+    fn no_relro(&mut self) { self.linker_arg("-znorelro"); }
     fn build_static_executable(&mut self) { self.cmd.arg("-static"); }
     fn args(&mut self, args: &[String]) { self.cmd.args(args); }
 
     fn link_rust_dylib(&mut self, lib: &str, _path: &Path) {
         self.hint_dynamic();
-        self.cmd.arg("-l").arg(lib);
+        self.cmd.arg(format!("-l{}",lib));
     }
 
     fn link_framework(&mut self, framework: &str) {
@@ -220,23 +257,22 @@ impl<'a> Linker for GccLinker<'a> {
         self.hint_static();
         let target = &self.sess.target.target;
         if !target.options.is_like_osx {
-            self.linker_arg("--whole-archive").cmd.arg("-l").arg(lib);
+            self.linker_arg("--whole-archive").cmd.arg(format!("-l{}",lib));
             self.linker_arg("--no-whole-archive");
         } else {
             // -force_load is the macOS equivalent of --whole-archive, but it
             // involves passing the full path to the library to link.
-            let mut v = OsString::from("-force_load,");
-            v.push(&archive::find_library(lib, search_path, &self.sess));
-            self.linker_arg(&v);
+            self.linker_arg("-force_load");
+            let lib = archive::find_library(lib, search_path, &self.sess);
+            self.linker_arg(&lib);
         }
     }
 
     fn link_whole_rlib(&mut self, lib: &Path) {
         self.hint_static();
         if self.sess.target.target.options.is_like_osx {
-            let mut v = OsString::from("-force_load,");
-            v.push(lib);
-            self.linker_arg(&v);
+            self.linker_arg("-force_load");
+            self.linker_arg(&lib);
         } else {
             self.linker_arg("--whole-archive").cmd.arg(lib);
             self.linker_arg("--no-whole-archive");
@@ -261,8 +297,7 @@ impl<'a> Linker for GccLinker<'a> {
         if self.sess.target.target.options.is_like_osx {
             self.linker_arg("-dead_strip");
         } else if self.sess.target.target.options.is_like_solaris {
-            self.linker_arg("-z");
-            self.linker_arg("ignore");
+            self.linker_arg("-zignore");
 
         // If we're building a dylib, we don't use --gc-sections because LLVM
         // has already done the best it can do, and we also don't want to
@@ -305,7 +340,7 @@ impl<'a> Linker for GccLinker<'a> {
 
     fn debuginfo(&mut self) {
         match self.sess.opts.debuginfo {
-            DebugInfoLevel::NoDebugInfo => {
+            DebugInfo::None => {
                 // If we are building without debuginfo enabled and we were called with
                 // `-Zstrip-debuginfo-if-disabled=yes`, tell the linker to strip any debuginfo
                 // found when linking to get rid of symbols from libstd.
@@ -336,7 +371,8 @@ impl<'a> Linker for GccLinker<'a> {
             // the right `-Wl,-install_name` with an `@rpath` in it.
             if self.sess.opts.cg.rpath ||
                self.sess.opts.debugging_opts.osx_rpath_install_name {
-                let mut v = OsString::from("-install_name,@rpath/");
+                self.linker_arg("-install_name");
+                let mut v = OsString::from("@rpath/");
                 v.push(out_filename.file_name().unwrap());
                 self.linker_arg(&v);
             }
@@ -353,8 +389,8 @@ impl<'a> Linker for GccLinker<'a> {
         // exported symbols to ensure we don't expose any more. The object files
         // have far more public symbols than we actually want to export, so we
         // hide them all here.
-        if crate_type == CrateType::CrateTypeDylib ||
-           crate_type == CrateType::CrateTypeProcMacro {
+        if crate_type == CrateType::Dylib ||
+           crate_type == CrateType::ProcMacro {
             return
         }
 
@@ -415,7 +451,8 @@ impl<'a> Linker for GccLinker<'a> {
     }
 
     fn subsystem(&mut self, subsystem: &str) {
-        self.linker_arg(&format!("--subsystem,{}", subsystem));
+        self.linker_arg("--subsystem");
+        self.linker_arg(&subsystem);
     }
 
     fn finalize(&mut self) -> Command {
@@ -439,36 +476,14 @@ impl<'a> Linker for GccLinker<'a> {
 
     fn cross_lang_lto(&mut self) {
         match self.sess.opts.debugging_opts.cross_lang_lto {
-            CrossLangLto::Disabled |
-            CrossLangLto::NoLink => {
+            CrossLangLto::Disabled => {
                 // Nothing to do
             }
+            CrossLangLto::LinkerPluginAuto => {
+                self.push_cross_lang_lto_args(None);
+            }
             CrossLangLto::LinkerPlugin(ref path) => {
-                self.linker_arg(&format!("-plugin={}", path.display()));
-
-                let opt_level = match self.sess.opts.optimize {
-                    config::OptLevel::No => "O0",
-                    config::OptLevel::Less => "O1",
-                    config::OptLevel::Default => "O2",
-                    config::OptLevel::Aggressive => "O3",
-                    config::OptLevel::Size => "Os",
-                    config::OptLevel::SizeMin => "Oz",
-                };
-
-                self.linker_arg(&format!("-plugin-opt={}", opt_level));
-                self.linker_arg(&format!("-plugin-opt=mcpu={}", self.sess.target_cpu()));
-
-                match self.sess.opts.cg.lto {
-                    config::Lto::Thin |
-                    config::Lto::ThinLocal => {
-                        self.linker_arg(&format!("-plugin-opt=thin"));
-                    }
-                    config::Lto::Fat |
-                    config::Lto::Yes |
-                    config::Lto::No => {
-                        // default to regular LTO
-                    }
-                }
+                self.push_cross_lang_lto_args(Some(path.as_os_str()));
             }
         }
     }
@@ -813,9 +828,9 @@ impl<'a> Linker for EmLinker<'a> {
     fn debuginfo(&mut self) {
         // Preserve names or generate source maps depending on debug info
         self.cmd.arg(match self.sess.opts.debuginfo {
-            DebugInfoLevel::NoDebugInfo => "-g0",
-            DebugInfoLevel::LimitedDebugInfo => "-g3",
-            DebugInfoLevel::FullDebugInfo => "-g4"
+            DebugInfo::None => "-g0",
+            DebugInfo::Limited => "-g3",
+            DebugInfo::Full => "-g4"
         });
     }
 
@@ -909,11 +924,13 @@ fn exported_symbols(tcx: TyCtxt, crate_type: CrateType) -> Vec<String> {
     symbols
 }
 
-pub struct WasmLd {
+pub struct WasmLd<'a> {
     cmd: Command,
+    sess: &'a Session,
+    info: &'a LinkerInfo,
 }
 
-impl Linker for WasmLd {
+impl<'a> Linker for WasmLd<'a> {
     fn link_dylib(&mut self, lib: &str) {
         self.cmd.arg("-l").arg(lib);
     }
@@ -978,9 +995,20 @@ impl Linker for WasmLd {
     }
 
     fn gc_sections(&mut self, _keep_metadata: bool) {
+        self.cmd.arg("--gc-sections");
     }
 
     fn optimize(&mut self) {
+        self.cmd.arg(match self.sess.opts.optimize {
+            OptLevel::No => "-O0",
+            OptLevel::Less => "-O1",
+            OptLevel::Default => "-O2",
+            OptLevel::Aggressive => "-O3",
+            // Currently LLD doesn't support `Os` and `Oz`, so pass through `O2`
+            // instead.
+            OptLevel::Size => "-O2",
+            OptLevel::SizeMin => "-O2"
+        });
     }
 
     fn pgo_gen(&mut self) {
@@ -995,7 +1023,10 @@ impl Linker for WasmLd {
     fn build_dylib(&mut self, _out_filename: &Path) {
     }
 
-    fn export_symbols(&mut self, _tmpdir: &Path, _crate_type: CrateType) {
+    fn export_symbols(&mut self, _tmpdir: &Path, crate_type: CrateType) {
+        for sym in self.info.exports[&crate_type].iter() {
+            self.cmd.arg("--export").arg(&sym);
+        }
     }
 
     fn subsystem(&mut self, _subsystem: &str) {
@@ -1010,7 +1041,27 @@ impl Linker for WasmLd {
         // this isn't yet the bottleneck of compilation at all anyway.
         self.cmd.arg("--no-threads");
 
+        // By default LLD only gives us one page of stack (64k) which is a
+        // little small. Default to a larger stack closer to other PC platforms
+        // (1MB) and users can always inject their own link-args to override this.
         self.cmd.arg("-z").arg("stack-size=1048576");
+
+        // By default LLD's memory layout is:
+        //
+        // 1. First, a blank page
+        // 2. Next, all static data
+        // 3. Finally, the main stack (which grows down)
+        //
+        // This has the unfortunate consequence that on stack overflows you
+        // corrupt static data and can cause some exceedingly weird bugs. To
+        // help detect this a little sooner we instead request that the stack is
+        // placed before static data.
+        //
+        // This means that we'll generate slightly larger binaries as references
+        // to static data will take more bytes in the ULEB128 encoding, but
+        // stack overflow will be guaranteed to trap as it underflows instead of
+        // corrupting static data.
+        self.cmd.arg("--stack-first");
 
         // FIXME we probably shouldn't pass this but instead pass an explicit
         // whitelist of symbols we'll allow to be undefined. Unfortunately
@@ -1021,6 +1072,13 @@ impl Linker for WasmLd {
 
         // For now we just never have an entry symbol
         self.cmd.arg("--no-entry");
+
+        // Make the default table accessible
+        self.cmd.arg("--export-table");
+
+        // Rust code should never have warnings, and warnings are often
+        // indicative of bugs, let's prevent them.
+        self.cmd.arg("--fatal-warnings");
 
         let mut cmd = Command::new("");
         ::std::mem::swap(&mut cmd, &mut self.cmd);

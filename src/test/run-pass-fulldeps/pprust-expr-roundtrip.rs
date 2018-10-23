@@ -30,16 +30,17 @@
 
 #![feature(rustc_private)]
 
+extern crate rustc_data_structures;
 extern crate syntax;
 
+use rustc_data_structures::thin_vec::ThinVec;
 use syntax::ast::*;
-use syntax::codemap::{Spanned, DUMMY_SP, FileName};
-use syntax::codemap::FilePathMapping;
+use syntax::source_map::{Spanned, DUMMY_SP, FileName};
+use syntax::source_map::FilePathMapping;
 use syntax::fold::{self, Folder};
 use syntax::parse::{self, ParseSess};
 use syntax::print::pprust;
 use syntax::ptr::P;
-use syntax::util::ThinVec;
 
 
 fn parse_expr(ps: &ParseSess, src: &str) -> P<Expr> {
@@ -124,6 +125,7 @@ fn iter_exprs(depth: usize, f: &mut FnMut(P<Expr>)) {
                 });
                 iter_exprs(depth - 1, &mut |e| g(
                         ExprKind::Closure(CaptureBy::Value,
+                                          IsAsync::NotAsync,
                                           Movability::Movable,
                                           decl.clone(),
                                           e,

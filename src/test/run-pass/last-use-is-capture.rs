@@ -8,9 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(dead_code)]
 // Make sure #1399 stays fixed
 
-#![allow(unknown_features)]
 #![feature(box_syntax)]
 
 struct A { a: Box<isize> }

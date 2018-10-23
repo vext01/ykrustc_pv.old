@@ -18,7 +18,7 @@
 use hir::def_id::{DefId, LOCAL_CRATE};
 use rustc::traits;
 use rustc::ty::{self, TyCtxt, TypeFoldable};
-use rustc::ty::maps::Providers;
+use rustc::ty::query::Providers;
 
 use syntax::ast;
 
@@ -36,8 +36,8 @@ fn check_impl<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, node_id: ast::NodeId) {
 
     if let Some(trait_ref) = tcx.impl_trait_ref(impl_def_id) {
         debug!("(checking implementation) adding impl for trait '{:?}', item '{}'",
-                trait_ref,
-                tcx.item_path_str(impl_def_id));
+               trait_ref,
+               tcx.item_path_str(impl_def_id));
 
         // Skip impls where one of the self type is an error type.
         // This occurs with e.g. resolve failures (#30589).
@@ -46,13 +46,14 @@ fn check_impl<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, node_id: ast::NodeId) {
         }
 
         enforce_trait_manually_implementable(tcx, impl_def_id, trait_ref.def_id);
+        enforce_empty_impls_for_marker_traits(tcx, impl_def_id, trait_ref.def_id);
     }
 }
 
 fn enforce_trait_manually_implementable(tcx: TyCtxt, impl_def_id: DefId, trait_def_id: DefId) {
     let did = Some(trait_def_id);
     let li = tcx.lang_items();
-    let span = tcx.sess.codemap().def_span(tcx.span_of_impl(impl_def_id).unwrap());
+    let span = tcx.sess.source_map().def_span(tcx.span_of_impl(impl_def_id).unwrap());
 
     // Disallow *all* explicit impls of `Sized` and `Unsize` for now.
     if did == li.sized_trait() {
@@ -99,6 +100,25 @@ fn enforce_trait_manually_implementable(tcx: TyCtxt, impl_def_id: DefId, trait_d
         .emit();
 }
 
+/// We allow impls of marker traits to overlap, so they can't override impls
+/// as that could make it ambiguous which associated item to use.
+fn enforce_empty_impls_for_marker_traits(tcx: TyCtxt, impl_def_id: DefId, trait_def_id: DefId) {
+    if !tcx.trait_def(trait_def_id).is_marker {
+        return;
+    }
+
+    if tcx.associated_item_def_ids(trait_def_id).is_empty() {
+        return;
+    }
+
+    let span = tcx.sess.source_map().def_span(tcx.span_of_impl(impl_def_id).unwrap());
+    struct_span_err!(tcx.sess,
+                     span,
+                     E0715,
+                     "impls for marker traits cannot contain items")
+        .emit();
+}
+
 pub fn provide(providers: &mut Providers) {
     use self::builtin::coerce_unsized_info;
     use self::inherent_impls::{crate_inherent_impls, inherent_impls};
@@ -127,15 +147,15 @@ fn coherent_trait<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) {
 
 pub fn check_coherence<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
     for &trait_def_id in tcx.hir.krate().trait_impls.keys() {
-        ty::maps::queries::coherent_trait::ensure(tcx, trait_def_id);
+        ty::query::queries::coherent_trait::ensure(tcx, trait_def_id);
     }
 
     unsafety::check(tcx);
     orphan::check(tcx);
 
     // these queries are executed for side-effects (error reporting):
-    ty::maps::queries::crate_inherent_impls::ensure(tcx, LOCAL_CRATE);
-    ty::maps::queries::crate_inherent_impls_overlap_check::ensure(tcx, LOCAL_CRATE);
+    ty::query::queries::crate_inherent_impls::ensure(tcx, LOCAL_CRATE);
+    ty::query::queries::crate_inherent_impls_overlap_check::ensure(tcx, LOCAL_CRATE);
 }
 
 /// Overlap: No two impls for the same trait are implemented for the
@@ -157,19 +177,18 @@ fn check_impl_overlap<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, node_id: ast::NodeI
     tcx.specialization_graph_of(trait_def_id);
 
     // check for overlap with the automatic `impl Trait for Trait`
-    if let ty::TyDynamic(ref data, ..) = trait_ref.self_ty().sty {
+    if let ty::Dynamic(ref data, ..) = trait_ref.self_ty().sty {
         // This is something like impl Trait1 for Trait2. Illegal
         // if Trait1 is a supertrait of Trait2 or Trait2 is not object safe.
 
-        if data.principal().map_or(true, |p| !tcx.is_object_safe(p.def_id())) {
+        if !tcx.is_object_safe(data.principal().def_id()) {
             // This is an error, but it will be reported by wfcheck.  Ignore it here.
             // This is tested by `coherence-impl-trait-for-trait-object-safe.rs`.
         } else {
             let mut supertrait_def_ids =
-                traits::supertrait_def_ids(tcx,
-                                           data.principal().unwrap().def_id());
+                traits::supertrait_def_ids(tcx, data.principal().def_id());
             if supertrait_def_ids.any(|d| d == trait_def_id) {
-                let sp = tcx.sess.codemap().def_span(tcx.span_of_impl(impl_def_id).unwrap());
+                let sp = tcx.sess.source_map().def_span(tcx.span_of_impl(impl_def_id).unwrap());
                 struct_span_err!(tcx.sess,
                                  sp,
                                  E0371,

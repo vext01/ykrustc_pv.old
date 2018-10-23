@@ -13,13 +13,14 @@ use std::sync::Arc;
 
 use monomorphize::Instance;
 use rustc::hir;
+use rustc::hir::Node;
 use rustc::hir::CodegenFnAttrFlags;
 use rustc::hir::def_id::{CrateNum, DefId, LOCAL_CRATE, CRATE_DEF_INDEX};
-use rustc::ich::Fingerprint;
+use rustc_data_structures::fingerprint::Fingerprint;
 use rustc::middle::exported_symbols::{SymbolExportLevel, ExportedSymbol, metadata_symbol_name};
 use rustc::session::config;
 use rustc::ty::{TyCtxt, SymbolName};
-use rustc::ty::maps::Providers;
+use rustc::ty::query::Providers;
 use rustc::ty::subst::Substs;
 use rustc::util::nodemap::{FxHashMap, DefIdMap};
 use rustc_allocator::ALLOCATOR_METHODS;
@@ -37,12 +38,12 @@ pub fn threshold(tcx: TyCtxt) -> SymbolExportLevel {
 
 fn crate_export_threshold(crate_type: config::CrateType) -> SymbolExportLevel {
     match crate_type {
-        config::CrateTypeExecutable |
-        config::CrateTypeStaticlib  |
-        config::CrateTypeProcMacro  |
-        config::CrateTypeCdylib     => SymbolExportLevel::C,
-        config::CrateTypeRlib       |
-        config::CrateTypeDylib      => SymbolExportLevel::Rust,
+        config::CrateType::Executable |
+        config::CrateType::Staticlib  |
+        config::CrateType::ProcMacro  |
+        config::CrateType::Cdylib     => SymbolExportLevel::C,
+        config::CrateType::Rlib       |
+        config::CrateType::Dylib      => SymbolExportLevel::Rust,
     }
 }
 
@@ -94,7 +95,7 @@ fn reachable_non_generics_provider<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             // As a result, if this id is an FFI item (foreign item) then we only
             // let it through if it's included statically.
             match tcx.hir.get(node_id) {
-                hir::map::NodeForeignItem(..) => {
+                Node::ForeignItem(..) => {
                     let def_id = tcx.hir.local_def_id(node_id);
                     if tcx.is_statically_included_foreign_item(def_id) {
                         Some(def_id)
@@ -104,14 +105,14 @@ fn reachable_non_generics_provider<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 }
 
                 // Only consider nodes that actually have exported symbols.
-                hir::map::NodeItem(&hir::Item {
-                    node: hir::ItemStatic(..),
+                Node::Item(&hir::Item {
+                    node: hir::ItemKind::Static(..),
                     ..
                 }) |
-                hir::map::NodeItem(&hir::Item {
-                    node: hir::ItemFn(..), ..
+                Node::Item(&hir::Item {
+                    node: hir::ItemKind::Fn(..), ..
                 }) |
-                hir::map::NodeImplItem(&hir::ImplItem {
+                Node::ImplItem(&hir::ImplItem {
                     node: hir::ImplItemKind::Method(..),
                     ..
                 }) => {
@@ -206,9 +207,8 @@ fn exported_symbols_provider_local<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                  })
                                  .collect();
 
-    if let Some(_) = *tcx.sess.entry_fn.borrow() {
-        let symbol_name = "main".to_string();
-        let exported_symbol = ExportedSymbol::NoDefId(SymbolName::new(&symbol_name));
+    if tcx.sess.entry_fn.borrow().is_some() {
+        let exported_symbol = ExportedSymbol::NoDefId(SymbolName::new("main"));
 
         symbols.push((exported_symbol, SymbolExportLevel::C));
     }
@@ -236,14 +236,14 @@ fn exported_symbols_provider_local<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         }
     }
 
-    if tcx.sess.crate_types.borrow().contains(&config::CrateTypeDylib) {
+    if tcx.sess.crate_types.borrow().contains(&config::CrateType::Dylib) {
         let symbol_name = metadata_symbol_name(tcx);
         let exported_symbol = ExportedSymbol::NoDefId(SymbolName::new(&symbol_name));
 
         symbols.push((exported_symbol, SymbolExportLevel::Rust));
     }
 
-    if tcx.share_generics() && tcx.local_crate_exports_generics() {
+    if tcx.sess.opts.share_generics() && tcx.local_crate_exports_generics() {
         use rustc::mir::mono::{Linkage, Visibility, MonoItem};
         use rustc::ty::InstanceDef;
 
@@ -300,7 +300,7 @@ fn upstream_monomorphizations_provider<'a, 'tcx>(
 
     let cnums = tcx.all_crate_nums(LOCAL_CRATE);
 
-    let mut instances = DefIdMap();
+    let mut instances: DefIdMap<FxHashMap<_, _>> = DefIdMap();
 
     let cnum_stable_ids: IndexVec<CrateNum, Fingerprint> = {
         let mut cnum_stable_ids = IndexVec::from_elem_n(Fingerprint::ZERO,
@@ -319,8 +319,7 @@ fn upstream_monomorphizations_provider<'a, 'tcx>(
     for &cnum in cnums.iter() {
         for &(ref exported_symbol, _) in tcx.exported_symbols(cnum).iter() {
             if let &ExportedSymbol::Generic(def_id, substs) = exported_symbol {
-                let substs_map = instances.entry(def_id)
-                                          .or_insert_with(|| FxHashMap());
+                let substs_map = instances.entry(def_id).or_default();
 
                 match substs_map.entry(substs) {
                     Occupied(mut e) => {

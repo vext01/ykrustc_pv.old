@@ -32,7 +32,7 @@ use native;
 use test;
 use tool;
 use util::{add_lib_path, exe, libdir};
-use {Build, DocTests, Mode};
+use {Build, DocTests, Mode, GitRepo};
 
 pub use Compiler;
 
@@ -44,7 +44,7 @@ pub struct Builder<'a> {
     pub top_stage: u32,
     pub kind: Kind,
     cache: Cache,
-    stack: RefCell<Vec<Box<Any>>>,
+    stack: RefCell<Vec<Box<dyn Any>>>,
     time_spent_on_dependencies: Cell<Duration>,
     pub paths: Vec<PathBuf>,
     graph_nodes: RefCell<HashMap<String, NodeIndex>>,
@@ -218,6 +218,12 @@ impl StepDescription {
             }
         } else {
             for path in paths {
+                // strip CurDir prefix if present
+                let path = match path.strip_prefix(".") {
+                    Ok(p) => p,
+                    Err(_) => path,
+                };
+
                 let mut attempted_run = false;
                 for (desc, should_run) in v.iter().zip(&should_runs) {
                     if let Some(suite) = should_run.is_suite_path(path) {
@@ -339,6 +345,7 @@ impl<'a> Builder<'a> {
                 compile::Std,
                 compile::Test,
                 compile::Rustc,
+                compile::CodegenBackend,
                 compile::StartupObjects,
                 tool::BuildManifest,
                 tool::Rustbook,
@@ -369,7 +376,6 @@ impl<'a> Builder<'a> {
             ),
             Kind::Test => describe!(
                 test::Tidy,
-                test::Bootstrap,
                 test::Ui,
                 test::RunPass,
                 test::CompileFail,
@@ -415,6 +421,8 @@ impl<'a> Builder<'a> {
                 test::Clippy,
                 test::RustdocJS,
                 test::RustdocTheme,
+                // Run bootstrap close to the end as it's unlikely to fail
+                test::Bootstrap,
                 // Run run-make last, since these won't pass without make on Windows
                 test::RunMake,
                 test::RustdocUi
@@ -451,6 +459,9 @@ impl<'a> Builder<'a> {
                 dist::Cargo,
                 dist::Rls,
                 dist::Rustfmt,
+                dist::Clippy,
+                dist::LlvmTools,
+                dist::Lldb,
                 dist::Extended,
                 dist::HashSign
             ),
@@ -460,6 +471,7 @@ impl<'a> Builder<'a> {
                 install::Cargo,
                 install::Rls,
                 install::Rustfmt,
+                install::Clippy,
                 install::Analysis,
                 install::Src,
                 install::Rustc
@@ -696,6 +708,80 @@ impl<'a> Builder<'a> {
     ) -> Command {
         let mut cargo = Command::new(&self.initial_cargo);
         let out_dir = self.stage_out(compiler, mode);
+
+        // command specific path, we call clear_if_dirty with this
+        let mut my_out = match cmd {
+            "build" => self.cargo_out(compiler, mode, target),
+
+            // This is the intended out directory for crate documentation.
+            "doc" =>  self.crate_doc_out(target),
+
+            _ => self.stage_out(compiler, mode),
+        };
+
+        // This is for the original compiler, but if we're forced to use stage 1, then
+        // std/test/rustc stamps won't exist in stage 2, so we need to get those from stage 1, since
+        // we copy the libs forward.
+        let cmp = if self.force_use_stage1(compiler, target) {
+            self.compiler(1, compiler.host)
+        } else {
+            compiler
+        };
+
+        let libstd_stamp = match cmd {
+            "check" => check::libstd_stamp(self, cmp, target),
+            _ => compile::libstd_stamp(self, cmp, target),
+        };
+
+        let libtest_stamp = match cmd {
+            "check" => check::libtest_stamp(self, cmp, target),
+            _ => compile::libstd_stamp(self, cmp, target),
+        };
+
+        let librustc_stamp = match cmd {
+            "check" => check::librustc_stamp(self, cmp, target),
+            _ => compile::librustc_stamp(self, cmp, target),
+        };
+
+        if cmd == "doc" {
+            if mode == Mode::Rustc || mode == Mode::ToolRustc || mode == Mode::Codegen {
+                // This is the intended out directory for compiler documentation.
+                my_out = self.compiler_doc_out(target);
+            }
+            let rustdoc = self.rustdoc(compiler.host);
+            self.clear_if_dirty(&my_out, &rustdoc);
+        } else if cmd != "test" {
+            match mode {
+                Mode::Std => {
+                    self.clear_if_dirty(&my_out, &self.rustc(compiler));
+                },
+                Mode::Test => {
+                    self.clear_if_dirty(&my_out, &libstd_stamp);
+                },
+                Mode::Rustc => {
+                    self.clear_if_dirty(&my_out, &self.rustc(compiler));
+                    self.clear_if_dirty(&my_out, &libstd_stamp);
+                    self.clear_if_dirty(&my_out, &libtest_stamp);
+                },
+                Mode::Codegen => {
+                    self.clear_if_dirty(&my_out, &librustc_stamp);
+                },
+                Mode::ToolBootstrap => { },
+                Mode::ToolStd => {
+                    self.clear_if_dirty(&my_out, &libstd_stamp);
+                },
+                Mode::ToolTest => {
+                    self.clear_if_dirty(&my_out, &libstd_stamp);
+                    self.clear_if_dirty(&my_out, &libtest_stamp);
+                },
+                Mode::ToolRustc => {
+                    self.clear_if_dirty(&my_out, &libstd_stamp);
+                    self.clear_if_dirty(&my_out, &libtest_stamp);
+                    self.clear_if_dirty(&my_out, &librustc_stamp);
+                },
+            }
+        }
+
         cargo
             .env("CARGO_TARGET_DIR", out_dir)
             .arg(cmd);
@@ -760,6 +846,22 @@ impl<'a> Builder<'a> {
 
         let want_rustdoc = self.doc_tests != DocTests::No;
 
+        // We synthetically interpret a stage0 compiler used to build tools as a
+        // "raw" compiler in that it's the exact snapshot we download. Normally
+        // the stage0 build means it uses libraries build by the stage0
+        // compiler, but for tools we just use the precompiled libraries that
+        // we've downloaded
+        let use_snapshot = mode == Mode::ToolBootstrap;
+        assert!(!use_snapshot || stage == 0 || self.local_rebuild);
+
+        let maybe_sysroot = self.sysroot(compiler);
+        let sysroot = if use_snapshot {
+            self.rustc_snapshot_sysroot()
+        } else {
+            &maybe_sysroot
+        };
+        let libdir = sysroot.join(libdir(&compiler.host));
+
         // Customize the compiler we're running. Specify the compiler to cargo
         // as our shim and then pass it some various options used to configure
         // how the actual compiler itself is called.
@@ -775,8 +877,8 @@ impl<'a> Builder<'a> {
                 "RUSTC_DEBUG_ASSERTIONS",
                 self.config.rust_debug_assertions.to_string(),
             )
-            .env("RUSTC_SYSROOT", self.sysroot(compiler))
-            .env("RUSTC_LIBDIR", self.rustc_libdir(compiler))
+            .env("RUSTC_SYSROOT", &sysroot)
+            .env("RUSTC_LIBDIR", &libdir)
             .env("RUSTC_RPATH", self.config.rust_rpath.to_string())
             .env("RUSTDOC", self.out.join("bootstrap/debug/rustdoc"))
             .env(
@@ -799,11 +901,8 @@ impl<'a> Builder<'a> {
         if let Some(ref error_format) = self.config.rustc_error_format {
             cargo.env("RUSTC_ERROR_FORMAT", error_format);
         }
-        if cmd != "build" && cmd != "check" && want_rustdoc {
-            cargo.env(
-                "RUSTDOC_LIBDIR",
-                self.rustc_libdir(self.compiler(2, self.config.build)),
-            );
+        if cmd != "build" && cmd != "check" && cmd != "rustc" && want_rustdoc {
+            cargo.env("RUSTDOC_LIBDIR", self.sysroot_libdir(compiler, self.config.build));
         }
 
         if mode.is_tool() {
@@ -851,6 +950,10 @@ impl<'a> Builder<'a> {
             cargo.env("RUSTC_HOST_CRT_STATIC", x.to_string());
         }
 
+        if let Some(map) = self.build.debuginfo_map(GitRepo::Rustc) {
+            cargo.env("RUSTC_DEBUGINFO_MAP", map);
+        }
+
         // Enable usage of unstable features
         cargo.env("RUSTC_BOOTSTRAP", "1");
         self.add_rust_test_threads(&mut cargo);
@@ -881,10 +984,7 @@ impl<'a> Builder<'a> {
                 .env("RUSTC_SNAPSHOT_LIBDIR", self.rustc_libdir(compiler));
         }
 
-        // Ignore incremental modes except for stage0, since we're
-        // not guaranteeing correctness across builds if the compiler
-        // is changing under your feet.`
-        if self.config.incremental && compiler.stage == 0 {
+        if self.config.incremental {
             cargo.env("CARGO_INCREMENTAL", "1");
         }
 
@@ -900,7 +1000,11 @@ impl<'a> Builder<'a> {
             cargo.env("RUSTC_BACKTRACE_ON_ICE", "1");
         }
 
-        cargo.env("RUSTC_VERBOSE", format!("{}", self.verbosity));
+        if self.config.rust_verify_llvm_ir {
+            cargo.env("RUSTC_VERIFY_LLVM_IR", "1");
+        }
+
+        cargo.env("RUSTC_VERBOSE", self.verbosity.to_string());
 
         // in std, we want to avoid denying warnings for stage 0 as that makes cfg's painful.
         if self.config.deny_warnings && !(mode == Mode::Std && stage == 0) {
@@ -938,7 +1042,7 @@ impl<'a> Builder<'a> {
             let cc = ccacheify(&self.cc(target));
             cargo.env(format!("CC_{}", target), &cc).env("CC", &cc);
 
-            let cflags = self.cflags(target).join(" ");
+            let cflags = self.cflags(target, GitRepo::Rustc).join(" ");
             cargo
                 .env(format!("CFLAGS_{}", target), cflags.clone())
                 .env("CFLAGS", cflags.clone());
@@ -962,7 +1066,7 @@ impl<'a> Builder<'a> {
             }
         }
 
-        if cmd == "build"
+        if (cmd == "build" || cmd == "rustc")
             && mode == Mode::Std
             && self.config.extended
             && compiler.is_final_stage(self)

@@ -31,7 +31,7 @@ pub struct Flags {
     pub verbose: usize, // number of -v args; each extra -v after the first is passed to Cargo
     pub on_fail: Option<String>,
     pub stage: Option<u32>,
-    pub keep_stage: Option<u32>,
+    pub keep_stage: Vec<u32>,
 
     pub host: Vec<Interned<String>>,
     pub target: Vec<Interned<String>>,
@@ -121,8 +121,12 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`"
         opts.optmulti("", "exclude", "build paths to exclude", "PATH");
         opts.optopt("", "on-fail", "command to run on failure", "CMD");
         opts.optflag("", "dry-run", "dry run; don't build anything");
-        opts.optopt("", "stage", "stage to build", "N");
-        opts.optopt("", "keep-stage", "stage to keep without recompiling", "N");
+        opts.optopt("", "stage",
+            "stage to build (indicates compiler to use/test, e.g. stage 0 uses the \
+             bootstrap compiler, stage 1 the stage 0 rustc artifacts, etc.)",
+            "N");
+        opts.optmulti("", "keep-stage", "stage(s) to keep without recompiling \
+            (pass multiple times to keep e.g. both stages 0 and 1)", "N");
         opts.optopt("", "src", "path to the root of the rust checkout", "DIR");
         opts.optopt("j", "jobs", "number of jobs to run in parallel", "JOBS");
         opts.optflag("h", "help", "print this help message");
@@ -258,7 +262,7 @@ Arguments:
 
         ./x.py build --stage 1 src/libtest
 
-    This will first build everything once (like --stage 0 without further
+    This will first build everything once (like `--stage 0` without further
     arguments would), and then use the compiler built in stage 0 to build
     src/libtest and its dependencies.
     Once this is done, build/$ARCH/stage1 contains a usable compiler.",
@@ -290,9 +294,13 @@ Arguments:
 
         ./x.py test src/test/run-pass
         ./x.py test src/libstd --test-args hash_map
-        ./x.py test src/libstd --stage 0
+        ./x.py test src/libstd --stage 0 --no-doc
         ./x.py test src/test/ui --bless
         ./x.py test src/test/ui --compare-mode nll
+
+    Note that `test src/test/* --stage N` does NOT depend on `build src/rustc --stage N`;
+    just like `build src/libstd --stage N` it tests the compiler produced by the previous
+    stage.
 
     If no arguments are passed then the complete artifacts for that stage are
     compiled and tested.
@@ -402,7 +410,9 @@ Arguments:
             dry_run: matches.opt_present("dry-run"),
             on_fail: matches.opt_str("on-fail"),
             rustc_error_format: matches.opt_str("error-format"),
-            keep_stage: matches.opt_str("keep-stage").map(|j| j.parse().unwrap()),
+            keep_stage: matches.opt_strs("keep-stage")
+                .into_iter().map(|j| j.parse().unwrap())
+                .collect(),
             host: split(matches.opt_strs("host"))
                 .into_iter()
                 .map(|x| INTERNER.intern_string(x))

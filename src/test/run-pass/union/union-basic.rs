@@ -8,6 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(unused_imports)]
+
 // aux-build:union.rs
 
 extern crate union;

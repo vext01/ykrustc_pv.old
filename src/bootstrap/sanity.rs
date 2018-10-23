@@ -176,7 +176,7 @@ pub fn check(build: &mut Build) {
         if target.contains("-none-") {
             if build.no_std(*target).is_none() {
                 let target = build.config.target_config.entry(target.clone())
-                    .or_insert(Default::default());
+                    .or_default();
 
                 target.no_std = true;
             }
@@ -192,7 +192,7 @@ pub fn check(build: &mut Build) {
             // fall back to the system toolchain in /usr before giving up
             if build.musl_root(*target).is_none() && build.config.build == *target {
                 let target = build.config.target_config.entry(target.clone())
-                                 .or_insert(Default::default());
+                    .or_default();
                 target.musl_root = Some("/usr".into());
             }
             match build.musl_root(*target) {
@@ -234,19 +234,6 @@ $ pacman -R cmake && pacman -S mingw-w64-x86_64-cmake
 ");
             }
         }
-    }
-
-    let run = |cmd: &mut Command| {
-        cmd.output().map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                   .lines().next().unwrap_or_else(|| {
-                       panic!("{:?} failed {:?}", cmd, output)
-                   }).to_string()
-        })
-    };
-    build.lldb_version = run(Command::new("lldb").arg("--version")).ok();
-    if build.lldb_version.is_some() {
-        build.lldb_python_dir = run(Command::new("lldb").arg("-P")).ok();
     }
 
     if let Some(ref s) = build.config.ccache {

@@ -18,36 +18,38 @@ use common::CodegenCx;
 use rustc::mir::{Mir, SourceScope};
 
 use libc::c_uint;
-use std::ptr;
 
 use syntax_pos::Pos;
 
-use rustc_data_structures::bitvec::BitVector;
+use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 
 use syntax_pos::BytePos;
 
 #[derive(Clone, Copy, Debug)]
-pub struct MirDebugScope {
-    pub scope_metadata: DIScope,
+pub struct MirDebugScope<'ll> {
+    pub scope_metadata: Option<&'ll DIScope>,
     // Start and end offsets of the file to which this DIScope belongs.
     // These are used to quickly determine whether some span refers to the same file.
     pub file_start_pos: BytePos,
     pub file_end_pos: BytePos,
 }
 
-impl MirDebugScope {
+impl MirDebugScope<'ll> {
     pub fn is_valid(&self) -> bool {
-        !self.scope_metadata.is_null()
+        !self.scope_metadata.is_none()
     }
 }
 
 /// Produce DIScope DIEs for each MIR Scope which has variables defined in it.
 /// If debuginfo is disabled, the returned vector is empty.
-pub fn create_mir_scopes(cx: &CodegenCx, mir: &Mir, debug_context: &FunctionDebugContext)
-    -> IndexVec<SourceScope, MirDebugScope> {
+pub fn create_mir_scopes(
+    cx: &CodegenCx<'ll, '_>,
+    mir: &Mir,
+    debug_context: &FunctionDebugContext<'ll>,
+) -> IndexVec<SourceScope, MirDebugScope<'ll>> {
     let null_scope = MirDebugScope {
-        scope_metadata: ptr::null_mut(),
+        scope_metadata: None,
         file_start_pos: BytePos(0),
         file_end_pos: BytePos(0)
     };
@@ -62,10 +64,10 @@ pub fn create_mir_scopes(cx: &CodegenCx, mir: &Mir, debug_context: &FunctionDebu
     };
 
     // Find all the scopes with variables defined in them.
-    let mut has_variables = BitVector::new(mir.source_scopes.len());
+    let mut has_variables = BitSet::new_empty(mir.source_scopes.len());
     for var in mir.vars_iter() {
         let decl = &mir.local_decls[var];
-        has_variables.insert(decl.visibility_scope.index());
+        has_variables.insert(decl.visibility_scope);
     }
 
     // Instantiate all scopes.
@@ -77,12 +79,12 @@ pub fn create_mir_scopes(cx: &CodegenCx, mir: &Mir, debug_context: &FunctionDebu
     scopes
 }
 
-fn make_mir_scope(cx: &CodegenCx,
+fn make_mir_scope(cx: &CodegenCx<'ll, '_>,
                   mir: &Mir,
-                  has_variables: &BitVector,
-                  debug_context: &FunctionDebugContextData,
+                  has_variables: &BitSet<SourceScope>,
+                  debug_context: &FunctionDebugContextData<'ll>,
                   scope: SourceScope,
-                  scopes: &mut IndexVec<SourceScope, MirDebugScope>) {
+                  scopes: &mut IndexVec<SourceScope, MirDebugScope<'ll>>) {
     if scopes[scope].is_valid() {
         return;
     }
@@ -95,21 +97,21 @@ fn make_mir_scope(cx: &CodegenCx,
         // The root is the function itself.
         let loc = span_start(cx, mir.span);
         scopes[scope] = MirDebugScope {
-            scope_metadata: debug_context.fn_metadata,
+            scope_metadata: Some(debug_context.fn_metadata),
             file_start_pos: loc.file.start_pos,
             file_end_pos: loc.file.end_pos,
         };
         return;
     };
 
-    if !has_variables.contains(scope.index()) {
+    if !has_variables.contains(scope) {
         // Do not create a DIScope if there are no variables
         // defined in this MIR Scope, to avoid debuginfo bloat.
 
         // However, we don't skip creating a nested scope if
         // our parent is the root, because we might want to
         // put arguments in the root and not have shadowing.
-        if parent_scope.scope_metadata != debug_context.fn_metadata {
+        if parent_scope.scope_metadata.unwrap() != debug_context.fn_metadata {
             scopes[scope] = parent_scope;
             return;
         }
@@ -121,12 +123,12 @@ fn make_mir_scope(cx: &CodegenCx,
                                       debug_context.defining_crate);
 
     let scope_metadata = unsafe {
-        llvm::LLVMRustDIBuilderCreateLexicalBlock(
+        Some(llvm::LLVMRustDIBuilderCreateLexicalBlock(
             DIB(cx),
-            parent_scope.scope_metadata,
+            parent_scope.scope_metadata.unwrap(),
             file_metadata,
             loc.line as c_uint,
-            loc.col.to_usize() as c_uint)
+            loc.col.to_usize() as c_uint))
     };
     scopes[scope] = MirDebugScope {
         scope_metadata,

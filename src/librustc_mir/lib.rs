@@ -14,27 +14,36 @@ Rust MIR: a lowered representation of Rust. Also: an experiment!
 
 */
 
+#![feature(nll)]
+#![feature(in_band_lifetimes)]
+#![feature(impl_header_lifetime_elision)]
 #![feature(slice_patterns)]
 #![feature(slice_sort_by_cached_key)]
-#![feature(from_ref)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![feature(catch_expr)]
 #![feature(crate_visibility_modifier)]
-#![feature(const_fn)]
 #![feature(core_intrinsics)]
+#![feature(const_fn)]
 #![feature(decl_macro)]
-#![feature(fs_read_write)]
-#![feature(macro_vis_matcher)]
 #![feature(exhaustive_patterns)]
 #![feature(range_contains)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(crate_visibility_modifier)]
+#![feature(rustc_attrs)]
 #![feature(never_type)]
 #![feature(specialization)]
 #![feature(try_trait)]
+#![feature(unicode_internals)]
+#![feature(step_trait)]
+#![feature(slice_concat_ext)]
+#![feature(if_while_or_patterns)]
+#![feature(try_from)]
+#![feature(reverse_bits)]
+#![feature(underscore_imports)]
+
+#![recursion_limit="256"]
 
 extern crate arena;
+
 #[macro_use]
 extern crate bitflags;
 #[macro_use] extern crate log;
@@ -53,6 +62,16 @@ extern crate rustc_target;
 extern crate log_settings;
 extern crate rustc_apfloat;
 extern crate byteorder;
+extern crate core;
+extern crate smallvec;
+
+// Once we can use edition 2018 in the compiler,
+// replace this with real try blocks.
+macro_rules! try_block {
+    ($($inside:tt)*) => (
+        (||{ ::std::ops::Try::from_ok({ $($inside)* }) })()
+    )
+}
 
 mod diagnostics;
 
@@ -65,16 +84,16 @@ pub mod transform;
 pub mod util;
 pub mod interpret;
 pub mod monomorphize;
+pub mod const_eval;
 
 pub use hair::pattern::check_crate as matchck_crate;
-use rustc::ty::maps::Providers;
+use rustc::ty::query::Providers;
 
 pub fn provide(providers: &mut Providers) {
     borrow_check::provide(providers);
     shim::provide(providers);
     transform::provide(providers);
-    providers.const_eval = interpret::const_eval_provider;
-    providers.const_value_to_allocation = interpret::const_value_to_allocation_provider;
+    providers.const_eval = const_eval::const_eval_provider;
     providers.check_match = hair::pattern::check_match;
 }
 

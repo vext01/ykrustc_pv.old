@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(dead_code)]
 // ignore-pretty issue #37199
 
 fn match_ref(v: Option<isize>) -> isize {

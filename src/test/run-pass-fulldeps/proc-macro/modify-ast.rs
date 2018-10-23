@@ -10,8 +10,6 @@
 
 // aux-build:modify-ast.rs
 
-#![feature(proc_macro)]
-
 extern crate modify_ast;
 
 use modify_ast::*;

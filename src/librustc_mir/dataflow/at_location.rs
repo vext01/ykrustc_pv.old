@@ -12,8 +12,7 @@
 //! locations.
 
 use rustc::mir::{BasicBlock, Location};
-use rustc_data_structures::indexed_set::{IdxSetBuf, Iter};
-use rustc_data_structures::indexed_vec::Idx;
+use rustc_data_structures::bit_set::{BitIter, BitSet, HybridBitSet};
 
 use dataflow::{BitDenotation, BlockSets, DataflowResults};
 use dataflow::move_paths::{HasMoveData, MovePathIndex};
@@ -27,6 +26,15 @@ use std::iter;
 pub trait FlowsAtLocation {
     /// Reset the state bitvector to represent the entry to block `bb`.
     fn reset_to_entry_of(&mut self, bb: BasicBlock);
+
+    /// Reset the state bitvector to represent the exit of the
+    /// terminator of block `bb`.
+    ///
+    /// **Important:** In the case of a `Call` terminator, these
+    /// effects do *not* include the result of storing the destination
+    /// of the call, since that is edge-dependent (in other words, the
+    /// effects don't apply to the unwind edge).
+    fn reset_to_exit_of(&mut self, bb: BasicBlock);
 
     /// Build gen + kill sets for statement at `loc`.
     ///
@@ -67,9 +75,9 @@ where
     BD: BitDenotation,
 {
     base_results: DataflowResults<BD>,
-    curr_state: IdxSetBuf<BD::Idx>,
-    stmt_gen: IdxSetBuf<BD::Idx>,
-    stmt_kill: IdxSetBuf<BD::Idx>,
+    curr_state: BitSet<BD::Idx>,
+    stmt_gen: HybridBitSet<BD::Idx>,
+    stmt_kill: HybridBitSet<BD::Idx>,
 }
 
 impl<BD> FlowAtLocation<BD>
@@ -96,9 +104,9 @@ where
 
     pub fn new(results: DataflowResults<BD>) -> Self {
         let bits_per_block = results.sets().bits_per_block();
-        let curr_state = IdxSetBuf::new_empty(bits_per_block);
-        let stmt_gen = IdxSetBuf::new_empty(bits_per_block);
-        let stmt_kill = IdxSetBuf::new_empty(bits_per_block);
+        let curr_state = BitSet::new_empty(bits_per_block);
+        let stmt_gen = HybridBitSet::new_empty(bits_per_block);
+        let stmt_kill = HybridBitSet::new_empty(bits_per_block);
         FlowAtLocation {
             base_results: results,
             curr_state: curr_state,
@@ -112,12 +120,12 @@ where
         self.base_results.operator()
     }
 
-    pub fn contains(&self, x: &BD::Idx) -> bool {
+    pub fn contains(&self, x: BD::Idx) -> bool {
         self.curr_state.contains(x)
     }
 
     /// Returns an iterator over the elements present in the current state.
-    pub fn iter_incoming(&self) -> iter::Peekable<Iter<BD::Idx>> {
+    pub fn iter_incoming(&self) -> iter::Peekable<BitIter<BD::Idx>> {
         self.curr_state.iter().peekable()
     }
 
@@ -126,7 +134,7 @@ where
     /// Invokes `f` with an iterator over the resulting state.
     pub fn with_iter_outgoing<F>(&self, f: F)
     where
-        F: FnOnce(Iter<BD::Idx>),
+        F: FnOnce(BitIter<BD::Idx>),
     {
         let mut curr_state = self.curr_state.clone();
         curr_state.union(&self.stmt_gen);
@@ -139,7 +147,13 @@ impl<BD> FlowsAtLocation for FlowAtLocation<BD>
     where BD: BitDenotation
 {
     fn reset_to_entry_of(&mut self, bb: BasicBlock) {
-        (*self.curr_state).clone_from(self.base_results.sets().on_entry_set_for(bb.index()));
+        self.curr_state.overwrite(self.base_results.sets().on_entry_set_for(bb.index()));
+    }
+
+    fn reset_to_exit_of(&mut self, bb: BasicBlock) {
+        self.reset_to_entry_of(bb);
+        self.curr_state.union(self.base_results.sets().gen_set_for(bb.index()));
+        self.curr_state.subtract(self.base_results.sets().kill_set_for(bb.index()));
     }
 
     fn reconstruct_statement_effect(&mut self, loc: Location) {
@@ -204,27 +218,34 @@ where
     T: HasMoveData<'tcx> + BitDenotation<Idx = MovePathIndex>,
 {
     pub fn has_any_child_of(&self, mpi: T::Idx) -> Option<T::Idx> {
+        // We process `mpi` before the loop below, for two reasons:
+        // - it's a little different from the loop case (we don't traverse its
+        //   siblings);
+        // - ~99% of the time the loop isn't reached, and this code is hot, so
+        //   we don't want to allocate `todo` unnecessarily.
+        if self.contains(mpi) {
+            return Some(mpi);
+        }
         let move_data = self.operator().move_data();
+        let move_path = &move_data.move_paths[mpi];
+        let mut todo = if let Some(child) = move_path.first_child {
+            vec![child]
+        } else {
+            return None;
+        };
 
-        let mut todo = vec![mpi];
-        let mut push_siblings = false; // don't look at siblings of original `mpi`.
         while let Some(mpi) = todo.pop() {
-            if self.contains(&mpi) {
+            if self.contains(mpi) {
                 return Some(mpi);
             }
             let move_path = &move_data.move_paths[mpi];
             if let Some(child) = move_path.first_child {
                 todo.push(child);
             }
-            if push_siblings {
-                if let Some(sibling) = move_path.next_sibling {
-                    todo.push(sibling);
-                }
-            } else {
-                // after we've processed the original `mpi`, we should
-                // always traverse the siblings of any of its
-                // children.
-                push_siblings = true;
+            // After we've processed the original `mpi`, we should always
+            // traverse the siblings of any of its children.
+            if let Some(sibling) = move_path.next_sibling {
+                todo.push(sibling);
             }
         }
         return None;

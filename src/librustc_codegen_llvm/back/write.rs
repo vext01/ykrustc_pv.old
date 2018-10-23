@@ -10,31 +10,34 @@
 
 use attributes;
 use back::bytecode::{self, RLIB_BYTECODE_EXTENSION};
-use back::lto::{self, ModuleBuffer, ThinBuffer};
+use back::lto::{self, ModuleBuffer, ThinBuffer, SerializedModule};
 use back::link::{self, get_linker, remove};
 use back::command::Command;
 use back::linker::LinkerInfo;
 use back::symbol_export::ExportedSymbols;
 use base;
 use consts;
-use rustc_incremental::{copy_cgu_workproducts_to_incr_comp_cache_dir, in_incr_comp_dir};
+use memmap;
+use rustc_incremental::{copy_cgu_workproducts_to_incr_comp_cache_dir,
+                        in_incr_comp_dir, in_incr_comp_dir_sess};
 use rustc::dep_graph::{WorkProduct, WorkProductId, WorkProductFileKind};
-use rustc::middle::cstore::{LinkMeta, EncodedMetadata};
-use rustc::session::config::{self, OutputFilenames, OutputType, Passes, SomePasses,
-                             AllPasses, Sanitizer, Lto};
+use rustc::dep_graph::cgu_reuse_tracker::CguReuseTracker;
+use rustc::middle::cstore::EncodedMetadata;
+use rustc::session::config::{self, OutputFilenames, OutputType, Passes, Sanitizer, Lto};
 use rustc::session::Session;
 use rustc::util::nodemap::FxHashMap;
 use time_graph::{self, TimeGraph, Timeline};
-use llvm;
-use llvm::{ModuleRef, TargetMachineRef, PassManagerRef, DiagnosticInfoRef};
-use llvm::{SMDiagnosticRef, ContextRef};
-use {CodegenResults, ModuleSource, ModuleCodegen, CompiledModule, ModuleKind};
+use llvm::{self, DiagnosticInfo, PassManager, SMDiagnostic};
+use llvm_util;
+use {CodegenResults, ModuleCodegen, CompiledModule, ModuleKind, // ModuleLlvm,
+     CachedModuleCodegen};
 use CrateInfo;
 use rustc::hir::def_id::{CrateNum, LOCAL_CRATE};
 use rustc::ty::TyCtxt;
 use rustc::util::common::{time_ext, time_depth, set_time_depth, print_time_passes_entry};
-use rustc::util::common::path2cstr;
-use rustc::util::fs::{link_or_copy};
+use rustc_fs_util::{path2cstr, link_or_copy};
+use rustc_data_structures::small_c_str::SmallCStr;
+use rustc_data_structures::svh::Svh;
 use errors::{self, Handler, Level, DiagnosticBuilder, FatalError, DiagnosticId};
 use errors::emitter::{Emitter};
 use syntax::attr;
@@ -85,6 +88,8 @@ pub const TLS_MODEL_ARGS : [(&'static str, llvm::ThreadLocalMode); 4] = [
     ("local-exec", llvm::ThreadLocalMode::LocalExec),
 ];
 
+const PRE_THIN_LTO_BC_EXT: &str = "pre-thin-lto.bc";
+
 pub fn llvm_err(handler: &errors::Handler, msg: String) -> FatalError {
     match llvm::last_error() {
         Some(err) => handler.fatal(&format!("{}: {}", msg, err)),
@@ -94,9 +99,9 @@ pub fn llvm_err(handler: &errors::Handler, msg: String) -> FatalError {
 
 pub fn write_output_file(
         handler: &errors::Handler,
-        target: llvm::TargetMachineRef,
-        pm: llvm::PassManagerRef,
-        m: ModuleRef,
+        target: &'ll llvm::TargetMachine,
+        pm: &llvm::PassManager<'ll>,
+        m: &'ll llvm::Module,
         output: &Path,
         file_type: llvm::FileType) -> Result<(), FatalError> {
     unsafe {
@@ -130,7 +135,10 @@ fn get_llvm_opt_size(optimize: config::OptLevel) -> llvm::CodeGenOptSize {
     }
 }
 
-pub fn create_target_machine(sess: &Session, find_features: bool) -> TargetMachineRef {
+pub fn create_target_machine(
+    sess: &Session,
+    find_features: bool,
+) -> &'static mut llvm::TargetMachine {
     target_machine_factory(sess, find_features)().unwrap_or_else(|err| {
         llvm_err(sess.diagnostic(), err).raise()
     })
@@ -140,7 +148,7 @@ pub fn create_target_machine(sess: &Session, find_features: bool) -> TargetMachi
 // that `is_pie_binary` is false. When we discover LLVM target features
 // `sess.crate_types` is uninitialized so we cannot access it.
 pub fn target_machine_factory(sess: &Session, find_features: bool)
-    -> Arc<Fn() -> Result<TargetMachineRef, String> + Send + Sync>
+    -> Arc<dyn Fn() -> Result<&'static mut llvm::TargetMachine, String> + Send + Sync>
 {
     let reloc_model = get_reloc_model(sess);
 
@@ -169,19 +177,28 @@ pub fn target_machine_factory(sess: &Session, find_features: bool)
         None => llvm::CodeModel::None,
     };
 
-    let singlethread = sess.target.target.options.singlethread;
+    let features = attributes::llvm_target_features(sess).collect::<Vec<_>>();
+    let mut singlethread = sess.target.target.options.singlethread;
 
-    let triple = &sess.target.target.llvm_target;
+    // On the wasm target once the `atomics` feature is enabled that means that
+    // we're no longer single-threaded, or otherwise we don't want LLVM to
+    // lower atomic operations to single-threaded operations.
+    if singlethread &&
+        sess.target.target.llvm_target.contains("wasm32") &&
+        features.iter().any(|s| *s == "+atomics")
+    {
+        singlethread = false;
+    }
 
-    let triple = CString::new(triple.as_bytes()).unwrap();
-    let cpu = sess.target_cpu();
-    let cpu = CString::new(cpu.as_bytes()).unwrap();
-    let features = attributes::llvm_target_features(sess)
-        .collect::<Vec<_>>()
-        .join(",");
+    let triple = SmallCStr::new(&sess.target.target.llvm_target);
+    let cpu = SmallCStr::new(llvm_util::target_cpu(sess));
+    let features = features.join(",");
     let features = CString::new(features).unwrap();
     let is_pie_binary = !find_features && is_pie_binary(sess);
     let trap_unreachable = sess.target.target.options.trap_unreachable;
+    let emit_stack_size_section = sess.opts.debugging_opts.emit_stack_sizes;
+
+    let asm_comments = sess.asm_comments();
 
     Arc::new(move || {
         let tm = unsafe {
@@ -196,15 +213,15 @@ pub fn target_machine_factory(sess: &Session, find_features: bool)
                 fdata_sections,
                 trap_unreachable,
                 singlethread,
+                asm_comments,
+                emit_stack_size_section,
             )
         };
 
-        if tm.is_null() {
-            Err(format!("Could not create LLVM TargetMachine for triple: {}",
-                        triple.to_str().unwrap()))
-        } else {
-            Ok(tm)
-        }
+        tm.ok_or_else(|| {
+            format!("Could not create LLVM TargetMachine for triple: {}",
+                    triple.to_str().unwrap())
+        })
     })
 }
 
@@ -223,6 +240,7 @@ pub struct ModuleConfig {
     pgo_use: String,
 
     // Flags indicating which outputs to produce.
+    pub emit_pre_thin_lto_bc: bool,
     emit_no_opt_bc: bool,
     emit_bc: bool,
     emit_bc_compressed: bool,
@@ -232,7 +250,7 @@ pub struct ModuleConfig {
     emit_obj: bool,
     // Miscellaneous flags.  These are mostly copied from command-line
     // options.
-    no_verify: bool,
+    pub verify_llvm_ir: bool,
     no_prepopulate_passes: bool,
     no_builtins: bool,
     time_passes: bool,
@@ -260,6 +278,7 @@ impl ModuleConfig {
             pgo_use: String::new(),
 
             emit_no_opt_bc: false,
+            emit_pre_thin_lto_bc: false,
             emit_bc: false,
             emit_bc_compressed: false,
             emit_lto_bc: false,
@@ -271,7 +290,7 @@ impl ModuleConfig {
             embed_bitcode_marker: false,
             no_integrated_as: false,
 
-            no_verify: false,
+            verify_llvm_ir: false,
             no_prepopulate_passes: false,
             no_builtins: false,
             time_passes: false,
@@ -283,15 +302,15 @@ impl ModuleConfig {
     }
 
     fn set_flags(&mut self, sess: &Session, no_builtins: bool) {
-        self.no_verify = sess.no_verify();
+        self.verify_llvm_ir = sess.verify_llvm_ir();
         self.no_prepopulate_passes = sess.opts.cg.no_prepopulate_passes;
         self.no_builtins = no_builtins || sess.target.target.options.no_builtins;
         self.time_passes = sess.time_passes();
         self.inline_threshold = sess.opts.cg.inline_threshold;
-        self.obj_is_bitcode = sess.target.target.options.obj_is_bitcode;
+        self.obj_is_bitcode = sess.target.target.options.obj_is_bitcode ||
+                              sess.opts.debugging_opts.cross_lang_lto.enabled();
         let embed_bitcode = sess.target.target.options.embed_bitcode ||
-                            sess.opts.debugging_opts.embed_bitcode ||
-                            sess.opts.debugging_opts.cross_lang_lto.embed_bitcode();
+                            sess.opts.debugging_opts.embed_bitcode;
         if embed_bitcode {
             match sess.opts.optimize {
                 config::OptLevel::No |
@@ -329,7 +348,7 @@ struct AssemblerCommand {
 /// Additional resources used by optimize_and_codegen (not module specific)
 #[derive(Clone)]
 pub struct CodegenContext {
-    // Resouces needed when running LTO
+    // Resources needed when running LTO
     pub time_passes: bool,
     pub lto: Lto,
     pub no_landing_pads: bool,
@@ -343,10 +362,10 @@ pub struct CodegenContext {
     regular_module_config: Arc<ModuleConfig>,
     metadata_module_config: Arc<ModuleConfig>,
     allocator_module_config: Arc<ModuleConfig>,
-    pub tm_factory: Arc<Fn() -> Result<TargetMachineRef, String> + Send + Sync>,
+    pub tm_factory: Arc<dyn Fn() -> Result<&'static mut llvm::TargetMachine, String> + Send + Sync>,
     pub msvc_imps_needed: bool,
     pub target_pointer_width: String,
-    debuginfo: config::DebugInfoLevel,
+    debuginfo: config::DebugInfo,
 
     // Number of cgus excluding the allocator/metadata modules
     pub total_cgus: usize,
@@ -361,8 +380,10 @@ pub struct CodegenContext {
     // The incremental compilation session directory, or None if we are not
     // compiling incrementally
     pub incr_comp_session_dir: Option<PathBuf>,
+    // Used to update CGU re-use information during the thinlto phase.
+    pub cgu_reuse_tracker: CguReuseTracker,
     // Channel back to the main control thread to send messages to
-    coordinator_send: Sender<Box<Any + Send>>,
+    coordinator_send: Sender<Box<dyn Any + Send>>,
     // A reference to the TimeGraph so we can register timings. None means that
     // measuring is disabled.
     time_graph: Option<TimeGraph>,
@@ -392,39 +413,37 @@ impl CodegenContext {
             let cgu = Some(&module.name[..]);
             let path = self.output_filenames.temp_path_ext(&ext, cgu);
             let cstr = path2cstr(&path);
-            let llmod = module.llvm().unwrap().llmod;
+            let llmod = module.module_llvm.llmod();
             llvm::LLVMWriteBitcodeToFile(llmod, cstr.as_ptr());
         }
     }
 }
 
-struct DiagnosticHandlers<'a> {
-    inner: Box<(&'a CodegenContext, &'a Handler)>,
-    llcx: ContextRef,
+pub struct DiagnosticHandlers<'a> {
+    data: *mut (&'a CodegenContext, &'a Handler),
+    llcx: &'a llvm::Context,
 }
 
 impl<'a> DiagnosticHandlers<'a> {
-    fn new(cgcx: &'a CodegenContext,
-           handler: &'a Handler,
-           llcx: ContextRef) -> DiagnosticHandlers<'a> {
-        let data = Box::new((cgcx, handler));
+    pub fn new(cgcx: &'a CodegenContext,
+               handler: &'a Handler,
+               llcx: &'a llvm::Context) -> Self {
+        let data = Box::into_raw(Box::new((cgcx, handler)));
         unsafe {
-            let arg = &*data as &(_, _) as *const _ as *mut _;
-            llvm::LLVMRustSetInlineAsmDiagnosticHandler(llcx, inline_asm_handler, arg);
-            llvm::LLVMContextSetDiagnosticHandler(llcx, diagnostic_handler, arg);
+            llvm::LLVMRustSetInlineAsmDiagnosticHandler(llcx, inline_asm_handler, data as *mut _);
+            llvm::LLVMContextSetDiagnosticHandler(llcx, diagnostic_handler, data as *mut _);
         }
-        DiagnosticHandlers {
-            inner: data,
-            llcx: llcx,
-        }
+        DiagnosticHandlers { data, llcx }
     }
 }
 
 impl<'a> Drop for DiagnosticHandlers<'a> {
     fn drop(&mut self) {
+        use std::ptr::null_mut;
         unsafe {
-            llvm::LLVMRustSetInlineAsmDiagnosticHandler(self.llcx, inline_asm_handler, 0 as *mut _);
-            llvm::LLVMContextSetDiagnosticHandler(self.llcx, diagnostic_handler, 0 as *mut _);
+            llvm::LLVMRustSetInlineAsmDiagnosticHandler(self.llcx, inline_asm_handler, null_mut());
+            llvm::LLVMContextSetDiagnosticHandler(self.llcx, diagnostic_handler, null_mut());
+            drop(Box::from_raw(self.data));
         }
     }
 }
@@ -435,7 +454,7 @@ unsafe extern "C" fn report_inline_asm<'a, 'b>(cgcx: &'a CodegenContext,
     cgcx.diag_emitter.inline_asm_error(cookie as u32, msg.to_string());
 }
 
-unsafe extern "C" fn inline_asm_handler(diag: SMDiagnosticRef,
+unsafe extern "C" fn inline_asm_handler(diag: &SMDiagnostic,
                                         user: *const c_void,
                                         cookie: c_uint) {
     if user.is_null() {
@@ -449,7 +468,7 @@ unsafe extern "C" fn inline_asm_handler(diag: SMDiagnosticRef,
     report_inline_asm(cgcx, &msg, cookie);
 }
 
-unsafe extern "C" fn diagnostic_handler(info: DiagnosticInfoRef, user: *mut c_void) {
+unsafe extern "C" fn diagnostic_handler(info: &DiagnosticInfo, user: *mut c_void) {
     if user.is_null() {
         return
     }
@@ -464,8 +483,8 @@ unsafe extern "C" fn diagnostic_handler(info: DiagnosticInfoRef, user: *mut c_vo
 
         llvm::diagnostic::Optimization(opt) => {
             let enabled = match cgcx.remark {
-                AllPasses => true,
-                SomePasses(ref v) => v.iter().any(|s| *s == opt.pass_name),
+                Passes::All => true,
+                Passes::Some(ref v) => v.iter().any(|s| *s == opt.pass_name),
             };
 
             if enabled {
@@ -478,10 +497,11 @@ unsafe extern "C" fn diagnostic_handler(info: DiagnosticInfoRef, user: *mut c_vo
                                                 opt.message));
             }
         }
-        llvm::diagnostic::PGO(diagnostic_ref) => {
+        llvm::diagnostic::PGO(diagnostic_ref) |
+        llvm::diagnostic::Linker(diagnostic_ref) => {
             let msg = llvm::build_string(|s| {
                 llvm::LLVMRustWriteDiagnosticInfoToString(diagnostic_ref, s)
-            }).expect("non-UTF8 PGO diagnostic");
+            }).expect("non-UTF8 diagnostic");
             diag_handler.warn(&msg);
         }
         llvm::diagnostic::UnknownDiagnostic(..) => {},
@@ -496,13 +516,9 @@ unsafe fn optimize(cgcx: &CodegenContext,
                    timeline: &mut Timeline)
     -> Result<(), FatalError>
 {
-    let (llmod, llcx, tm) = match module.source {
-        ModuleSource::Codegened(ref llvm) => (llvm.llmod, llvm.llcx, llvm.tm),
-        ModuleSource::Preexisting(_) => {
-            bug!("optimize_and_codegen: called with ModuleSource::Preexisting")
-        }
-    };
-
+    let llmod = module.module_llvm.llmod();
+    let llcx = &*module.module_llvm.llcx;
+    let tm = &*module.module_llvm.tm;
     let _handlers = DiagnosticHandlers::new(cgcx, diag_handler, llcx);
 
     let module_name = module.name.clone();
@@ -522,50 +538,84 @@ unsafe fn optimize(cgcx: &CodegenContext,
         let fpm = llvm::LLVMCreateFunctionPassManagerForModule(llmod);
         let mpm = llvm::LLVMCreatePassManager();
 
-        // If we're verifying or linting, add them to the function pass
-        // manager.
-        let addpass = |pass_name: &str| {
-            let pass_name = CString::new(pass_name).unwrap();
-            let pass = llvm::LLVMRustFindAndCreatePass(pass_name.as_ptr());
-            if pass.is_null() {
-                return false;
-            }
-            let pass_manager = match llvm::LLVMRustPassKind(pass) {
-                llvm::PassKind::Function => fpm,
-                llvm::PassKind::Module => mpm,
-                llvm::PassKind::Other => {
-                    diag_handler.err("Encountered LLVM pass kind we can't handle");
-                    return true
-                },
+        {
+            // If we're verifying or linting, add them to the function pass
+            // manager.
+            let addpass = |pass_name: &str| {
+                let pass_name = SmallCStr::new(pass_name);
+                let pass = match llvm::LLVMRustFindAndCreatePass(pass_name.as_ptr()) {
+                    Some(pass) => pass,
+                    None => return false,
+                };
+                let pass_manager = match llvm::LLVMRustPassKind(pass) {
+                    llvm::PassKind::Function => &*fpm,
+                    llvm::PassKind::Module => &*mpm,
+                    llvm::PassKind::Other => {
+                        diag_handler.err("Encountered LLVM pass kind we can't handle");
+                        return true
+                    },
+                };
+                llvm::LLVMRustAddPass(pass_manager, pass);
+                true
             };
-            llvm::LLVMRustAddPass(pass_manager, pass);
-            true
-        };
 
-        if !config.no_verify { assert!(addpass("verify")); }
-        if !config.no_prepopulate_passes {
-            llvm::LLVMRustAddAnalysisPasses(tm, fpm, llmod);
-            llvm::LLVMRustAddAnalysisPasses(tm, mpm, llmod);
-            let opt_level = config.opt_level.unwrap_or(llvm::CodeGenOptLevel::None);
-            let prepare_for_thin_lto = cgcx.lto == Lto::Thin || cgcx.lto == Lto::ThinLocal;
-            with_llvm_pmb(llmod, &config, opt_level, prepare_for_thin_lto, &mut |b| {
-                llvm::LLVMPassManagerBuilderPopulateFunctionPassManager(b, fpm);
-                llvm::LLVMPassManagerBuilderPopulateModulePassManager(b, mpm);
-            })
-        }
+            if config.verify_llvm_ir { assert!(addpass("verify")); }
 
-        for pass in &config.passes {
-            if !addpass(pass) {
-                diag_handler.warn(&format!("unknown pass `{}`, ignoring",
-                                           pass));
+            // Some options cause LLVM bitcode to be emitted, which uses ThinLTOBuffers, so we need
+            // to make sure we run LLVM's NameAnonGlobals pass when emitting bitcode; otherwise
+            // we'll get errors in LLVM.
+            let using_thin_buffers = llvm::LLVMRustThinLTOAvailable() && (config.emit_bc
+                || config.obj_is_bitcode || config.emit_bc_compressed || config.embed_bitcode);
+            let mut have_name_anon_globals_pass = false;
+            if !config.no_prepopulate_passes {
+                llvm::LLVMRustAddAnalysisPasses(tm, fpm, llmod);
+                llvm::LLVMRustAddAnalysisPasses(tm, mpm, llmod);
+                let opt_level = config.opt_level.unwrap_or(llvm::CodeGenOptLevel::None);
+                let prepare_for_thin_lto = cgcx.lto == Lto::Thin || cgcx.lto == Lto::ThinLocal ||
+                    (cgcx.lto != Lto::Fat && cgcx.opts.debugging_opts.cross_lang_lto.enabled());
+                have_name_anon_globals_pass = have_name_anon_globals_pass || prepare_for_thin_lto;
+                if using_thin_buffers && !prepare_for_thin_lto {
+                    assert!(addpass("name-anon-globals"));
+                    have_name_anon_globals_pass = true;
+                }
+                with_llvm_pmb(llmod, &config, opt_level, prepare_for_thin_lto, &mut |b| {
+                    llvm::LLVMPassManagerBuilderPopulateFunctionPassManager(b, fpm);
+                    llvm::LLVMPassManagerBuilderPopulateModulePassManager(b, mpm);
+                })
             }
-        }
 
-        for pass in &cgcx.plugin_passes {
-            if !addpass(pass) {
-                diag_handler.err(&format!("a plugin asked for LLVM pass \
-                                           `{}` but LLVM does not \
-                                           recognize it", pass));
+            for pass in &config.passes {
+                if !addpass(pass) {
+                    diag_handler.warn(&format!("unknown pass `{}`, ignoring",
+                                            pass));
+                }
+                if pass == "name-anon-globals" {
+                    have_name_anon_globals_pass = true;
+                }
+            }
+
+            for pass in &cgcx.plugin_passes {
+                if !addpass(pass) {
+                    diag_handler.err(&format!("a plugin asked for LLVM pass \
+                                            `{}` but LLVM does not \
+                                            recognize it", pass));
+                }
+                if pass == "name-anon-globals" {
+                    have_name_anon_globals_pass = true;
+                }
+            }
+
+            if using_thin_buffers && !have_name_anon_globals_pass {
+                // As described above, this will probably cause an error in LLVM
+                if config.no_prepopulate_passes {
+                    diag_handler.err("The current compilation is going to use thin LTO buffers \
+                                     without running LLVM's NameAnonGlobals pass. \
+                                     This will likely cause errors in LLVM. Consider adding \
+                                     -C passes=name-anon-globals to the compiler command line.");
+                } else {
+                    bug!("We are using thin LTO buffers without running the NameAnonGlobals pass. \
+                         This will likely cause errors in LLVM and should never happen.");
+                }
             }
         }
 
@@ -594,7 +644,8 @@ unsafe fn optimize(cgcx: &CodegenContext,
 }
 
 fn generate_lto_work(cgcx: &CodegenContext,
-                     modules: Vec<ModuleCodegen>)
+                     modules: Vec<ModuleCodegen>,
+                     import_only_modules: Vec<(SerializedModule, WorkProduct)>)
     -> Vec<(WorkItem, u64)>
 {
     let mut timeline = cgcx.time_graph.as_ref().map(|tg| {
@@ -602,13 +653,22 @@ fn generate_lto_work(cgcx: &CodegenContext,
                  CODEGEN_WORK_PACKAGE_KIND,
                  "generate lto")
     }).unwrap_or(Timeline::noop());
-    let lto_modules = lto::run(cgcx, modules, &mut timeline)
+    let (lto_modules, copy_jobs) = lto::run(cgcx, modules, import_only_modules, &mut timeline)
         .unwrap_or_else(|e| e.raise());
 
-    lto_modules.into_iter().map(|module| {
+    let lto_modules = lto_modules.into_iter().map(|module| {
         let cost = module.cost();
         (WorkItem::LTO(module), cost)
-    }).collect()
+    });
+
+    let copy_jobs = copy_jobs.into_iter().map(|wp| {
+        (WorkItem::CopyPostLtoArtifacts(CachedModuleCodegen {
+            name: wp.cgu_name.clone(),
+            source: wp,
+        }), 0)
+    });
+
+    lto_modules.chain(copy_jobs).collect()
 }
 
 unsafe fn codegen(cgcx: &CodegenContext,
@@ -619,192 +679,188 @@ unsafe fn codegen(cgcx: &CodegenContext,
     -> Result<CompiledModule, FatalError>
 {
     timeline.record("codegen");
-    let (llmod, llcx, tm) = match module.source {
-        ModuleSource::Codegened(ref llvm) => (llvm.llmod, llvm.llcx, llvm.tm),
-        ModuleSource::Preexisting(_) => {
-            bug!("codegen: called with ModuleSource::Preexisting")
-        }
-    };
-    let module_name = module.name.clone();
-    let module_name = Some(&module_name[..]);
-    let handlers = DiagnosticHandlers::new(cgcx, diag_handler, llcx);
-
-    if cgcx.msvc_imps_needed {
-        create_msvc_imps(cgcx, llcx, llmod);
-    }
-
-    // A codegen-specific pass manager is used to generate object
-    // files for an LLVM module.
-    //
-    // Apparently each of these pass managers is a one-shot kind of
-    // thing, so we create a new one for each type of output. The
-    // pass manager passed to the closure should be ensured to not
-    // escape the closure itself, and the manager should only be
-    // used once.
-    unsafe fn with_codegen<F, R>(tm: TargetMachineRef,
-                                 llmod: ModuleRef,
-                                 no_builtins: bool,
-                                 f: F) -> R
-        where F: FnOnce(PassManagerRef) -> R,
     {
-        let cpm = llvm::LLVMCreatePassManager();
-        llvm::LLVMRustAddAnalysisPasses(tm, cpm, llmod);
-        llvm::LLVMRustAddLibraryInfo(cpm, llmod, no_builtins);
-        f(cpm)
-    }
+        let llmod = module.module_llvm.llmod();
+        let llcx = &*module.module_llvm.llcx;
+        let tm = &*module.module_llvm.tm;
+        let module_name = module.name.clone();
+        let module_name = Some(&module_name[..]);
+        let handlers = DiagnosticHandlers::new(cgcx, diag_handler, llcx);
 
-    // If we don't have the integrated assembler, then we need to emit asm
-    // from LLVM and use `gcc` to create the object file.
-    let asm_to_obj = config.emit_obj && config.no_integrated_as;
+        if cgcx.msvc_imps_needed {
+            create_msvc_imps(cgcx, llcx, llmod);
+        }
 
-    // Change what we write and cleanup based on whether obj files are
-    // just llvm bitcode. In that case write bitcode, and possibly
-    // delete the bitcode if it wasn't requested. Don't generate the
-    // machine code, instead copy the .o file from the .bc
-    let write_bc = config.emit_bc || config.obj_is_bitcode;
-    let rm_bc = !config.emit_bc && config.obj_is_bitcode;
-    let write_obj = config.emit_obj && !config.obj_is_bitcode && !asm_to_obj;
-    let copy_bc_to_obj = config.emit_obj && config.obj_is_bitcode;
+        // A codegen-specific pass manager is used to generate object
+        // files for an LLVM module.
+        //
+        // Apparently each of these pass managers is a one-shot kind of
+        // thing, so we create a new one for each type of output. The
+        // pass manager passed to the closure should be ensured to not
+        // escape the closure itself, and the manager should only be
+        // used once.
+        unsafe fn with_codegen<'ll, F, R>(tm: &'ll llvm::TargetMachine,
+                                    llmod: &'ll llvm::Module,
+                                    no_builtins: bool,
+                                    f: F) -> R
+            where F: FnOnce(&'ll mut PassManager<'ll>) -> R,
+        {
+            let cpm = llvm::LLVMCreatePassManager();
+            llvm::LLVMRustAddAnalysisPasses(tm, cpm, llmod);
+            llvm::LLVMRustAddLibraryInfo(cpm, llmod, no_builtins);
+            f(cpm)
+        }
 
-    let bc_out = cgcx.output_filenames.temp_path(OutputType::Bitcode, module_name);
-    let obj_out = cgcx.output_filenames.temp_path(OutputType::Object, module_name);
+        // If we don't have the integrated assembler, then we need to emit asm
+        // from LLVM and use `gcc` to create the object file.
+        let asm_to_obj = config.emit_obj && config.no_integrated_as;
+
+        // Change what we write and cleanup based on whether obj files are
+        // just llvm bitcode. In that case write bitcode, and possibly
+        // delete the bitcode if it wasn't requested. Don't generate the
+        // machine code, instead copy the .o file from the .bc
+        let write_bc = config.emit_bc || config.obj_is_bitcode;
+        let rm_bc = !config.emit_bc && config.obj_is_bitcode;
+        let write_obj = config.emit_obj && !config.obj_is_bitcode && !asm_to_obj;
+        let copy_bc_to_obj = config.emit_obj && config.obj_is_bitcode;
+
+        let bc_out = cgcx.output_filenames.temp_path(OutputType::Bitcode, module_name);
+        let obj_out = cgcx.output_filenames.temp_path(OutputType::Object, module_name);
 
 
-    if write_bc || config.emit_bc_compressed || config.embed_bitcode {
-        let thin;
-        let old;
-        let data = if llvm::LLVMRustThinLTOAvailable() {
-            thin = ThinBuffer::new(llmod);
-            thin.data()
-        } else {
-            old = ModuleBuffer::new(llmod);
-            old.data()
-        };
-        timeline.record("make-bc");
+        if write_bc || config.emit_bc_compressed || config.embed_bitcode {
+            let thin;
+            let old;
+            let data = if llvm::LLVMRustThinLTOAvailable() {
+                thin = ThinBuffer::new(llmod);
+                thin.data()
+            } else {
+                old = ModuleBuffer::new(llmod);
+                old.data()
+            };
+            timeline.record("make-bc");
 
-        if write_bc {
-            if let Err(e) = fs::write(&bc_out, data) {
-                diag_handler.err(&format!("failed to write bytecode: {}", e));
+            if write_bc {
+                if let Err(e) = fs::write(&bc_out, data) {
+                    diag_handler.err(&format!("failed to write bytecode: {}", e));
+                }
+                timeline.record("write-bc");
             }
-            timeline.record("write-bc");
-        }
 
-        if config.embed_bitcode {
-            embed_bitcode(cgcx, llcx, llmod, Some(data));
-            timeline.record("embed-bc");
-        }
-
-        if config.emit_bc_compressed {
-            let dst = bc_out.with_extension(RLIB_BYTECODE_EXTENSION);
-            let data = bytecode::encode(&module.llmod_id, data);
-            if let Err(e) = fs::write(&dst, data) {
-                diag_handler.err(&format!("failed to write bytecode: {}", e));
+            if config.embed_bitcode {
+                embed_bitcode(cgcx, llcx, llmod, Some(data));
+                timeline.record("embed-bc");
             }
-            timeline.record("compress-bc");
+
+            if config.emit_bc_compressed {
+                let dst = bc_out.with_extension(RLIB_BYTECODE_EXTENSION);
+                let data = bytecode::encode(&module.name, data);
+                if let Err(e) = fs::write(&dst, data) {
+                    diag_handler.err(&format!("failed to write bytecode: {}", e));
+                }
+                timeline.record("compress-bc");
+            }
+        } else if config.embed_bitcode_marker {
+            embed_bitcode(cgcx, llcx, llmod, None);
         }
-    } else if config.embed_bitcode_marker {
-        embed_bitcode(cgcx, llcx, llmod, None);
-    }
 
-    time_ext(config.time_passes, None, &format!("codegen passes [{}]", module_name.unwrap()),
-         || -> Result<(), FatalError> {
-        if config.emit_ir {
-            let out = cgcx.output_filenames.temp_path(OutputType::LlvmAssembly, module_name);
-            let out = path2cstr(&out);
+        time_ext(config.time_passes, None, &format!("codegen passes [{}]", module_name.unwrap()),
+            || -> Result<(), FatalError> {
+            if config.emit_ir {
+                let out = cgcx.output_filenames.temp_path(OutputType::LlvmAssembly, module_name);
+                let out = path2cstr(&out);
 
-            extern "C" fn demangle_callback(input_ptr: *const c_char,
-                                            input_len: size_t,
-                                            output_ptr: *mut c_char,
-                                            output_len: size_t) -> size_t {
-                let input = unsafe {
-                    slice::from_raw_parts(input_ptr as *const u8, input_len as usize)
-                };
+                extern "C" fn demangle_callback(input_ptr: *const c_char,
+                                                input_len: size_t,
+                                                output_ptr: *mut c_char,
+                                                output_len: size_t) -> size_t {
+                    let input = unsafe {
+                        slice::from_raw_parts(input_ptr as *const u8, input_len as usize)
+                    };
 
-                let input = match str::from_utf8(input) {
-                    Ok(s) => s,
-                    Err(_) => return 0,
-                };
+                    let input = match str::from_utf8(input) {
+                        Ok(s) => s,
+                        Err(_) => return 0,
+                    };
 
-                let output = unsafe {
-                    slice::from_raw_parts_mut(output_ptr as *mut u8, output_len as usize)
-                };
-                let mut cursor = io::Cursor::new(output);
+                    let output = unsafe {
+                        slice::from_raw_parts_mut(output_ptr as *mut u8, output_len as usize)
+                    };
+                    let mut cursor = io::Cursor::new(output);
 
-                let demangled = match rustc_demangle::try_demangle(input) {
-                    Ok(d) => d,
-                    Err(_) => return 0,
-                };
+                    let demangled = match rustc_demangle::try_demangle(input) {
+                        Ok(d) => d,
+                        Err(_) => return 0,
+                    };
 
-                if let Err(_) = write!(cursor, "{:#}", demangled) {
-                    // Possible only if provided buffer is not big enough
-                    return 0;
+                    if let Err(_) = write!(cursor, "{:#}", demangled) {
+                        // Possible only if provided buffer is not big enough
+                        return 0;
+                    }
+
+                    cursor.position() as size_t
                 }
 
-                cursor.position() as size_t
+                with_codegen(tm, llmod, config.no_builtins, |cpm| {
+                    llvm::LLVMRustPrintModule(cpm, llmod, out.as_ptr(), demangle_callback);
+                    llvm::LLVMDisposePassManager(cpm);
+                });
+                timeline.record("ir");
             }
 
-            with_codegen(tm, llmod, config.no_builtins, |cpm| {
-                llvm::LLVMRustPrintModule(cpm, llmod, out.as_ptr(), demangle_callback);
-                llvm::LLVMDisposePassManager(cpm);
-            });
-            timeline.record("ir");
-        }
+            if config.emit_asm || asm_to_obj {
+                let path = cgcx.output_filenames.temp_path(OutputType::Assembly, module_name);
 
-        if config.emit_asm || asm_to_obj {
-            let path = cgcx.output_filenames.temp_path(OutputType::Assembly, module_name);
-
-            // We can't use the same module for asm and binary output, because that triggers
-            // various errors like invalid IR or broken binaries, so we might have to clone the
-            // module to produce the asm output
-            let llmod = if config.emit_obj {
-                llvm::LLVMCloneModule(llmod)
-            } else {
-                llmod
-            };
-            with_codegen(tm, llmod, config.no_builtins, |cpm| {
-                write_output_file(diag_handler, tm, cpm, llmod, &path,
-                                  llvm::FileType::AssemblyFile)
-            })?;
-            if config.emit_obj {
-                llvm::LLVMDisposeModule(llmod);
+                // We can't use the same module for asm and binary output, because that triggers
+                // various errors like invalid IR or broken binaries, so we might have to clone the
+                // module to produce the asm output
+                let llmod = if config.emit_obj {
+                    llvm::LLVMCloneModule(llmod)
+                } else {
+                    llmod
+                };
+                with_codegen(tm, llmod, config.no_builtins, |cpm| {
+                    write_output_file(diag_handler, tm, cpm, llmod, &path,
+                                    llvm::FileType::AssemblyFile)
+                })?;
+                timeline.record("asm");
             }
-            timeline.record("asm");
-        }
 
-        if write_obj {
-            with_codegen(tm, llmod, config.no_builtins, |cpm| {
-                write_output_file(diag_handler, tm, cpm, llmod, &obj_out,
-                                  llvm::FileType::ObjectFile)
-            })?;
-            timeline.record("obj");
-        } else if asm_to_obj {
-            let assembly = cgcx.output_filenames.temp_path(OutputType::Assembly, module_name);
-            run_assembler(cgcx, diag_handler, &assembly, &obj_out);
-            timeline.record("asm_to_obj");
+            if write_obj {
+                with_codegen(tm, llmod, config.no_builtins, |cpm| {
+                    write_output_file(diag_handler, tm, cpm, llmod, &obj_out,
+                                    llvm::FileType::ObjectFile)
+                })?;
+                timeline.record("obj");
+            } else if asm_to_obj {
+                let assembly = cgcx.output_filenames.temp_path(OutputType::Assembly, module_name);
+                run_assembler(cgcx, diag_handler, &assembly, &obj_out);
+                timeline.record("asm_to_obj");
 
-            if !config.emit_asm && !cgcx.save_temps {
-                drop(fs::remove_file(&assembly));
+                if !config.emit_asm && !cgcx.save_temps {
+                    drop(fs::remove_file(&assembly));
+                }
+            }
+
+            Ok(())
+        })?;
+
+        if copy_bc_to_obj {
+            debug!("copying bitcode {:?} to obj {:?}", bc_out, obj_out);
+            if let Err(e) = link_or_copy(&bc_out, &obj_out) {
+                diag_handler.err(&format!("failed to copy bitcode to object file: {}", e));
             }
         }
 
-        Ok(())
-    })?;
-
-    if copy_bc_to_obj {
-        debug!("copying bitcode {:?} to obj {:?}", bc_out, obj_out);
-        if let Err(e) = link_or_copy(&bc_out, &obj_out) {
-            diag_handler.err(&format!("failed to copy bitcode to object file: {}", e));
+        if rm_bc {
+            debug!("removing_bitcode {:?}", bc_out);
+            if let Err(e) = fs::remove_file(&bc_out) {
+                diag_handler.err(&format!("failed to remove bitcode: {}", e));
+            }
         }
+
+        drop(handlers);
     }
-
-    if rm_bc {
-        debug!("removing_bitcode {:?}", bc_out);
-        if let Err(e) = fs::remove_file(&bc_out) {
-            diag_handler.err(&format!("failed to remove bitcode: {}", e));
-        }
-    }
-
-    drop(handlers);
     Ok(module.into_compiled_module(config.emit_obj,
                                    config.emit_bc,
                                    config.emit_bc_compressed,
@@ -830,13 +886,13 @@ unsafe fn codegen(cgcx: &CodegenContext,
 /// Basically all of this is us attempting to follow in the footsteps of clang
 /// on iOS. See #35968 for lots more info.
 unsafe fn embed_bitcode(cgcx: &CodegenContext,
-                        llcx: ContextRef,
-                        llmod: ModuleRef,
+                        llcx: &llvm::Context,
+                        llmod: &llvm::Module,
                         bitcode: Option<&[u8]>) {
     let llconst = C_bytes_in_context(llcx, bitcode.unwrap_or(&[]));
     let llglobal = llvm::LLVMAddGlobal(
         llmod,
-        val_ty(llconst).to_ref(),
+        val_ty(llconst),
         "rustc.embedded.module\0".as_ptr() as *const _,
     );
     llvm::LLVMSetInitializer(llglobal, llconst);
@@ -856,7 +912,7 @@ unsafe fn embed_bitcode(cgcx: &CodegenContext,
     let llconst = C_bytes_in_context(llcx, &[]);
     let llglobal = llvm::LLVMAddGlobal(
         llmod,
-        val_ty(llconst).to_ref(),
+        val_ty(llconst),
         "rustc.embedded.cmdline\0".as_ptr() as *const _,
     );
     llvm::LLVMSetInitializer(llglobal, llconst);
@@ -876,19 +932,32 @@ pub(crate) struct CompiledModules {
 }
 
 fn need_crate_bitcode_for_rlib(sess: &Session) -> bool {
-    sess.crate_types.borrow().contains(&config::CrateTypeRlib) &&
+    sess.crate_types.borrow().contains(&config::CrateType::Rlib) &&
     sess.opts.output_types.contains_key(&OutputType::Exe)
+}
+
+fn need_pre_thin_lto_bitcode_for_incr_comp(sess: &Session) -> bool {
+    if sess.opts.incremental.is_none() {
+        return false
+    }
+
+    match sess.lto() {
+        Lto::Fat |
+        Lto::No => false,
+        Lto::Thin |
+        Lto::ThinLocal => true,
+    }
 }
 
 pub fn start_async_codegen(tcx: TyCtxt,
                                time_graph: Option<TimeGraph>,
-                               link: LinkMeta,
                                metadata: EncodedMetadata,
-                               coordinator_receive: Receiver<Box<Any + Send>>,
+                               coordinator_receive: Receiver<Box<dyn Any + Send>>,
                                total_cgus: usize)
                                -> OngoingCodegen {
     let sess = tcx.sess;
     let crate_name = tcx.crate_name(LOCAL_CRATE);
+    let crate_hash = tcx.crate_hash(LOCAL_CRATE);
     let no_builtins = attr::contains_name(&tcx.hir.krate().attrs, "no_builtins");
     let subsystem = attr::first_attr_value_str_by_name(&tcx.hir.krate().attrs,
                                                        "windows_subsystem");
@@ -938,6 +1007,7 @@ pub fn start_async_codegen(tcx: TyCtxt,
     // Save all versions of the bytecode if we're saving our temporaries.
     if sess.opts.cg.save_temps {
         modules_config.emit_no_opt_bc = true;
+        modules_config.emit_pre_thin_lto_bc = true;
         modules_config.emit_bc = true;
         modules_config.emit_lto_bc = true;
         metadata_config.emit_bc = true;
@@ -951,6 +1021,9 @@ pub fn start_async_codegen(tcx: TyCtxt,
         modules_config.emit_bc_compressed = true;
         allocator_config.emit_bc_compressed = true;
     }
+
+    modules_config.emit_pre_thin_lto_bc =
+        need_pre_thin_lto_bitcode_for_incr_comp(sess);
 
     modules_config.no_integrated_as = tcx.sess.opts.cg.no_integrated_as ||
         tcx.sess.target.target.options.no_integrated_as;
@@ -1007,7 +1080,7 @@ pub fn start_async_codegen(tcx: TyCtxt,
 
     OngoingCodegen {
         crate_name,
-        link,
+        crate_hash,
         metadata,
         windows_subsystem,
         linker_info,
@@ -1024,7 +1097,7 @@ pub fn start_async_codegen(tcx: TyCtxt,
 
 fn copy_all_cgu_workproducts_to_incr_comp_cache_dir(
     sess: &Session,
-    compiled_modules: &CompiledModules
+    compiled_modules: &CompiledModules,
 ) -> FxHashMap<WorkProductId, WorkProduct> {
     let mut work_products = FxHashMap::default();
 
@@ -1032,7 +1105,7 @@ fn copy_all_cgu_workproducts_to_incr_comp_cache_dir(
         return work_products;
     }
 
-    for module in compiled_modules.modules.iter() {
+    for module in compiled_modules.modules.iter().filter(|m| m.kind == ModuleKind::Regular) {
         let mut files = vec![];
 
         if let Some(ref path) = module.object {
@@ -1204,21 +1277,30 @@ fn produce_final_output_artifacts(sess: &Session,
     // These are used in linking steps and will be cleaned up afterward.
 }
 
-pub(crate) fn dump_incremental_data(codegen_results: &CodegenResults) {
-    println!("[incremental] Re-using {} out of {} modules",
-              codegen_results.modules.iter().filter(|m| m.pre_existing).count(),
-              codegen_results.modules.len());
+pub(crate) fn dump_incremental_data(_codegen_results: &CodegenResults) {
+    // FIXME(mw): This does not work at the moment because the situation has
+    //            become more complicated due to incremental LTO. Now a CGU
+    //            can have more than two caching states.
+    // println!("[incremental] Re-using {} out of {} modules",
+    //           codegen_results.modules.iter().filter(|m| m.pre_existing).count(),
+    //           codegen_results.modules.len());
 }
 
 enum WorkItem {
+    /// Optimize a newly codegened, totally unoptimized module.
     Optimize(ModuleCodegen),
+    /// Copy the post-LTO artifacts from the incremental cache to the output
+    /// directory.
+    CopyPostLtoArtifacts(CachedModuleCodegen),
+    /// Perform (Thin)LTO on the given module.
     LTO(lto::LtoModuleCodegen),
 }
 
 impl WorkItem {
-    fn kind(&self) -> ModuleKind {
+    fn module_kind(&self) -> ModuleKind {
         match *self {
             WorkItem::Optimize(ref m) => m.kind,
+            WorkItem::CopyPostLtoArtifacts(_) |
             WorkItem::LTO(_) => ModuleKind::Regular,
         }
     }
@@ -1226,6 +1308,7 @@ impl WorkItem {
     fn name(&self) -> String {
         match *self {
             WorkItem::Optimize(ref m) => format!("optimize: {}", m.name),
+            WorkItem::CopyPostLtoArtifacts(ref m) => format!("copy post LTO artifacts: {}", m.name),
             WorkItem::LTO(ref m) => format!("lto: {}", m.name()),
         }
     }
@@ -1241,139 +1324,167 @@ fn execute_work_item(cgcx: &CodegenContext,
                      timeline: &mut Timeline)
     -> Result<WorkItemResult, FatalError>
 {
+    let module_config = cgcx.config(work_item.module_kind());
+
+    match work_item {
+        WorkItem::Optimize(module) => {
+            execute_optimize_work_item(cgcx, module, module_config, timeline)
+        }
+        WorkItem::CopyPostLtoArtifacts(module) => {
+            execute_copy_from_cache_work_item(cgcx, module, module_config, timeline)
+        }
+        WorkItem::LTO(module) => {
+            execute_lto_work_item(cgcx, module, module_config, timeline)
+        }
+    }
+}
+
+fn execute_optimize_work_item(cgcx: &CodegenContext,
+                              module: ModuleCodegen,
+                              module_config: &ModuleConfig,
+                              timeline: &mut Timeline)
+    -> Result<WorkItemResult, FatalError>
+{
     let diag_handler = cgcx.create_diag_handler();
-    let config = cgcx.config(work_item.kind());
-    let module = match work_item {
-        WorkItem::Optimize(module) => module,
-        WorkItem::LTO(mut lto) => {
-            unsafe {
-                let module = lto.optimize(cgcx, timeline)?;
-                let module = codegen(cgcx, &diag_handler, module, config, timeline)?;
-                return Ok(WorkItemResult::Compiled(module))
-            }
+
+    unsafe {
+        optimize(cgcx, &diag_handler, &module, module_config, timeline)?;
+    }
+
+    let linker_does_lto = cgcx.opts.debugging_opts.cross_lang_lto.enabled();
+
+    // After we've done the initial round of optimizations we need to
+    // decide whether to synchronously codegen this module or ship it
+    // back to the coordinator thread for further LTO processing (which
+    // has to wait for all the initial modules to be optimized).
+    //
+    // Here we dispatch based on the `cgcx.lto` and kind of module we're
+    // codegenning...
+    let needs_lto = match cgcx.lto {
+        Lto::No => false,
+
+        // If the linker does LTO, we don't have to do it. Note that we
+        // keep doing full LTO, if it is requested, as not to break the
+        // assumption that the output will be a single module.
+        Lto::Thin | Lto::ThinLocal if linker_does_lto => false,
+
+        // Here we've got a full crate graph LTO requested. We ignore
+        // this, however, if the crate type is only an rlib as there's
+        // no full crate graph to process, that'll happen later.
+        //
+        // This use case currently comes up primarily for targets that
+        // require LTO so the request for LTO is always unconditionally
+        // passed down to the backend, but we don't actually want to do
+        // anything about it yet until we've got a final product.
+        Lto::Fat | Lto::Thin => {
+            cgcx.crate_types.len() != 1 ||
+                cgcx.crate_types[0] != config::CrateType::Rlib
+        }
+
+        // When we're automatically doing ThinLTO for multi-codegen-unit
+        // builds we don't actually want to LTO the allocator modules if
+        // it shows up. This is due to various linker shenanigans that
+        // we'll encounter later.
+        //
+        // Additionally here's where we also factor in the current LLVM
+        // version. If it doesn't support ThinLTO we skip this.
+        Lto::ThinLocal => {
+            module.kind != ModuleKind::Allocator &&
+                unsafe { llvm::LLVMRustThinLTOAvailable() }
         }
     };
-    let module_name = module.name.clone();
 
-    let pre_existing = match module.source {
-        ModuleSource::Codegened(_) => None,
-        ModuleSource::Preexisting(ref wp) => Some(wp.clone()),
-    };
+    // Metadata modules never participate in LTO regardless of the lto
+    // settings.
+    let needs_lto = needs_lto && module.kind != ModuleKind::Metadata;
 
-    if let Some(wp) = pre_existing {
-        let incr_comp_session_dir = cgcx.incr_comp_session_dir
-                                        .as_ref()
-                                        .unwrap();
-        let name = &module.name;
-        let mut object = None;
-        let mut bytecode = None;
-        let mut bytecode_compressed = None;
-        for (kind, saved_file) in wp.saved_files {
-            let obj_out = match kind {
-                WorkProductFileKind::Object => {
-                    let path = cgcx.output_filenames.temp_path(OutputType::Object, Some(name));
-                    object = Some(path.clone());
-                    path
-                }
-                WorkProductFileKind::Bytecode => {
-                    let path = cgcx.output_filenames.temp_path(OutputType::Bitcode, Some(name));
-                    bytecode = Some(path.clone());
-                    path
-                }
-                WorkProductFileKind::BytecodeCompressed => {
-                    let path = cgcx.output_filenames.temp_path(OutputType::Bitcode, Some(name))
-                        .with_extension(RLIB_BYTECODE_EXTENSION);
-                    bytecode_compressed = Some(path.clone());
-                    path
-                }
-            };
-            let source_file = in_incr_comp_dir(&incr_comp_session_dir,
-                                               &saved_file);
-            debug!("copying pre-existing module `{}` from {:?} to {}",
-                   module.name,
-                   source_file,
-                   obj_out.display());
-            match link_or_copy(&source_file, &obj_out) {
-                Ok(_) => { }
-                Err(err) => {
-                    diag_handler.err(&format!("unable to copy {} to {}: {}",
-                                              source_file.display(),
-                                              obj_out.display(),
-                                              err));
-                }
-            }
-        }
-        assert_eq!(object.is_some(), config.emit_obj);
-        assert_eq!(bytecode.is_some(), config.emit_bc);
-        assert_eq!(bytecode_compressed.is_some(), config.emit_bc_compressed);
-
-        Ok(WorkItemResult::Compiled(CompiledModule {
-            llmod_id: module.llmod_id.clone(),
-            name: module_name,
-            kind: ModuleKind::Regular,
-            pre_existing: true,
-            object,
-            bytecode,
-            bytecode_compressed,
-        }))
+    if needs_lto {
+        Ok(WorkItemResult::NeedsLTO(module))
     } else {
-        debug!("llvm-optimizing {:?}", module_name);
+        let module = unsafe {
+            codegen(cgcx, &diag_handler, module, module_config, timeline)?
+        };
+        Ok(WorkItemResult::Compiled(module))
+    }
+}
 
-        unsafe {
-            optimize(cgcx, &diag_handler, &module, config, timeline)?;
-
-            // After we've done the initial round of optimizations we need to
-            // decide whether to synchronously codegen this module or ship it
-            // back to the coordinator thread for further LTO processing (which
-            // has to wait for all the initial modules to be optimized).
-            //
-            // Here we dispatch based on the `cgcx.lto` and kind of module we're
-            // codegenning...
-            let needs_lto = match cgcx.lto {
-                Lto::No => false,
-
-                // Here we've got a full crate graph LTO requested. We ignore
-                // this, however, if the crate type is only an rlib as there's
-                // no full crate graph to process, that'll happen later.
-                //
-                // This use case currently comes up primarily for targets that
-                // require LTO so the request for LTO is always unconditionally
-                // passed down to the backend, but we don't actually want to do
-                // anything about it yet until we've got a final product.
-                Lto::Yes | Lto::Fat | Lto::Thin => {
-                    cgcx.crate_types.len() != 1 ||
-                        cgcx.crate_types[0] != config::CrateTypeRlib
-                }
-
-                // When we're automatically doing ThinLTO for multi-codegen-unit
-                // builds we don't actually want to LTO the allocator modules if
-                // it shows up. This is due to various linker shenanigans that
-                // we'll encounter later.
-                //
-                // Additionally here's where we also factor in the current LLVM
-                // version. If it doesn't support ThinLTO we skip this.
-                Lto::ThinLocal => {
-                    module.kind != ModuleKind::Allocator &&
-                        llvm::LLVMRustThinLTOAvailable()
-                }
-            };
-
-            // Metadata modules never participate in LTO regardless of the lto
-            // settings.
-            let needs_lto = needs_lto && module.kind != ModuleKind::Metadata;
-
-            // Don't run LTO passes when cross-lang LTO is enabled. The linker
-            // will do that for us in this case.
-            let needs_lto = needs_lto &&
-                !cgcx.opts.debugging_opts.cross_lang_lto.embed_bitcode();
-
-            if needs_lto {
-                Ok(WorkItemResult::NeedsLTO(module))
-            } else {
-                let module = codegen(cgcx, &diag_handler, module, config, timeline)?;
-                Ok(WorkItemResult::Compiled(module))
+fn execute_copy_from_cache_work_item(cgcx: &CodegenContext,
+                                     module: CachedModuleCodegen,
+                                     module_config: &ModuleConfig,
+                                     _: &mut Timeline)
+    -> Result<WorkItemResult, FatalError>
+{
+    let incr_comp_session_dir = cgcx.incr_comp_session_dir
+                                    .as_ref()
+                                    .unwrap();
+    let mut object = None;
+    let mut bytecode = None;
+    let mut bytecode_compressed = None;
+    for (kind, saved_file) in &module.source.saved_files {
+        let obj_out = match kind {
+            WorkProductFileKind::Object => {
+                let path = cgcx.output_filenames.temp_path(OutputType::Object,
+                                                           Some(&module.name));
+                object = Some(path.clone());
+                path
+            }
+            WorkProductFileKind::Bytecode => {
+                let path = cgcx.output_filenames.temp_path(OutputType::Bitcode,
+                                                           Some(&module.name));
+                bytecode = Some(path.clone());
+                path
+            }
+            WorkProductFileKind::BytecodeCompressed => {
+                let path = cgcx.output_filenames.temp_path(OutputType::Bitcode,
+                                                           Some(&module.name))
+                    .with_extension(RLIB_BYTECODE_EXTENSION);
+                bytecode_compressed = Some(path.clone());
+                path
+            }
+        };
+        let source_file = in_incr_comp_dir(&incr_comp_session_dir,
+                                           &saved_file);
+        debug!("copying pre-existing module `{}` from {:?} to {}",
+               module.name,
+               source_file,
+               obj_out.display());
+        match link_or_copy(&source_file, &obj_out) {
+            Ok(_) => { }
+            Err(err) => {
+                let diag_handler = cgcx.create_diag_handler();
+                diag_handler.err(&format!("unable to copy {} to {}: {}",
+                                          source_file.display(),
+                                          obj_out.display(),
+                                          err));
             }
         }
+    }
+
+    assert_eq!(object.is_some(), module_config.emit_obj);
+    assert_eq!(bytecode.is_some(), module_config.emit_bc);
+    assert_eq!(bytecode_compressed.is_some(), module_config.emit_bc_compressed);
+
+    Ok(WorkItemResult::Compiled(CompiledModule {
+        name: module.name,
+        kind: ModuleKind::Regular,
+        object,
+        bytecode,
+        bytecode_compressed,
+    }))
+}
+
+fn execute_lto_work_item(cgcx: &CodegenContext,
+                         mut module: lto::LtoModuleCodegen,
+                         module_config: &ModuleConfig,
+                         timeline: &mut Timeline)
+    -> Result<WorkItemResult, FatalError>
+{
+    let diag_handler = cgcx.create_diag_handler();
+
+    unsafe {
+        let module = module.optimize(cgcx, timeline)?;
+        let module = codegen(cgcx, &diag_handler, module, module_config, timeline)?;
+        Ok(WorkItemResult::Compiled(module))
     }
 }
 
@@ -1390,6 +1501,10 @@ enum Message {
     CodegenDone {
         llvm_work_item: WorkItem,
         cost: u64,
+    },
+    AddImportOnlyModule {
+        module_data: SerializedModule,
+        work_product: WorkProduct,
     },
     CodegenComplete,
     CodegenItem,
@@ -1412,7 +1527,7 @@ fn start_executing_work(tcx: TyCtxt,
                         crate_info: &CrateInfo,
                         shared_emitter: SharedEmitter,
                         codegen_worker_send: Sender<Message>,
-                        coordinator_receive: Receiver<Box<Any + Send>>,
+                        coordinator_receive: Receiver<Box<dyn Any + Send>>,
                         total_cgus: usize,
                         jobserver: Client,
                         time_graph: Option<TimeGraph>,
@@ -1441,7 +1556,7 @@ fn start_executing_work(tcx: TyCtxt,
                 exported_symbols.insert(LOCAL_CRATE, copy_symbols(LOCAL_CRATE));
                 Some(Arc::new(exported_symbols))
             }
-            Lto::Yes | Lto::Fat | Lto::Thin => {
+            Lto::Fat | Lto::Thin => {
                 exported_symbols.insert(LOCAL_CRATE, copy_symbols(LOCAL_CRATE));
                 for &cnum in tcx.crates().iter() {
                     exported_symbols.insert(cnum, copy_symbols(cnum));
@@ -1471,7 +1586,9 @@ fn start_executing_work(tcx: TyCtxt,
 
     let assembler_cmd = if modules_config.no_integrated_as {
         // HACK: currently we use linker (gcc) as our assembler
-        let (name, mut cmd) = get_linker(sess);
+        let (linker, flavor) = link::linker_and_flavor(sess);
+
+        let (name, mut cmd) = get_linker(sess, &linker, flavor);
         cmd.args(&sess.target.target.options.asm_args);
         Some(Arc::new(AssemblerCommand {
             name,
@@ -1495,6 +1612,7 @@ fn start_executing_work(tcx: TyCtxt,
         remark: sess.opts.cg.remark.clone(),
         worker: 0,
         incr_comp_session_dir: sess.incr_comp_session_dir_opt().map(|r| r.clone()),
+        cgu_reuse_tracker: sess.cgu_reuse_tracker.clone(),
         coordinator_send,
         diag_emitter: shared_emitter.clone(),
         time_graph,
@@ -1668,6 +1786,7 @@ fn start_executing_work(tcx: TyCtxt,
         let mut compiled_metadata_module = None;
         let mut compiled_allocator_module = None;
         let mut needs_lto = Vec::new();
+        let mut lto_import_only_modules = Vec::new();
         let mut started_lto = false;
 
         // This flag tracks whether all items have gone through codegens
@@ -1691,6 +1810,7 @@ fn start_executing_work(tcx: TyCtxt,
               work_items.len() > 0 ||
               running > 0 ||
               needs_lto.len() > 0 ||
+              lto_import_only_modules.len() > 0 ||
               main_thread_worker_state != MainThreadWorkerState::Idle {
 
             // While there are still CGUs to be codegened, the coordinator has
@@ -1714,7 +1834,7 @@ fn start_executing_work(tcx: TyCtxt,
                             worker: get_worker_id(&mut free_worker_ids),
                             .. cgcx.clone()
                         };
-                        maybe_start_llvm_timer(cgcx.config(item.kind()),
+                        maybe_start_llvm_timer(cgcx.config(item.module_kind()),
                                                &mut llvm_start_time);
                         main_thread_worker_state = MainThreadWorkerState::LLVMing;
                         spawn_work(cgcx, item);
@@ -1730,10 +1850,12 @@ fn start_executing_work(tcx: TyCtxt,
                    running == 0 &&
                    main_thread_worker_state == MainThreadWorkerState::Idle {
                     assert!(!started_lto);
-                    assert!(needs_lto.len() > 0);
+                    assert!(needs_lto.len() + lto_import_only_modules.len() > 0);
                     started_lto = true;
                     let modules = mem::replace(&mut needs_lto, Vec::new());
-                    for (work, cost) in generate_lto_work(&cgcx, modules) {
+                    let import_only_modules =
+                        mem::replace(&mut lto_import_only_modules, Vec::new());
+                    for (work, cost) in generate_lto_work(&cgcx, modules, import_only_modules) {
                         let insertion_index = work_items
                             .binary_search_by_key(&cost, |&(_, cost)| cost)
                             .unwrap_or_else(|e| e);
@@ -1754,7 +1876,7 @@ fn start_executing_work(tcx: TyCtxt,
                                 worker: get_worker_id(&mut free_worker_ids),
                                 .. cgcx.clone()
                             };
-                            maybe_start_llvm_timer(cgcx.config(item.kind()),
+                            maybe_start_llvm_timer(cgcx.config(item.module_kind()),
                                                    &mut llvm_start_time);
                             main_thread_worker_state = MainThreadWorkerState::LLVMing;
                             spawn_work(cgcx, item);
@@ -1785,7 +1907,7 @@ fn start_executing_work(tcx: TyCtxt,
             while work_items.len() > 0 && running < tokens.len() {
                 let (item, _) = work_items.pop().unwrap();
 
-                maybe_start_llvm_timer(cgcx.config(item.kind()),
+                maybe_start_llvm_timer(cgcx.config(item.module_kind()),
                                        &mut llvm_start_time);
 
                 let cgcx = CodegenContext {
@@ -1897,14 +2019,19 @@ fn start_executing_work(tcx: TyCtxt,
                     } else {
                         running -= 1;
                     }
-
                     free_worker_ids.push(worker_id);
                     needs_lto.push(result);
                 }
+                Message::AddImportOnlyModule { module_data, work_product } => {
+                    assert!(!started_lto);
+                    assert!(!codegen_done);
+                    assert_eq!(main_thread_worker_state,
+                               MainThreadWorkerState::Codegenning);
+                    lto_import_only_modules.push((module_data, work_product));
+                    main_thread_worker_state = MainThreadWorkerState::Idle;
+                }
                 Message::Done { result: Err(()), worker_id: _ } => {
-                    shared_emitter.fatal("aborting due to worker thread failure");
-                    // Exit the coordinator thread
-                    return Err(())
+                    bug!("worker thread panicked");
                 }
                 Message::CodegenItem => {
                     bug!("the coordinator should not receive codegen requests")
@@ -1976,7 +2103,7 @@ fn spawn_work(cgcx: CodegenContext, work: WorkItem) {
         // Set up a destructor which will fire off a message that we're done as
         // we exit.
         struct Bomb {
-            coordinator_send: Sender<Box<Any + Send>>,
+            coordinator_send: Sender<Box<dyn Any + Send>>,
             result: Option<WorkItemResult>,
             worker_id: usize,
         }
@@ -2052,11 +2179,11 @@ pub fn run_assembler(cgcx: &CodegenContext, handler: &Handler, assembly: &Path, 
     }
 }
 
-pub unsafe fn with_llvm_pmb(llmod: ModuleRef,
+pub unsafe fn with_llvm_pmb(llmod: &llvm::Module,
                             config: &ModuleConfig,
                             opt_level: llvm::CodeGenOptLevel,
                             prepare_for_thin_lto: bool,
-                            f: &mut FnMut(llvm::PassManagerBuilderRef)) {
+                            f: &mut dyn FnMut(&llvm::PassManagerBuilder)) {
     use std::ptr;
 
     // Create the PassManagerBuilder for LLVM. We configure it with
@@ -2237,13 +2364,13 @@ impl SharedEmitterMain {
 
 pub struct OngoingCodegen {
     crate_name: Symbol,
-    link: LinkMeta,
+    crate_hash: Svh,
     metadata: EncodedMetadata,
     windows_subsystem: Option<String>,
     linker_info: LinkerInfo,
     crate_info: CrateInfo,
     time_graph: Option<TimeGraph>,
-    coordinator_send: Sender<Box<Any + Send>>,
+    coordinator_send: Sender<Box<dyn Any + Send>>,
     codegen_worker_receive: Receiver<Message>,
     shared_emitter_main: SharedEmitterMain,
     future: thread::JoinHandle<Result<CompiledModules, ()>>,
@@ -2263,9 +2390,11 @@ impl OngoingCodegen {
                 panic!("expected abort due to worker thread errors")
             },
             Err(_) => {
-                sess.fatal("Error during codegen/LLVM phase.");
+                bug!("panic during codegen/LLVM phase");
             }
         };
+
+        sess.cgu_reuse_tracker.check_expected_reuse(sess);
 
         sess.abort_if_errors();
 
@@ -2273,9 +2402,9 @@ impl OngoingCodegen {
             time_graph.dump(&format!("{}-timings", self.crate_name));
         }
 
-        let work_products = copy_all_cgu_workproducts_to_incr_comp_cache_dir(sess,
-                                                                             &compiled_modules);
-
+        let work_products =
+            copy_all_cgu_workproducts_to_incr_comp_cache_dir(sess,
+                                                             &compiled_modules);
         produce_final_output_artifacts(sess,
                                        &compiled_modules,
                                        &self.output_filenames);
@@ -2288,7 +2417,7 @@ impl OngoingCodegen {
 
         (CodegenResults {
             crate_name: self.crate_name,
-            link: self.link,
+            crate_hash: self.crate_hash,
             metadata: self.metadata,
             windows_subsystem: self.windows_subsystem,
             linker_info: self.linker_info,
@@ -2336,8 +2465,8 @@ impl OngoingCodegen {
 }
 
 pub(crate) fn submit_codegened_module_to_llvm(tcx: TyCtxt,
-                                               module: ModuleCodegen,
-                                               cost: u64) {
+                                              module: ModuleCodegen,
+                                              cost: u64) {
     let llvm_work_item = WorkItem::Optimize(module);
     drop(tcx.tx_to_llvm_workers.lock().send(Box::new(Message::CodegenDone {
         llvm_work_item,
@@ -2345,9 +2474,53 @@ pub(crate) fn submit_codegened_module_to_llvm(tcx: TyCtxt,
     })));
 }
 
+pub(crate) fn submit_post_lto_module_to_llvm(tcx: TyCtxt,
+                                             module: CachedModuleCodegen) {
+    let llvm_work_item = WorkItem::CopyPostLtoArtifacts(module);
+    drop(tcx.tx_to_llvm_workers.lock().send(Box::new(Message::CodegenDone {
+        llvm_work_item,
+        cost: 0,
+    })));
+}
+
+pub(crate) fn submit_pre_lto_module_to_llvm(tcx: TyCtxt,
+                                            module: CachedModuleCodegen) {
+    let filename = pre_lto_bitcode_filename(&module.name);
+    let bc_path = in_incr_comp_dir_sess(tcx.sess, &filename);
+    let file = fs::File::open(&bc_path).unwrap_or_else(|e| {
+        panic!("failed to open bitcode file `{}`: {}", bc_path.display(), e)
+    });
+
+    let mmap = unsafe {
+        memmap::Mmap::map(&file).unwrap_or_else(|e| {
+            panic!("failed to mmap bitcode file `{}`: {}", bc_path.display(), e)
+        })
+    };
+
+    // Schedule the module to be loaded
+    drop(tcx.tx_to_llvm_workers.lock().send(Box::new(Message::AddImportOnlyModule {
+        module_data: SerializedModule::FromUncompressedFile(mmap),
+        work_product: module.source,
+    })));
+}
+
+pub(super) fn pre_lto_bitcode_filename(module_name: &str) -> String {
+    format!("{}.{}", module_name, PRE_THIN_LTO_BC_EXT)
+}
+
 fn msvc_imps_needed(tcx: TyCtxt) -> bool {
+    // This should never be true (because it's not supported). If it is true,
+    // something is wrong with commandline arg validation.
+    assert!(!(tcx.sess.opts.debugging_opts.cross_lang_lto.enabled() &&
+              tcx.sess.target.target.options.is_like_msvc &&
+              tcx.sess.opts.cg.prefer_dynamic));
+
     tcx.sess.target.target.options.is_like_msvc &&
-        tcx.sess.crate_types.borrow().iter().any(|ct| *ct == config::CrateTypeRlib)
+        tcx.sess.crate_types.borrow().iter().any(|ct| *ct == config::CrateType::Rlib) &&
+    // ThinLTO can't handle this workaround in all cases, so we don't
+    // emit the `__imp_` symbols. Instead we make them unnecessary by disallowing
+    // dynamic linking when cross-language LTO is enabled.
+    !tcx.sess.opts.debugging_opts.cross_lang_lto.enabled()
 }
 
 // Create a `__imp_<symbol> = &symbol` global for every public static `symbol`.
@@ -2355,7 +2528,7 @@ fn msvc_imps_needed(tcx: TyCtxt) -> bool {
 // when using MSVC linker.  We do this only for data, as linker can fix up
 // code references on its own.
 // See #26591, #27438
-fn create_msvc_imps(cgcx: &CodegenContext, llcx: ContextRef, llmod: ModuleRef) {
+fn create_msvc_imps(cgcx: &CodegenContext, llcx: &llvm::Context, llmod: &llvm::Module) {
     if !cgcx.msvc_imps_needed {
         return
     }
@@ -2385,7 +2558,7 @@ fn create_msvc_imps(cgcx: &CodegenContext, llcx: ContextRef, llmod: ModuleRef) {
             .collect::<Vec<_>>();
         for (imp_name, val) in globals {
             let imp = llvm::LLVMAddGlobal(llmod,
-                                          i8p_ty.to_ref(),
+                                          i8p_ty,
                                           imp_name.as_ptr() as *const _);
             llvm::LLVMSetInitializer(imp, consts::ptrcast(val, i8p_ty));
             llvm::LLVMRustSetLinkage(imp, llvm::Linkage::ExternalLinkage);

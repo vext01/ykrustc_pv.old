@@ -356,9 +356,9 @@ impl File {
     /// use std::fs::File;
     ///
     /// fn main() -> std::io::Result<()> {
-    /// let mut f = File::open("foo.txt")?;
-    /// # Ok(())
-    /// # }
+    ///     let mut f = File::open("foo.txt")?;
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<File> {
@@ -726,7 +726,7 @@ impl OpenOptions {
     /// If a file is opened with both read and append access, beware that after
     /// opening, and after every write, the position for reading may be set at the
     /// end of the file. So, before writing, save the current position (using
-    /// [`seek`]`(`[`SeekFrom`]`::`[`Current`]`(0))`, and restore it before the next read.
+    /// [`seek`]`(`[`SeekFrom`]`::`[`Current`]`(0))`), and restore it before the next read.
     ///
     /// ## Note
     ///
@@ -1566,6 +1566,12 @@ pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> 
 /// On success, the total number of bytes copied is returned and it is equal to
 /// the length of the `to` file as reported by `metadata`.
 ///
+/// If you’re wanting to copy the contents of one file to another and you’re
+/// working with [`File`]s, see the [`io::copy`] function.
+///
+/// [`io::copy`]: ../io/fn.copy.html
+/// [`File`]: ./struct.File.html
+///
 /// # Platform-specific behavior
 ///
 /// This function currently corresponds to the `open` function in Unix
@@ -2076,7 +2082,7 @@ mod tests {
     use fs::{self, File, OpenOptions};
     use io::{ErrorKind, SeekFrom};
     use path::Path;
-    use rand::{StdRng, Rng};
+    use rand::{StdRng, FromEntropy, RngCore};
     use str;
     use sys_common::io::test::{TempDir, tmpdir};
     use thread;
@@ -3110,7 +3116,7 @@ mod tests {
     #[test]
     fn binary_file() {
         let mut bytes = [0; 1024];
-        StdRng::new().unwrap().fill_bytes(&mut bytes);
+        StdRng::from_entropy().fill_bytes(&mut bytes);
 
         let tmpdir = tmpdir();
 
@@ -3123,7 +3129,7 @@ mod tests {
     #[test]
     fn write_then_read() {
         let mut bytes = [0; 1024];
-        StdRng::new().unwrap().fill_bytes(&mut bytes);
+        StdRng::from_entropy().fill_bytes(&mut bytes);
 
         let tmpdir = tmpdir();
 

@@ -115,30 +115,30 @@ fn calculate_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     let preferred_linkage = match ty {
         // cdylibs must have all static dependencies.
-        config::CrateTypeCdylib => Linkage::Static,
+        config::CrateType::Cdylib => Linkage::Static,
 
         // Generating a dylib without `-C prefer-dynamic` means that we're going
         // to try to eagerly statically link all dependencies. This is normally
         // done for end-product dylibs, not intermediate products.
-        config::CrateTypeDylib if !sess.opts.cg.prefer_dynamic => Linkage::Static,
-        config::CrateTypeDylib => Linkage::Dynamic,
+        config::CrateType::Dylib if !sess.opts.cg.prefer_dynamic => Linkage::Static,
+        config::CrateType::Dylib => Linkage::Dynamic,
 
         // If the global prefer_dynamic switch is turned off, or the final
         // executable will be statically linked, prefer static crate linkage.
-        config::CrateTypeExecutable if !sess.opts.cg.prefer_dynamic ||
+        config::CrateType::Executable if !sess.opts.cg.prefer_dynamic ||
             sess.crt_static() => Linkage::Static,
-        config::CrateTypeExecutable => Linkage::Dynamic,
+        config::CrateType::Executable => Linkage::Dynamic,
 
         // proc-macro crates are required to be dylibs, and they're currently
         // required to link to libsyntax as well.
-        config::CrateTypeProcMacro => Linkage::Dynamic,
+        config::CrateType::ProcMacro => Linkage::Dynamic,
 
         // No linkage happens with rlibs, we just needed the metadata (which we
         // got long ago), so don't bother with anything.
-        config::CrateTypeRlib => Linkage::NotLinked,
+        config::CrateType::Rlib => Linkage::NotLinked,
 
         // staticlibs must have all static dependencies.
-        config::CrateTypeStaticlib => Linkage::Static,
+        config::CrateType::Staticlib => Linkage::Static,
     };
 
     if preferred_linkage == Linkage::NotLinked {
@@ -155,15 +155,15 @@ fn calculate_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
         // Staticlibs, cdylibs, and static executables must have all static
         // dependencies. If any are not found, generate some nice pretty errors.
-        if ty == config::CrateTypeCdylib || ty == config::CrateTypeStaticlib ||
-                (ty == config::CrateTypeExecutable && sess.crt_static() &&
+        if ty == config::CrateType::Cdylib || ty == config::CrateType::Staticlib ||
+                (ty == config::CrateType::Executable && sess.crt_static() &&
                 !sess.target.target.options.crt_static_allows_dylibs) {
             for &cnum in tcx.crates().iter() {
                 if tcx.dep_kind(cnum).macros_only() { continue }
                 let src = tcx.used_crate_source(cnum);
                 if src.rlib.is_some() { continue }
                 sess.err(&format!("crate `{}` required to be available in rlib format, \
-                                  but was not found in this form",
+                                   but was not found in this form",
                                   tcx.crate_name(cnum)));
             }
             return Vec::new();
@@ -247,16 +247,16 @@ fn calculate_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                     _ => "dylib",
                 };
                 sess.err(&format!("crate `{}` required to be available in {} format, \
-                                  but was not found in this form",
+                                   but was not found in this form",
                                   tcx.crate_name(cnum), kind));
             }
         }
     }
 
-    return ret;
+    ret
 }
 
-fn add_library(tcx: TyCtxt,
+fn add_library(tcx: TyCtxt<'_, '_, '_>,
                cnum: CrateNum,
                link: LinkagePreference,
                m: &mut FxHashMap<CrateNum, LinkagePreference>) {

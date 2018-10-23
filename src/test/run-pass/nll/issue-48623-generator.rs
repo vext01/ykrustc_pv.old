@@ -8,6 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(path_statements)]
+#![allow(dead_code)]
+
 #![feature(nll)]
 #![feature(generators, generator_trait)]
 

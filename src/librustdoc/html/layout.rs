@@ -32,7 +32,7 @@ pub struct Page<'a> {
 }
 
 pub fn render<T: fmt::Display, S: fmt::Display>(
-    dst: &mut io::Write, layout: &Layout, page: &Page, sidebar: &S, t: &T,
+    dst: &mut dyn io::Write, layout: &Layout, page: &Page, sidebar: &S, t: &T,
     css_file_extension: bool, themes: &[PathBuf])
     -> io::Result<()>
 {
@@ -156,13 +156,13 @@ pub fn render<T: fmt::Display, S: fmt::Display>(
                 root_path = page.root_path,
                 suffix=page.resource_suffix)
     } else {
-        "".to_owned()
+        String::new()
     },
     content   = *t,
     root_path = page.root_path,
     css_class = page.css_class,
     logo      = if layout.logo.is_empty() {
-        "".to_string()
+        String::new()
     } else {
         format!("<a href='{}{}/index.html'>\
                  <img src='{}' alt='logo' width='100'></a>",
@@ -173,7 +173,7 @@ pub fn render<T: fmt::Display, S: fmt::Display>(
     description = page.description,
     keywords = page.keywords,
     favicon   = if layout.favicon.is_empty() {
-        "".to_string()
+        String::new()
     } else {
         format!(r#"<link rel="shortcut icon" href="{}">"#, layout.favicon)
     },
@@ -194,7 +194,7 @@ pub fn render<T: fmt::Display, S: fmt::Display>(
     )
 }
 
-pub fn redirect(dst: &mut io::Write, url: &str) -> io::Result<()> {
+pub fn redirect(dst: &mut dyn io::Write, url: &str) -> io::Result<()> {
     // <script> triggers a redirect before refresh, so this is fine.
     write!(dst,
 r##"<!DOCTYPE html>

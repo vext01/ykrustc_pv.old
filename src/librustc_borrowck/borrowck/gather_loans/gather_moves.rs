@@ -24,7 +24,7 @@ use std::rc::Rc;
 use syntax::ast;
 use syntax_pos::Span;
 use rustc::hir::*;
-use rustc::hir::map::Node::*;
+use rustc::hir::Node;
 
 struct GatherMoveInfo<'c, 'tcx: 'c> {
     id: hir::ItemLocalId,
@@ -60,15 +60,15 @@ fn get_pattern_source<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, pat: &Pat) -> Patte
     let parent = tcx.hir.get_parent_node(pat.id);
 
     match tcx.hir.get(parent) {
-        NodeExpr(ref e) => {
+        Node::Expr(ref e) => {
             // the enclosing expression must be a `match` or something else
             assert!(match e.node {
-                        ExprMatch(..) => true,
+                        ExprKind::Match(..) => true,
                         _ => return PatternSource::Other,
                     });
             PatternSource::MatchExpr(e)
         }
-        NodeLocal(local) => PatternSource::LetDecl(local),
+        Node::Local(local) => PatternSource::LetDecl(local),
         _ => return PatternSource::Other,
 
     }
@@ -109,10 +109,10 @@ pub fn gather_move_from_pat<'a, 'c, 'tcx: 'c>(bccx: &BorrowckCtxt<'a, 'tcx>,
                                               cmt: &'c mc::cmt_<'tcx>) {
     let source = get_pattern_source(bccx.tcx,move_pat);
     let pat_span_path_opt = match move_pat.node {
-        PatKind::Binding(_, _, ref path1, _) => {
+        PatKind::Binding(_, _, ident, _) => {
             Some(MovePlace {
                      span: move_pat.span,
-                     name: path1.node,
+                     name: ident.name,
                      pat_source: source,
                  })
         }
@@ -163,15 +163,11 @@ pub fn gather_assignment<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                                    move_data: &MoveData<'tcx>,
                                    assignment_id: hir::ItemLocalId,
                                    assignment_span: Span,
-                                   assignee_loan_path: Rc<LoanPath<'tcx>>,
-                                   assignee_id: hir::ItemLocalId,
-                                   mode: euv::MutateMode) {
+                                   assignee_loan_path: Rc<LoanPath<'tcx>>) {
     move_data.add_assignment(bccx.tcx,
                              assignee_loan_path,
                              assignment_id,
-                             assignment_span,
-                             assignee_id,
-                             mode);
+                             assignment_span);
 }
 
 // (keep in sync with move_error::report_cannot_move_out_of )
@@ -195,14 +191,14 @@ fn check_and_get_illegal_move_origin<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
         Categorization::Interior(ref b, mc::InteriorField(_)) |
         Categorization::Interior(ref b, mc::InteriorElement(Kind::Pattern)) => {
             match b.ty.sty {
-                ty::TyAdt(def, _) => {
+                ty::Adt(def, _) => {
                     if def.has_dtor(bccx.tcx) {
                         Some(cmt.clone())
                     } else {
                         check_and_get_illegal_move_origin(bccx, b)
                     }
                 }
-                ty::TySlice(..) => Some(cmt.clone()),
+                ty::Slice(..) => Some(cmt.clone()),
                 _ => {
                     check_and_get_illegal_move_origin(bccx, b)
                 }

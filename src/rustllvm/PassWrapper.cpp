@@ -171,6 +171,12 @@ bool LLVMRustPassManagerBuilderPopulateThinLTOPassManager(
 #define SUBTARGET_MSP430
 #endif
 
+#ifdef LLVM_COMPONENT_RISCV
+#define SUBTARGET_RISCV SUBTARGET(RISCV)
+#else
+#define SUBTARGET_RISCV
+#endif
+
 #ifdef LLVM_COMPONENT_SPARC
 #define SUBTARGET_SPARC SUBTARGET(Sparc)
 #else
@@ -192,7 +198,8 @@ bool LLVMRustPassManagerBuilderPopulateThinLTOPassManager(
   SUBTARGET_SYSTEMZ                                                            \
   SUBTARGET_MSP430                                                             \
   SUBTARGET_SPARC                                                              \
-  SUBTARGET_HEXAGON
+  SUBTARGET_HEXAGON                                                            \
+  SUBTARGET_RISCV                                                              \
 
 #define SUBTARGET(x)                                                           \
   namespace llvm {                                                             \
@@ -352,6 +359,12 @@ extern "C" void LLVMRustPrintTargetFeatures(LLVMTargetMachineRef) {
 }
 #endif
 
+extern "C" const char* LLVMRustGetHostCPUName(size_t *len) {
+  StringRef Name = sys::getHostCPUName();
+  *len = Name.size();
+  return Name.data();
+}
+
 extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
     const char *TripleStr, const char *CPU, const char *Feature,
     LLVMRustCodeModel RustCM, LLVMRustRelocMode RustReloc,
@@ -359,7 +372,9 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
     bool PositionIndependentExecutable, bool FunctionSections,
     bool DataSections,
     bool TrapUnreachable,
-    bool Singlethread) {
+    bool Singlethread,
+    bool AsmComments,
+    bool EmitStackSizeSection) {
 
   auto OptLevel = fromRust(RustOptLevel);
   auto RM = fromRust(RustReloc);
@@ -373,11 +388,6 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
     return nullptr;
   }
 
-  StringRef RealCPU = CPU;
-  if (RealCPU == "native") {
-    RealCPU = sys::getHostCPUName();
-  }
-
   TargetOptions Options;
 
   Options.FloatABIType = FloatABI::Default;
@@ -386,6 +396,8 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
   }
   Options.DataSections = DataSections;
   Options.FunctionSections = FunctionSections;
+  Options.MCOptions.AsmVerbose = AsmComments;
+  Options.MCOptions.PreserveAsmComments = AsmComments;
 
   if (TrapUnreachable) {
     // Tell LLVM to codegen `unreachable` into an explicit trap instruction.
@@ -400,6 +412,8 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
   }
 
 #if LLVM_VERSION_GE(6, 0)
+  Options.EmitStackSizeSection = EmitStackSizeSection;
+
   Optional<CodeModel::Model> CM;
 #else
   CodeModel::Model CM = CodeModel::Model::Default;
@@ -407,7 +421,7 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
   if (RustCM != LLVMRustCodeModel::None)
     CM = fromRust(RustCM);
   TargetMachine *TM = TheTarget->createTargetMachine(
-      Trip.getTriple(), RealCPU, Feature, Options, RM, CM, OptLevel);
+      Trip.getTriple(), CPU, Feature, Options, RM, CM, OptLevel);
   return wrap(TM);
 }
 
@@ -545,7 +559,12 @@ LLVMRustWriteOutputFile(LLVMTargetMachineRef Target, LLVMPassManagerRef PMR,
     return LLVMRustResult::Failure;
   }
 
+#if LLVM_VERSION_GE(7, 0)
+  buffer_ostream BOS(OS);
+  unwrap(Target)->addPassesToEmitFile(*PM, BOS, nullptr, FileType, false);
+#else
   unwrap(Target)->addPassesToEmitFile(*PM, OS, FileType, false);
+#endif
   PM->run(*unwrap(M));
 
   // Apparently `addPassesToEmitFile` adds a pointer to our on-the-stack output
@@ -824,23 +843,6 @@ LLVMRustPGOAvailable() {
 // and various online resources about ThinLTO to make heads or tails of all
 // this.
 
-extern "C" bool
-LLVMRustWriteThinBitcodeToFile(LLVMPassManagerRef PMR,
-                               LLVMModuleRef M,
-                               const char *BcFile) {
-  llvm::legacy::PassManager *PM = unwrap<llvm::legacy::PassManager>(PMR);
-  std::error_code EC;
-  llvm::raw_fd_ostream bc(BcFile, EC, llvm::sys::fs::F_None);
-  if (EC) {
-    LLVMRustSetLastError(EC.message().c_str());
-    return false;
-  }
-  PM->add(createWriteThinLTOBitcodePass(bc));
-  PM->run(*unwrap(M));
-  delete PM;
-  return true;
-}
-
 // This is a shared data structure which *must* be threadsafe to share
 // read-only amongst threads. This also corresponds basically to the arguments
 // of the `ProcessThinLTOModule` function in the LLVM source.
@@ -1080,11 +1082,40 @@ LLVMRustPrepareThinLTOInternalize(const LLVMRustThinLTOData *Data, LLVMModuleRef
 extern "C" bool
 LLVMRustPrepareThinLTOImport(const LLVMRustThinLTOData *Data, LLVMModuleRef M) {
   Module &Mod = *unwrap(M);
+
   const auto &ImportList = Data->ImportLists.lookup(Mod.getModuleIdentifier());
   auto Loader = [&](StringRef Identifier) {
     const auto &Memory = Data->ModuleMap.lookup(Identifier);
     auto &Context = Mod.getContext();
-    return getLazyBitcodeModule(Memory, Context, true, true);
+    auto MOrErr = getLazyBitcodeModule(Memory, Context, true, true);
+
+    if (!MOrErr)
+      return MOrErr;
+
+    // The rest of this closure is a workaround for
+    // https://bugs.llvm.org/show_bug.cgi?id=38184 where during ThinLTO imports
+    // we accidentally import wasm custom sections into different modules,
+    // duplicating them by in the final output artifact.
+    //
+    // The issue is worked around here by manually removing the
+    // `wasm.custom_sections` named metadata node from any imported module. This
+    // we know isn't used by any optimization pass so there's no need for it to
+    // be imported.
+    //
+    // Note that the metadata is currently lazily loaded, so we materialize it
+    // here before looking up if there's metadata inside. The `FunctionImporter`
+    // will immediately materialize metadata anyway after an import, so this
+    // shouldn't be a perf hit.
+    if (Error Err = (*MOrErr)->materializeMetadata()) {
+      Expected<std::unique_ptr<Module>> Ret(std::move(Err));
+      return Ret;
+    }
+
+    auto *WasmCustomSections = (*MOrErr)->getNamedMetadata("wasm.custom_sections");
+    if (WasmCustomSections)
+      WasmCustomSections->eraseFromParent();
+
+    return MOrErr;
   };
   FunctionImporter Importer(Data->Index, Loader);
   Expected<bool> Result = Importer.importFunctions(Mod, ImportList);
@@ -1093,6 +1124,28 @@ LLVMRustPrepareThinLTOImport(const LLVMRustThinLTOData *Data, LLVMModuleRef M) {
     return false;
   }
   return true;
+}
+
+extern "C" typedef void (*LLVMRustModuleNameCallback)(void*, // payload
+                                                      const char*, // importing module name
+                                                      const char*); // imported module name
+
+// Calls `module_name_callback` for each module import done by ThinLTO.
+// The callback is provided with regular null-terminated C strings.
+extern "C" void
+LLVMRustGetThinLTOModuleImports(const LLVMRustThinLTOData *data,
+                                LLVMRustModuleNameCallback module_name_callback,
+                                void* callback_payload) {
+  for (const auto& importing_module : data->ImportLists) {
+    const std::string importing_module_id = importing_module.getKey().str();
+    const auto& imports = importing_module.getValue();
+    for (const auto& imported_module : imports) {
+      const std::string imported_module_id = imported_module.getKey().str();
+      module_name_callback(callback_payload,
+                           importing_module_id.c_str(),
+                           imported_module_id.c_str());
+    }
+  }
 }
 
 // This struct and various functions are sort of a hack right now, but the
@@ -1224,23 +1277,7 @@ LLVMRustThinLTOPatchDICompileUnit(LLVMModuleRef Mod, DICompileUnit *Unit) {
   MD->addOperand(Unit);
 }
 
-extern "C" void
-LLVMRustThinLTORemoveAvailableExternally(LLVMModuleRef Mod) {
-  Module *M = unwrap(Mod);
-  for (Function &F : M->functions()) {
-    if (F.hasAvailableExternallyLinkage())
-      F.deleteBody();
-  }
-}
-
 #else
-
-extern "C" bool
-LLVMRustWriteThinBitcodeToFile(LLVMPassManagerRef PMR,
-                               LLVMModuleRef M,
-                               const char *BcFile) {
-  report_fatal_error("ThinLTO not available");
-}
 
 struct LLVMRustThinLTOData {
 };
@@ -1273,6 +1310,11 @@ LLVMRustPrepareThinLTOInternalize(const LLVMRustThinLTOData *Data, LLVMModuleRef
 
 extern "C" bool
 LLVMRustPrepareThinLTOImport(const LLVMRustThinLTOData *Data, LLVMModuleRef M) {
+  report_fatal_error("ThinLTO not available");
+}
+
+extern "C" LLVMRustThinLTOModuleImports
+LLVMRustGetLLVMRustThinLTOModuleImports(const LLVMRustThinLTOData *Data) {
   report_fatal_error("ThinLTO not available");
 }
 
@@ -1321,11 +1363,6 @@ LLVMRustThinLTOGetDICompileUnit(LLVMModuleRef Mod,
 
 extern "C" void
 LLVMRustThinLTOPatchDICompileUnit(LLVMModuleRef Mod) {
-  report_fatal_error("ThinLTO not available");
-}
-
-extern "C" void
-LLVMRustThinLTORemoveAvailableExternally(LLVMModuleRef Mod) {
   report_fatal_error("ThinLTO not available");
 }
 

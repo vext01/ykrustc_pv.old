@@ -11,10 +11,10 @@
 //! OS-specific functionality.
 
 #![stable(feature = "os", since = "1.0.0")]
-#![allow(missing_docs, bad_style, missing_debug_implementations)]
+#![allow(missing_docs, nonstandard_style, missing_debug_implementations)]
 
 cfg_if! {
-    if #[cfg(dox)] {
+    if #[cfg(rustdoc)] {
 
         // When documenting libstd we want to show unix/windows/linux modules as
         // these are the "main modules" that are used across platforms. This
@@ -47,6 +47,7 @@ cfg_if! {
         #[cfg(target_os = "solaris")]    pub mod solaris;
         #[cfg(target_os = "emscripten")] pub mod emscripten;
         #[cfg(target_os = "fuchsia")]    pub mod fuchsia;
+        #[cfg(target_os = "hermit")]     pub mod hermit;
 
         #[cfg(any(target_os = "redox", unix))]
         #[stable(feature = "rust1", since = "1.0.0")]

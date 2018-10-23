@@ -10,14 +10,14 @@
 
 use attr::HasAttrs;
 use ast;
-use codemap::{hygiene, ExpnInfo, NameAndSpan, ExpnFormat};
+use source_map::{hygiene, ExpnInfo, ExpnFormat};
 use ext::base::ExtCtxt;
 use ext::build::AstBuilder;
 use parse::parser::PathStyle;
 use symbol::Symbol;
 use syntax_pos::Span;
 
-use std::collections::HashSet;
+use rustc_data_structures::fx::FxHashSet;
 
 pub fn collect_derives(cx: &mut ExtCtxt, attrs: &mut Vec<ast::Attribute>) -> Vec<ast::Path> {
     let mut result = Vec::new();
@@ -48,7 +48,7 @@ pub fn collect_derives(cx: &mut ExtCtxt, attrs: &mut Vec<ast::Attribute>) -> Vec
 pub fn add_derived_markers<T>(cx: &mut ExtCtxt, span: Span, traits: &[ast::Path], item: T) -> T
     where T: HasAttrs,
 {
-    let (mut names, mut pretty_name) = (HashSet::new(), "derive(".to_owned());
+    let (mut names, mut pretty_name) = (FxHashSet::default(), "derive(".to_owned());
     for (i, path) in traits.iter().enumerate() {
         if i > 0 {
             pretty_name.push_str(", ");
@@ -60,13 +60,12 @@ pub fn add_derived_markers<T>(cx: &mut ExtCtxt, span: Span, traits: &[ast::Path]
 
     cx.current_expansion.mark.set_expn_info(ExpnInfo {
         call_site: span,
-        callee: NameAndSpan {
-            format: ExpnFormat::MacroAttribute(Symbol::intern(&pretty_name)),
-            span: None,
-            allow_internal_unstable: true,
-            allow_internal_unsafe: false,
-            edition: hygiene::default_edition(),
-        },
+        def_site: None,
+        format: ExpnFormat::MacroAttribute(Symbol::intern(&pretty_name)),
+        allow_internal_unstable: true,
+        allow_internal_unsafe: false,
+        local_inner_macros: false,
+        edition: hygiene::default_edition(),
     });
 
     let span = span.with_ctxt(cx.backtrace());

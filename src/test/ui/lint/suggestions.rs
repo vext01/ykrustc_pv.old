@@ -13,27 +13,36 @@
 #![warn(unused_mut, unused_parens)] // UI tests pass `-A unused`—see Issue #43896
 #![feature(no_debug)]
 
-#[no_mangle] static SHENZHOU: usize = 1; // should suggest `pub`
-//~^ WARN static is marked #[no_mangle]
-#[no_mangle] const DISCOVERY: usize = 1; // should suggest `pub static` rather than `const`
+#[no_mangle] const DISCOVERY: usize = 1;
 //~^ ERROR const items should never be #[no_mangle]
+//~| HELP try a static value
 
-#[no_mangle] // should suggest removal (generics can't be no-mangle)
+#[no_mangle]
+//~^ HELP remove this attribute
 pub fn defiant<T>(_t: T) {}
 //~^ WARN functions generic over types must be mangled
 
 #[no_mangle]
-fn rio_grande() {} // should suggest `pub`
-//~^ WARN function is marked
+fn rio_grande() {}
 
 mod badlands {
     // The private-no-mangle lints shouldn't suggest inserting `pub` when the
     // item is already `pub` (but triggered the lint because, e.g., it's in a
     // private module). (Issue #47383)
-    #[no_mangle] pub static DAUNTLESS: bool = true;
-    //~^ WARN static is marked
-    #[no_mangle] pub fn val_jean() {}
-    //~^ WARN function is marked
+    #[no_mangle] pub const DAUNTLESS: bool = true;
+    //~^ ERROR const items should never be #[no_mangle]
+    //~| HELP try a static value
+    #[no_mangle] pub fn val_jean<T>() {}
+    //~^ WARN functions generic over types must be mangled
+    //~| HELP remove this attribute
+
+    // ... but we can suggest just-`pub` instead of restricted
+    #[no_mangle] pub(crate) const VETAR: bool = true;
+    //~^ ERROR const items should never be #[no_mangle]
+    //~| HELP try a static value
+    #[no_mangle] pub(crate) fn crossfield<T>() {}
+    //~^ WARN functions generic over types must be mangled
+    //~| HELP remove this attribute
 }
 
 struct Equinox {
@@ -42,20 +51,26 @@ struct Equinox {
 
 #[no_debug] // should suggest removal of deprecated attribute
 //~^ WARN deprecated
+//~| HELP remove this attribute
 fn main() {
-    while true { // should suggest `loop`
+    while true {
     //~^ WARN denote infinite loops
-        let mut a = (1); // should suggest no `mut`, no parens
+    //~| HELP use `loop`
+        let mut a = (1);
         //~^ WARN does not need to be mutable
+        //~| HELP remove this `mut`
         //~| WARN unnecessary parentheses
+        //~| HELP remove these parentheses
         // the line after `mut` has a `\t` at the beginning, this is on purpose
         let mut
 	        b = 1;
         //~^^ WARN does not need to be mutable
+        //~| HELP remove this `mut`
         let d = Equinox { warp_factor: 9.975 };
         match d {
-            Equinox { warp_factor: warp_factor } => {} // should suggest shorthand
+            Equinox { warp_factor: warp_factor } => {}
             //~^ WARN this pattern is redundant
+            //~| HELP remove this
         }
         println!("{} {}", a, b);
     }

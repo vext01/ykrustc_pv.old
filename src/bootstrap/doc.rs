@@ -28,7 +28,7 @@ use build_helper::up_to_date;
 
 use util::symlink_dir;
 use builder::{Builder, Compiler, RunConfig, ShouldRun, Step};
-use tool::{self, prepare_tool_cargo, Tool};
+use tool::{self, prepare_tool_cargo, Tool, SourceType};
 use compile;
 use cache::{INTERNER, Interned};
 use config::Config;
@@ -455,7 +455,6 @@ impl Step for Std {
         let out = builder.doc_out(target);
         t!(fs::create_dir_all(&out));
         let compiler = builder.compiler(stage, builder.config.build);
-        let rustdoc = builder.rustdoc(compiler.host);
         let compiler = if builder.force_use_stage1(compiler, target) {
             builder.compiler(1, compiler.host)
         } else {
@@ -480,7 +479,6 @@ impl Step for Std {
         // This way rustdoc generates output directly into the output, and rustdoc
         // will also directly handle merging.
         let my_out = builder.crate_doc_out(target);
-        builder.clear_if_dirty(&my_out, &rustdoc);
         t!(symlink_dir_force(&builder.config, &my_out, &out_dir));
 
         let mut cargo = builder.cargo(compiler, Mode::Std, target, "doc");
@@ -489,7 +487,7 @@ impl Step for Std {
         // Keep a whitelist so we do not build internal stdlib crates, these will be
         // build by the rustc step later if enabled.
         cargo.arg("--no-deps");
-        for krate in &["alloc", "core", "std", "std_unicode"] {
+        for krate in &["alloc", "core", "std"] {
             cargo.arg("-p").arg(krate);
             // Create all crate output directories first to make sure rustdoc uses
             // relative links.
@@ -535,7 +533,6 @@ impl Step for Test {
         let out = builder.doc_out(target);
         t!(fs::create_dir_all(&out));
         let compiler = builder.compiler(stage, builder.config.build);
-        let rustdoc = builder.rustdoc(compiler.host);
         let compiler = if builder.force_use_stage1(compiler, target) {
             builder.compiler(1, compiler.host)
         } else {
@@ -551,7 +548,6 @@ impl Step for Test {
 
         // See docs in std above for why we symlink
         let my_out = builder.crate_doc_out(target);
-        builder.clear_if_dirty(&my_out, &rustdoc);
         t!(symlink_dir_force(&builder.config, &my_out, &out_dir));
 
         let mut cargo = builder.cargo(compiler, Mode::Test, target, "doc");
@@ -603,7 +599,6 @@ impl Step for WhitelistedRustc {
         let out = builder.doc_out(target);
         t!(fs::create_dir_all(&out));
         let compiler = builder.compiler(stage, builder.config.build);
-        let rustdoc = builder.rustdoc(compiler.host);
         let compiler = if builder.force_use_stage1(compiler, target) {
             builder.compiler(1, compiler.host)
         } else {
@@ -619,7 +614,6 @@ impl Step for WhitelistedRustc {
 
         // See docs in std above for why we symlink
         let my_out = builder.crate_doc_out(target);
-        builder.clear_if_dirty(&my_out, &rustdoc);
         t!(symlink_dir_force(&builder.config, &my_out, &out_dir));
 
         let mut cargo = builder.cargo(compiler, Mode::Rustc, target, "doc");
@@ -678,7 +672,6 @@ impl Step for Rustc {
 
         // Get the correct compiler for this stage.
         let compiler = builder.compiler(stage, builder.config.build);
-        let rustdoc = builder.rustdoc(compiler.host);
         let compiler = if builder.force_use_stage1(compiler, target) {
             builder.compiler(1, compiler.host)
         } else {
@@ -686,7 +679,7 @@ impl Step for Rustc {
         };
 
         if !builder.config.compiler_docs {
-            builder.info(&format!("\tskipping - compiler/librustdoc docs disabled"));
+            builder.info("\tskipping - compiler/librustdoc docs disabled");
             return;
         }
 
@@ -699,7 +692,6 @@ impl Step for Rustc {
         // We do not symlink to the same shared folder that already contains std library
         // documentation from previous steps as we do not want to include that.
         let out_dir = builder.stage_out(compiler, Mode::Rustc).join(target).join("doc");
-        builder.clear_if_dirty(&out, &rustdoc);
         t!(symlink_dir_force(&builder.config, &out, &out_dir));
 
         // Build cargo command.
@@ -712,7 +704,7 @@ impl Step for Rustc {
 
         // Find dependencies for top level crates.
         let mut compiler_crates = HashSet::new();
-        for root_crate in &["rustc", "rustc_driver"] {
+        for root_crate in &["rustc", "rustc_driver", "rustc_codegen_llvm"] {
             let interned_root_crate = INTERNER.intern_str(root_crate);
             find_compiler_crates(builder, &interned_root_crate, &mut compiler_crates);
         }
@@ -780,7 +772,6 @@ impl Step for Rustdoc {
 
         // Get the correct compiler for this stage.
         let compiler = builder.compiler(stage, builder.config.build);
-        let rustdoc = builder.rustdoc(compiler.host);
         let compiler = if builder.force_use_stage1(compiler, target) {
             builder.compiler(1, compiler.host)
         } else {
@@ -788,7 +779,7 @@ impl Step for Rustdoc {
         };
 
         if !builder.config.compiler_docs {
-            builder.info(&format!("\tskipping - compiler/librustdoc docs disabled"));
+            builder.info("\tskipping - compiler/librustdoc docs disabled");
             return;
         }
 
@@ -799,14 +790,22 @@ impl Step for Rustdoc {
         builder.ensure(tool::Rustdoc { host: compiler.host });
 
         // Symlink compiler docs to the output directory of rustdoc documentation.
-        let out_dir = builder.stage_out(compiler, Mode::ToolRustc).join(target).join("doc");
+        let out_dir = builder.stage_out(compiler, Mode::ToolRustc)
+            .join(target)
+            .join("doc");
         t!(fs::create_dir_all(&out_dir));
-        builder.clear_if_dirty(&out, &rustdoc);
         t!(symlink_dir_force(&builder.config, &out, &out_dir));
 
         // Build cargo command.
         let mut cargo = prepare_tool_cargo(
-            builder, compiler, Mode::ToolRustc, target, "doc", "src/tools/rustdoc");
+            builder,
+            compiler,
+            Mode::ToolRustc,
+            target,
+            "doc",
+            "src/tools/rustdoc",
+            SourceType::InTree,
+        );
 
         cargo.env("RUSTDOCFLAGS", "--document-private-items");
         builder.run(&mut cargo);

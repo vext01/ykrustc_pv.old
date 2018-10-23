@@ -8,9 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+
 // compile-flags: -C codegen-units=8 -Z thinlto
 // ignore-windows
-// min-llvm-version 4.0
 
 #![feature(linkage)]
 

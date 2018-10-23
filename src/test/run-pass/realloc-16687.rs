@@ -13,9 +13,9 @@
 // Ideally this would be revised to use no_std, but for now it serves
 // well enough to reproduce (and illustrate) the bug from #16687.
 
-#![feature(heap_api, allocator_api)]
+#![feature(allocator_api)]
 
-use std::alloc::{Global, Alloc, Layout, oom};
+use std::alloc::{Global, Alloc, Layout, handle_alloc_error};
 use std::ptr::{self, NonNull};
 
 fn main() {
@@ -37,8 +37,8 @@ unsafe fn test_triangle() -> bool {
         for i in 0..COUNT / 2 {
             let (p0, p1, size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
             for j in 0..size {
-                assert_eq!(*p0.offset(j as isize), i as u8);
-                assert_eq!(*p1.offset(j as isize), i as u8);
+                assert_eq!(*p0.add(j), i as u8);
+                assert_eq!(*p1.add(j), i as u8);
             }
         }
     }
@@ -50,7 +50,7 @@ unsafe fn test_triangle() -> bool {
             println!("allocate({:?})", layout);
         }
 
-        let ret = Global.alloc(layout).unwrap_or_else(|_| oom(layout));
+        let ret = Global.alloc(layout).unwrap_or_else(|_| handle_alloc_error(layout));
 
         if PRINT {
             println!("allocate({:?}) = {:?}", layout, ret);
@@ -64,7 +64,7 @@ unsafe fn test_triangle() -> bool {
             println!("deallocate({:?}, {:?}", ptr, layout);
         }
 
-        Global.dealloc(NonNull::new_unchecked(ptr).as_opaque(), layout);
+        Global.dealloc(NonNull::new_unchecked(ptr), layout);
     }
 
     unsafe fn reallocate(ptr: *mut u8, old: Layout, new: Layout) -> *mut u8 {
@@ -72,8 +72,10 @@ unsafe fn test_triangle() -> bool {
             println!("reallocate({:?}, old={:?}, new={:?})", ptr, old, new);
         }
 
-        let ret = Global.realloc(NonNull::new_unchecked(ptr).as_opaque(), old, new.size())
-            .unwrap_or_else(|_| oom(Layout::from_size_align_unchecked(new.size(), old.align())));
+        let ret = Global.realloc(NonNull::new_unchecked(ptr), old, new.size())
+            .unwrap_or_else(|_| handle_alloc_error(
+                Layout::from_size_align_unchecked(new.size(), old.align())
+            ));
 
         if PRINT {
             println!("reallocate({:?}, old={:?}, new={:?}) = {:?}",
@@ -98,8 +100,8 @@ unsafe fn test_triangle() -> bool {
     for i in 0..COUNT / 2 {
         let (p0, p1, size) = (ascend[2*i], ascend[2*i+1], idx_to_size(i));
         for j in 0..size {
-            *p0.offset(j as isize) = i as u8;
-            *p1.offset(j as isize) = i as u8;
+            *p0.add(j) = i as u8;
+            *p1.add(j) = i as u8;
         }
     }
 

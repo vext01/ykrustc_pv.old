@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use llvm::ValueRef;
 use abi::{FnType, FnTypeExt};
 use callee;
 use common::*;
@@ -17,6 +16,7 @@ use consts;
 use monomorphize;
 use type_::Type;
 use value::Value;
+
 use rustc::ty::{self, Ty};
 use rustc::ty::layout::HasDataLayout;
 use debuginfo;
@@ -33,11 +33,11 @@ impl<'a, 'tcx> VirtualIndex {
         VirtualIndex(index as u64 + 3)
     }
 
-    pub fn get_fn(self, bx: &Builder<'a, 'tcx>,
-                  llvtable: ValueRef,
-                  fn_ty: &FnType<'tcx, Ty<'tcx>>) -> ValueRef {
+    pub fn get_fn(self, bx: &Builder<'a, 'll, 'tcx>,
+                  llvtable: &'ll Value,
+                  fn_ty: &FnType<'tcx, Ty<'tcx>>) -> &'ll Value {
         // Load the data pointer from the object.
-        debug!("get_fn({:?}, {:?})", Value(llvtable), self);
+        debug!("get_fn({:?}, {:?})", llvtable, self);
 
         let llvtable = bx.pointercast(llvtable, fn_ty.llvm_type(bx.cx).ptr_to().ptr_to());
         let ptr_align = bx.tcx().data_layout.pointer_align;
@@ -48,9 +48,9 @@ impl<'a, 'tcx> VirtualIndex {
         ptr
     }
 
-    pub fn get_usize(self, bx: &Builder<'a, 'tcx>, llvtable: ValueRef) -> ValueRef {
+    pub fn get_usize(self, bx: &Builder<'a, 'll, 'tcx>, llvtable: &'ll Value) -> &'ll Value {
         // Load the data pointer from the object.
-        debug!("get_int({:?}, {:?})", Value(llvtable), self);
+        debug!("get_int({:?}, {:?})", llvtable, self);
 
         let llvtable = bx.pointercast(llvtable, Type::isize(bx.cx).ptr_to());
         let usize_align = bx.tcx().data_layout.pointer_align;
@@ -69,11 +69,11 @@ impl<'a, 'tcx> VirtualIndex {
 /// The `trait_ref` encodes the erased self type. Hence if we are
 /// making an object `Foo<Trait>` from a value of type `Foo<T>`, then
 /// `trait_ref` would map `T:Trait`.
-pub fn get_vtable<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
-                            ty: Ty<'tcx>,
-                            trait_ref: Option<ty::PolyExistentialTraitRef<'tcx>>)
-                            -> ValueRef
-{
+pub fn get_vtable(
+    cx: &CodegenCx<'ll, 'tcx>,
+    ty: Ty<'tcx>,
+    trait_ref: ty::PolyExistentialTraitRef<'tcx>,
+) -> &'ll Value {
     let tcx = cx.tcx;
 
     debug!("get_vtable(ty={:?}, trait_ref={:?})", ty, trait_ref);
@@ -86,27 +86,23 @@ pub fn get_vtable<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
     // Not in the cache. Build it.
     let nullptr = C_null(Type::i8p(cx));
 
+    let methods = tcx.vtable_methods(trait_ref.with_self_ty(tcx, ty));
+    let methods = methods.iter().cloned().map(|opt_mth| {
+        opt_mth.map_or(nullptr, |(def_id, substs)| {
+            callee::resolve_and_get_fn(cx, def_id, substs)
+        })
+    });
+
     let (size, align) = cx.size_and_align_of(ty);
-    let mut components: Vec<_> = [
+    let components: Vec<_> = [
         callee::get_fn(cx, monomorphize::resolve_drop_in_place(cx.tcx, ty)),
         C_usize(cx, size.bytes()),
         C_usize(cx, align.abi())
-    ].iter().cloned().collect();
-
-    if let Some(trait_ref) = trait_ref {
-        let trait_ref = trait_ref.with_self_ty(tcx, ty);
-        let methods = tcx.vtable_methods(trait_ref);
-        let methods = methods.iter().cloned().map(|opt_mth| {
-            opt_mth.map_or(nullptr, |(def_id, substs)| {
-                callee::resolve_and_get_fn(cx, def_id, substs)
-            })
-        });
-        components.extend(methods);
-    }
+    ].iter().cloned().chain(methods).collect();
 
     let vtable_const = C_struct(cx, &components, false);
     let align = cx.data_layout().pointer_align;
-    let vtable = consts::addr_of(cx, vtable_const, align, "vtable");
+    let vtable = consts::addr_of(cx, vtable_const, align, Some("vtable"));
 
     debuginfo::create_vtable_metadata(cx, ty, vtable);
 

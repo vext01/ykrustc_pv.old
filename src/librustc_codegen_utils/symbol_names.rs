@@ -98,12 +98,12 @@
 //! DefPaths which are much more robust in the face of changes to the code base.
 
 use rustc::hir::def_id::{DefId, LOCAL_CRATE};
-use rustc::hir::map as hir_map;
+use rustc::hir::Node;
+use rustc::hir::CodegenFnAttrFlags;
 use rustc::hir::map::definitions::DefPathData;
 use rustc::ich::NodeIdHashingMode;
-use rustc::middle::weak_lang_items;
 use rustc::ty::item_path::{self, ItemPathBuffer, RootMode};
-use rustc::ty::maps::Providers;
+use rustc::ty::query::Providers;
 use rustc::ty::subst::Substs;
 use rustc::ty::{self, Ty, TyCtxt, TypeFoldable};
 use rustc::util::common::record_time;
@@ -111,7 +111,6 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_mir::monomorphize::item::{InstantiationMode, MonoItem, MonoItemExt};
 use rustc_mir::monomorphize::Instance;
 
-use syntax::attr;
 use syntax_pos::symbol::Symbol;
 
 use std::fmt::Write;
@@ -171,7 +170,7 @@ fn get_symbol_hash<'a, 'tcx>(
         // If this is a function, we hash the signature as well.
         // This is not *strictly* needed, but it may help in some
         // situations, see the `run-make/a-b-a-linker-guard` test.
-        if let ty::TyFnDef(..) = item_type.sty {
+        if let ty::FnDef(..) = item_type.sty {
             item_type.fn_sig(tcx).hash_stable(&mut hcx, &mut hasher);
         }
 
@@ -201,7 +200,7 @@ fn get_symbol_hash<'a, 'tcx>(
 
         if avoid_cross_crate_conflicts {
             let instantiating_crate = if is_generic {
-                if !def_id.is_local() && tcx.share_generics() {
+                if !def_id.is_local() && tcx.sess.opts.share_generics() {
                     // If we are re-using a monomorphization from another crate,
                     // we have to compute the symbol hash accordingly.
                     let upstream_monomorphizations = tcx.upstream_monomorphizations_for(def_id);
@@ -229,7 +228,7 @@ fn get_symbol_hash<'a, 'tcx>(
 fn def_symbol_name<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> ty::SymbolName {
     let mut buffer = SymbolPathBuffer::new();
     item_path::with_forced_absolute_paths(|| {
-        tcx.push_item_path(&mut buffer, def_id);
+        tcx.push_item_path(&mut buffer, def_id, false);
     });
     buffer.into_interned()
 }
@@ -260,34 +259,30 @@ fn compute_symbol_name<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, instance: Instance
     }
 
     // FIXME(eddyb) Precompute a custom symbol name based on attributes.
-    let attrs = tcx.get_attrs(def_id);
     let is_foreign = if let Some(id) = node_id {
         match tcx.hir.get(id) {
-            hir_map::NodeForeignItem(_) => true,
+            Node::ForeignItem(_) => true,
             _ => false,
         }
     } else {
         tcx.is_foreign_item(def_id)
     };
 
-    if let Some(name) = weak_lang_items::link_name(&attrs) {
-        return name.to_string();
-    }
-
+    let attrs = tcx.codegen_fn_attrs(def_id);
     if is_foreign {
-        if let Some(name) = attr::first_attr_value_str_by_name(&attrs, "link_name") {
+        if let Some(name) = attrs.link_name {
             return name.to_string();
         }
         // Don't mangle foreign items.
         return tcx.item_name(def_id).to_string();
     }
 
-    if let Some(name) = tcx.codegen_fn_attrs(def_id).export_name {
+    if let Some(name) = &attrs.export_name {
         // Use provided name
         return name.to_string();
     }
 
-    if attr::contains_name(&attrs, "no_mangle") {
+    if attrs.flags.contains(CodegenFnAttrFlags::NO_MANGLE) {
         // Don't mangle
         return tcx.item_name(def_id).to_string();
     }
@@ -343,6 +338,7 @@ fn compute_symbol_name<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, instance: Instance
 //
 // To be able to work on all platforms and get *some* reasonable output, we
 // use C++ name-mangling.
+#[derive(Debug)]
 struct SymbolPathBuffer {
     result: String,
     temp_buf: String,
@@ -424,7 +420,7 @@ pub fn sanitize(result: &mut String, s: &str) -> bool {
             '-' | ':' => result.push('.'),
 
             // These are legal symbols
-            'a'...'z' | 'A'...'Z' | '0'...'9' | '_' | '.' | '$' => result.push(c),
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '.' | '$' => result.push(c),
 
             _ => {
                 result.push('$');

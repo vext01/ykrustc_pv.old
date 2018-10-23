@@ -20,7 +20,7 @@ use syntax::symbol::Symbol;
 use rustc::session::{Session, CompileIncomplete};
 use rustc::session::config::OutputFilenames;
 use rustc::ty::TyCtxt;
-use rustc::ty::maps::Providers;
+use rustc::ty::query::Providers;
 use rustc::middle::cstore::MetadataLoader;
 use rustc::dep_graph::DepGraph;
 use rustc_codegen_utils::codegen_backend::{CodegenBackend, MetadataOnlyCodegenBackend};
@@ -63,7 +63,7 @@ impl CodegenBackend for TheBackend {
         let crate_name = ongoing_codegen.downcast::<Symbol>()
             .expect("in join_codegen_and_link: ongoing_codegen is not a Symbol");
         for &crate_type in sess.opts.crate_types.iter() {
-            if crate_type != CrateType::CrateTypeExecutable {
+            if crate_type != CrateType::Rlib {
                 sess.fatal(&format!("Crate type is {:?}", crate_type));
             }
             let output_name =

@@ -10,8 +10,6 @@
 
 // aux-build:two_macros.rs
 
-#![feature(use_extern_macros)]
-
 mod foo {
     extern crate two_macros;
     pub use self::two_macros::m as panic;
@@ -39,10 +37,10 @@ mod m4 {
 
 mod m5 {
     macro_rules! m { () => {
-        macro_rules! panic { () => {} } //~ ERROR `panic` is already in scope
+        macro_rules! panic { () => {} }
     } }
     m!();
-    panic!();
+    panic!(); //~ ERROR `panic` is ambiguous
 }
 
 #[macro_use(n)]

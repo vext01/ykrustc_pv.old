@@ -10,8 +10,7 @@
 
 use rustc::ty::TyCtxt;
 use rustc::mir::*;
-use rustc_data_structures::bitvec::BitVector;
-use rustc_data_structures::indexed_vec::Idx;
+use rustc_data_structures::bit_set::BitSet;
 use transform::{MirPass, MirSource};
 use util::patch::MirPatch;
 
@@ -42,23 +41,26 @@ impl MirPass for RemoveNoopLandingPads {
 }
 
 impl RemoveNoopLandingPads {
-    fn is_nop_landing_pad(&self, bb: BasicBlock, mir: &Mir, nop_landing_pads: &BitVector)
-                          -> bool
-    {
+    fn is_nop_landing_pad(
+        &self,
+        bb: BasicBlock,
+        mir: &Mir,
+        nop_landing_pads: &BitSet<BasicBlock>,
+    ) -> bool {
         for stmt in &mir[bb].statements {
             match stmt.kind {
-                StatementKind::ReadForMatch(_) |
+                StatementKind::FakeRead(..) |
                 StatementKind::StorageLive(_) |
                 StatementKind::StorageDead(_) |
                 StatementKind::EndRegion(_) |
-                StatementKind::UserAssertTy(..) |
+                StatementKind::AscribeUserType(..) |
                 StatementKind::Nop => {
                     // These are all nops in a landing pad (there's some
                     // borrowck interaction between EndRegion and storage
                     // instructions, but this should all run after borrowck).
                 }
 
-                StatementKind::Assign(Place::Local(_), Rvalue::Use(_)) => {
+                StatementKind::Assign(Place::Local(_), box Rvalue::Use(_)) => {
                     // Writing to a local (e.g. a drop flag) does not
                     // turn a landing pad to a non-nop
                 }
@@ -79,8 +81,8 @@ impl RemoveNoopLandingPads {
             TerminatorKind::SwitchInt { .. } |
             TerminatorKind::FalseEdges { .. } |
             TerminatorKind::FalseUnwind { .. } => {
-                terminator.successors().all(|succ| {
-                    nop_landing_pads.contains(succ.index())
+                terminator.successors().all(|&succ| {
+                    nop_landing_pads.contains(succ)
                 })
             },
             TerminatorKind::GeneratorDrop |
@@ -109,7 +111,7 @@ impl RemoveNoopLandingPads {
 
         let mut jumps_folded = 0;
         let mut landing_pads_removed = 0;
-        let mut nop_landing_pads = BitVector::new(mir.basic_blocks().len());
+        let mut nop_landing_pads = BitSet::new_empty(mir.basic_blocks().len());
 
         // This is a post-order traversal, so that if A post-dominates B
         // then A will be visited before B.
@@ -117,7 +119,7 @@ impl RemoveNoopLandingPads {
         for bb in postorder {
             debug!("  processing {:?}", bb);
             for target in mir[bb].terminator_mut().successors_mut() {
-                if *target != resume_block && nop_landing_pads.contains(target.index()) {
+                if *target != resume_block && nop_landing_pads.contains(*target) {
                     debug!("    folding noop jump to {:?} to resume block", target);
                     *target = resume_block;
                     jumps_folded += 1;
@@ -138,7 +140,7 @@ impl RemoveNoopLandingPads {
 
             let is_nop_landing_pad = self.is_nop_landing_pad(bb, mir, &nop_landing_pads);
             if is_nop_landing_pad {
-                nop_landing_pads.insert(bb.index());
+                nop_landing_pads.insert(bb);
             }
             debug!("    is_nop_landing_pad({:?}) = {}", bb, is_nop_landing_pad);
         }

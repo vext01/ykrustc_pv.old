@@ -43,7 +43,10 @@ pub fn gather_loans_in_fn<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
     let mut glcx = GatherLoanCtxt {
         bccx,
         all_loans: Vec::new(),
-        item_ub: region::Scope::Node(bccx.tcx.hir.body(body).value.hir_id.local_id),
+        item_ub: region::Scope {
+            id: bccx.tcx.hir.body(body).value.hir_id.local_id,
+            data: region::ScopeData::Node
+        },
         move_data: MoveData::default(),
         move_error_collector: move_error::MoveErrorCollector::new(),
     };
@@ -145,12 +148,11 @@ impl<'a, 'tcx> euv::Delegate<'tcx> for GatherLoanCtxt<'a, 'tcx> {
               assignment_id: ast::NodeId,
               assignment_span: Span,
               assignee_cmt: &mc::cmt_<'tcx>,
-              mode: euv::MutateMode)
+              _: euv::MutateMode)
     {
         self.guarantee_assignment_valid(assignment_id,
                                         assignment_span,
-                                        assignee_cmt,
-                                        mode);
+                                        assignee_cmt);
     }
 
     fn decl_without_init(&mut self, id: ast::NodeId, _span: Span) {
@@ -246,8 +248,7 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
     fn guarantee_assignment_valid(&mut self,
                                   assignment_id: ast::NodeId,
                                   assignment_span: Span,
-                                  cmt: &mc::cmt_<'tcx>,
-                                  mode: euv::MutateMode) {
+                                  cmt: &mc::cmt_<'tcx>) {
 
         let opt_lp = opt_loan_path(cmt);
         debug!("guarantee_assignment_valid(assignment_id={}, cmt={:?}) opt_lp={:?}",
@@ -282,9 +283,7 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
                                                 self.bccx.tcx.hir.node_to_hir_id(assignment_id)
                                                     .local_id,
                                                 assignment_span,
-                                                lp,
-                                                self.bccx.tcx.hir.node_to_hir_id(cmt.id).local_id,
-                                                mode);
+                                                lp);
             }
             None => {
                 // This can occur with e.g. `*foo() = 5`.  In such
@@ -320,7 +319,7 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
         // Check that the lifetime of the borrow does not exceed
         // the lifetime of the data being borrowed.
         if lifetime::guarantee_lifetime(self.bccx, self.item_ub,
-                                        borrow_span, cause, cmt, loan_region, req_kind).is_err() {
+                                        borrow_span, cause, cmt, loan_region).is_err() {
             return; // reported an error, no sense in reporting more.
         }
 
@@ -369,7 +368,7 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
                     ty::ReClosureBound(..) |
                     ty::ReLateBound(..) |
                     ty::ReVar(..) |
-                    ty::ReSkolemized(..) |
+                    ty::RePlaceholder(..) |
                     ty::ReErased => {
                         span_bug!(
                             cmt.span,
@@ -379,7 +378,10 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
                 };
                 debug!("loan_scope = {:?}", loan_scope);
 
-                let borrow_scope = region::Scope::Node(borrow_id);
+                let borrow_scope = region::Scope {
+                    id: borrow_id,
+                    data: region::ScopeData::Node
+                };
                 let gen_scope = self.compute_gen_scope(borrow_scope, loan_scope);
                 debug!("gen_scope = {:?}", gen_scope);
 

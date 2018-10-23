@@ -8,12 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use llvm::{self, ValueRef};
+use llvm::{self, LLVMConstInBoundsGEP};
 use rustc::ty::{self, Ty};
-use rustc::ty::layout::{self, Align, TyLayout, LayoutOf};
+use rustc::ty::layout::{self, Align, TyLayout, LayoutOf, Size};
 use rustc::mir;
 use rustc::mir::tcx::PlaceTy;
-use rustc_data_structures::indexed_vec::Idx;
 use base;
 use builder::Builder;
 use common::{CodegenCx, C_undef, C_usize, C_u8, C_u32, C_uint, C_null, C_uint_big};
@@ -22,19 +21,18 @@ use type_of::LayoutLlvmExt;
 use type_::Type;
 use value::Value;
 use glue;
-
-use std::ptr;
+use mir::constant::const_alloc_to_llvm;
 
 use super::{FunctionCx, LocalRef};
 use super::operand::{OperandRef, OperandValue};
 
 #[derive(Copy, Clone, Debug)]
-pub struct PlaceRef<'tcx> {
+pub struct PlaceRef<'ll, 'tcx> {
     /// Pointer to the contents of the place
-    pub llval: ValueRef,
+    pub llval: &'ll Value,
 
     /// This place's extra data if it is unsized, or null
-    pub llextra: ValueRef,
+    pub llextra: Option<&'ll Value>,
 
     /// Monomorphized type of this place, including variant information
     pub layout: TyLayout<'tcx>,
@@ -43,32 +41,62 @@ pub struct PlaceRef<'tcx> {
     pub align: Align,
 }
 
-impl<'a, 'tcx> PlaceRef<'tcx> {
-    pub fn new_sized(llval: ValueRef,
-                     layout: TyLayout<'tcx>,
-                     align: Align)
-                     -> PlaceRef<'tcx> {
+impl PlaceRef<'ll, 'tcx> {
+    pub fn new_sized(
+        llval: &'ll Value,
+        layout: TyLayout<'tcx>,
+        align: Align,
+    ) -> PlaceRef<'ll, 'tcx> {
+        assert!(!layout.is_unsized());
         PlaceRef {
             llval,
-            llextra: ptr::null_mut(),
+            llextra: None,
             layout,
             align
         }
     }
 
-    pub fn alloca(bx: &Builder<'a, 'tcx>, layout: TyLayout<'tcx>, name: &str)
-                  -> PlaceRef<'tcx> {
+    pub fn from_const_alloc(
+        bx: &Builder<'a, 'll, 'tcx>,
+        layout: TyLayout<'tcx>,
+        alloc: &mir::interpret::Allocation,
+        offset: Size,
+    ) -> PlaceRef<'ll, 'tcx> {
+        let init = const_alloc_to_llvm(bx.cx, alloc);
+        let base_addr = consts::addr_of(bx.cx, init, layout.align, None);
+
+        let llval = unsafe { LLVMConstInBoundsGEP(
+            consts::bitcast(base_addr, Type::i8p(bx.cx)),
+            &C_usize(bx.cx, offset.bytes()),
+            1,
+        )};
+        let llval = consts::bitcast(llval, layout.llvm_type(bx.cx).ptr_to());
+        PlaceRef::new_sized(llval, layout, alloc.align)
+    }
+
+    pub fn alloca(bx: &Builder<'a, 'll, 'tcx>, layout: TyLayout<'tcx>, name: &str)
+                  -> PlaceRef<'ll, 'tcx> {
         debug!("alloca({:?}: {:?})", name, layout);
+        assert!(!layout.is_unsized(), "tried to statically allocate unsized place");
         let tmp = bx.alloca(layout.llvm_type(bx.cx), name, layout.align);
         Self::new_sized(tmp, layout, layout.align)
     }
 
-    pub fn len(&self, cx: &CodegenCx<'a, 'tcx>) -> ValueRef {
+    /// Returns a place for an indirect reference to an unsized place.
+    pub fn alloca_unsized_indirect(bx: &Builder<'a, 'll, 'tcx>, layout: TyLayout<'tcx>, name: &str)
+                  -> PlaceRef<'ll, 'tcx> {
+        debug!("alloca_unsized_indirect({:?}: {:?})", name, layout);
+        assert!(layout.is_unsized(), "tried to allocate indirect place for sized values");
+        let ptr_ty = bx.cx.tcx.mk_mut_ptr(layout.ty);
+        let ptr_layout = bx.cx.layout_of(ptr_ty);
+        Self::alloca(bx, ptr_layout, name)
+    }
+
+    pub fn len(&self, cx: &CodegenCx<'ll, 'tcx>) -> &'ll Value {
         if let layout::FieldPlacement::Array { count, .. } = self.layout.fields {
             if self.layout.is_unsized() {
-                assert!(self.has_extra());
                 assert_eq!(count, 0);
-                self.llextra
+                self.llextra.unwrap()
             } else {
                 C_usize(cx, count)
             }
@@ -77,14 +105,10 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
         }
     }
 
-    pub fn has_extra(&self) -> bool {
-        !self.llextra.is_null()
-    }
-
-    pub fn load(&self, bx: &Builder<'a, 'tcx>) -> OperandRef<'tcx> {
+    pub fn load(&self, bx: &Builder<'a, 'll, 'tcx>) -> OperandRef<'ll, 'tcx> {
         debug!("PlaceRef::load: {:?}", self);
 
-        assert!(!self.has_extra());
+        assert_eq!(self.llextra.is_some(), self.layout.is_unsized());
 
         if self.layout.is_zst() {
             return OperandRef::new_zst(bx.cx, self.layout);
@@ -106,32 +130,28 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
             }
         };
 
-        let val = if self.layout.is_llvm_immediate() {
-            let mut const_llval = ptr::null_mut();
+        let val = if let Some(llextra) = self.llextra {
+            OperandValue::Ref(self.llval, Some(llextra), self.align)
+        } else if self.layout.is_llvm_immediate() {
+            let mut const_llval = None;
             unsafe {
-                let global = llvm::LLVMIsAGlobalVariable(self.llval);
-                if !global.is_null() && llvm::LLVMIsGlobalConstant(global) == llvm::True {
-                    const_llval = llvm::LLVMGetInitializer(global);
+                if let Some(global) = llvm::LLVMIsAGlobalVariable(self.llval) {
+                    if llvm::LLVMIsGlobalConstant(global) == llvm::True {
+                        const_llval = llvm::LLVMGetInitializer(global);
+                    }
                 }
             }
-
-            let llval = if !const_llval.is_null() {
-                const_llval
-            } else {
+            let llval = const_llval.unwrap_or_else(|| {
                 let load = bx.load(self.llval, self.align);
                 if let layout::Abi::Scalar(ref scalar) = self.layout.abi {
                     scalar_load_metadata(load, scalar);
                 }
                 load
-            };
+            });
             OperandValue::Immediate(base::to_immediate(bx, llval, self.layout))
         } else if let layout::Abi::ScalarPair(ref a, ref b) = self.layout.abi {
             let load = |i, scalar: &layout::Scalar| {
-                let mut llptr = bx.struct_gep(self.llval, i as u64);
-                // Make sure to always load i1 as i8.
-                if scalar.is_bool() {
-                    llptr = bx.pointercast(llptr, Type::i8p(bx.cx));
-                }
+                let llptr = bx.struct_gep(self.llval, i as u64);
                 let load = bx.load(llptr, self.align);
                 scalar_load_metadata(load, scalar);
                 if scalar.is_bool() {
@@ -142,18 +162,18 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
             };
             OperandValue::Pair(load(0, a), load(1, b))
         } else {
-            OperandValue::Ref(self.llval, self.align)
+            OperandValue::Ref(self.llval, None, self.align)
         };
 
         OperandRef { val, layout: self.layout }
     }
 
     /// Access a field, at a point when the value's case is known.
-    pub fn project_field(self, bx: &Builder<'a, 'tcx>, ix: usize) -> PlaceRef<'tcx> {
+    pub fn project_field(self, bx: &Builder<'a, 'll, 'tcx>, ix: usize) -> PlaceRef<'ll, 'tcx> {
         let cx = bx.cx;
         let field = self.layout.field(cx, ix);
         let offset = self.layout.fields.offset(ix);
-        let align = self.align.min(self.layout.align).min(field.align);
+        let effective_field_align = self.align.restrict_for_offset(offset);
 
         let simple = || {
             // Unions and newtypes only use an offset of 0.
@@ -172,10 +192,10 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
                 llextra: if cx.type_has_metadata(field.ty) {
                     self.llextra
                 } else {
-                    ptr::null_mut()
+                    None
                 },
                 layout: field,
-                align,
+                align: effective_field_align,
             }
         };
 
@@ -184,14 +204,14 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
         //   * known alignment - sized types, [T], str or a foreign type
         //   * packed struct - there is no alignment padding
         match field.ty.sty {
-            _ if !self.has_extra() => {
+            _ if self.llextra.is_none() => {
                 debug!("Unsized field `{}`, of `{:?}` has no metadata for adjustment",
-                    ix, Value(self.llval));
+                    ix, self.llval);
                 return simple();
             }
             _ if !field.is_unsized() => return simple(),
-            ty::TySlice(..) | ty::TyStr | ty::TyForeign(..) => return simple(),
-            ty::TyAdt(def, _) => {
+            ty::Slice(..) | ty::Str | ty::Foreign(..) => return simple(),
+            ty::Adt(def, _) => {
                 if def.repr.packed() {
                     // FIXME(eddyb) generalize the adjustment when we
                     // start supporting packing to larger alignments.
@@ -234,7 +254,7 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
         let offset = bx.and(bx.add(unaligned_offset, align_sub_1),
         bx.neg(unsized_align));
 
-        debug!("struct_field_ptr: DST field offset: {:?}", Value(offset));
+        debug!("struct_field_ptr: DST field offset: {:?}", offset);
 
         // Cast and adjust pointer
         let byte_ptr = bx.pointercast(self.llval, Type::i8p(cx));
@@ -248,14 +268,14 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
             llval: bx.pointercast(byte_ptr, ll_fty.ptr_to()),
             llextra: self.llextra,
             layout: field,
-            align,
+            align: effective_field_align,
         }
     }
 
     /// Obtain the actual discriminant of a value.
-    pub fn codegen_get_discr(self, bx: &Builder<'a, 'tcx>, cast_to: Ty<'tcx>) -> ValueRef {
+    pub fn codegen_get_discr(self, bx: &Builder<'a, 'll, 'tcx>, cast_to: Ty<'tcx>) -> &'ll Value {
         let cast_to = bx.cx.layout_of(cast_to).immediate_llvm_type(bx.cx);
-        if self.layout.abi == layout::Abi::Uninhabited {
+        if self.layout.abi.is_uninhabited() {
             return C_undef(cast_to);
         }
         match self.layout.variants {
@@ -275,7 +295,11 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
             layout::Variants::Single { .. } => bug!(),
             layout::Variants::Tagged { ref tag, .. } => {
                 let signed = match tag.value {
-                    layout::Int(_, signed) => signed,
+                    // We use `i1` for bytes that are always `0` or `1`,
+                    // e.g. `#[repr(i8)] enum E { A, B }`, but we can't
+                    // let LLVM interpret the `i1` as signed, because
+                    // then `i1 1` (i.e. E::B) is effectively `i8 -1`.
+                    layout::Int(_, signed) => !tag.is_bool() && signed,
                     _ => false
                 };
                 bx.intcast(lldiscr, cast_to, signed)
@@ -313,8 +337,8 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
 
     /// Set the discriminant for a new value of the given case of the given
     /// representation.
-    pub fn codegen_set_discr(&self, bx: &Builder<'a, 'tcx>, variant_index: usize) {
-        if self.layout.for_variant(bx.cx, variant_index).abi == layout::Abi::Uninhabited {
+    pub fn codegen_set_discr(&self, bx: &Builder<'a, 'll, 'tcx>, variant_index: usize) {
+        if self.layout.for_variant(bx.cx, variant_index).abi.is_uninhabited() {
             return;
         }
         match self.layout.variants {
@@ -367,18 +391,18 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
         }
     }
 
-    pub fn project_index(&self, bx: &Builder<'a, 'tcx>, llindex: ValueRef)
-                         -> PlaceRef<'tcx> {
+    pub fn project_index(&self, bx: &Builder<'a, 'll, 'tcx>, llindex: &'ll Value)
+                         -> PlaceRef<'ll, 'tcx> {
         PlaceRef {
             llval: bx.inbounds_gep(self.llval, &[C_usize(bx.cx, 0), llindex]),
-            llextra: ptr::null_mut(),
+            llextra: None,
             layout: self.layout.field(bx.cx, 0),
             align: self.align
         }
     }
 
-    pub fn project_downcast(&self, bx: &Builder<'a, 'tcx>, variant_index: usize)
-                            -> PlaceRef<'tcx> {
+    pub fn project_downcast(&self, bx: &Builder<'a, 'll, 'tcx>, variant_index: usize)
+                            -> PlaceRef<'ll, 'tcx> {
         let mut downcast = *self;
         downcast.layout = self.layout.for_variant(bx.cx, variant_index);
 
@@ -389,20 +413,20 @@ impl<'a, 'tcx> PlaceRef<'tcx> {
         downcast
     }
 
-    pub fn storage_live(&self, bx: &Builder<'a, 'tcx>) {
+    pub fn storage_live(&self, bx: &Builder<'a, 'll, 'tcx>) {
         bx.lifetime_start(self.llval, self.layout.size);
     }
 
-    pub fn storage_dead(&self, bx: &Builder<'a, 'tcx>) {
+    pub fn storage_dead(&self, bx: &Builder<'a, 'll, 'tcx>) {
         bx.lifetime_end(self.llval, self.layout.size);
     }
 }
 
-impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
+impl FunctionCx<'a, 'll, 'tcx> {
     pub fn codegen_place(&mut self,
-                        bx: &Builder<'a, 'tcx>,
+                        bx: &Builder<'a, 'll, 'tcx>,
                         place: &mir::Place<'tcx>)
-                        -> PlaceRef<'tcx> {
+                        -> PlaceRef<'ll, 'tcx> {
         debug!("codegen_place(place={:?})", place);
 
         let cx = bx.cx;
@@ -413,6 +437,9 @@ impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
                 LocalRef::Place(place) => {
                     return place;
                 }
+                LocalRef::UnsizedPlace(place) => {
+                    return place.load(bx).deref(&cx);
+                }
                 LocalRef::Operand(..) => {
                     bug!("using operand local {:?} as place", place);
                 }
@@ -421,6 +448,32 @@ impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
 
         let result = match *place {
             mir::Place::Local(_) => bug!(), // handled above
+            mir::Place::Promoted(box (index, ty)) => {
+                let param_env = ty::ParamEnv::reveal_all();
+                let cid = mir::interpret::GlobalId {
+                    instance: self.instance,
+                    promoted: Some(index),
+                };
+                let layout = cx.layout_of(self.monomorphize(&ty));
+                match bx.tcx().const_eval(param_env.and(cid)) {
+                    Ok(val) => match val.val {
+                        mir::interpret::ConstValue::ByRef(_, alloc, offset) => {
+                            PlaceRef::from_const_alloc(bx, layout, alloc, offset)
+                        }
+                        _ => bug!("promoteds should have an allocation: {:?}", val),
+                    },
+                    Err(_) => {
+                        // this is unreachable as long as runtime
+                        // and compile-time agree on values
+                        // With floats that won't always be true
+                        // so we generate an abort
+                        let fnname = bx.cx.get_intrinsic(&("llvm.trap"));
+                        bx.call(fnname, &[], None);
+                        let llval = C_undef(layout.llvm_type(bx.cx).ptr_to());
+                        PlaceRef::new_sized(llval, layout, layout.align)
+                    }
+                }
+            }
             mir::Place::Static(box mir::Static { def_id, ty }) => {
                 let layout = cx.layout_of(self.monomorphize(&ty));
                 PlaceRef::new_sized(consts::get_static(cx, def_id), layout, layout.align)
@@ -468,9 +521,8 @@ impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
                         subslice.layout = bx.cx.layout_of(self.monomorphize(&projected_ty));
 
                         if subslice.layout.is_unsized() {
-                            assert!(cg_base.has_extra());
-                            subslice.llextra = bx.sub(cg_base.llextra,
-                                C_usize(bx.cx, (from as u64) + (to as u64)));
+                            subslice.llextra = Some(bx.sub(cg_base.llextra.unwrap(),
+                                C_usize(bx.cx, (from as u64) + (to as u64))));
                         }
 
                         // Cast the place pointer type to the new

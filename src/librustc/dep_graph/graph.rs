@@ -12,7 +12,7 @@ use errors::DiagnosticBuilder;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
-use rustc_data_structures::small_vec::SmallVec;
+use smallvec::SmallVec;
 use rustc_data_structures::sync::{Lrc, Lock};
 use std::env;
 use std::hash::Hash;
@@ -39,11 +39,12 @@ pub struct DepGraph {
     fingerprints: Lrc<Lock<IndexVec<DepNodeIndex, Fingerprint>>>
 }
 
-
-newtype_index!(DepNodeIndex);
+newtype_index! {
+    pub struct DepNodeIndex { .. }
+}
 
 impl DepNodeIndex {
-    const INVALID: DepNodeIndex = DepNodeIndex(::std::u32::MAX);
+    const INVALID: DepNodeIndex = DepNodeIndex::MAX;
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -490,7 +491,12 @@ impl DepGraph {
     }
 
     pub(super) fn dep_node_debug_str(&self, dep_node: DepNode) -> Option<String> {
-        self.data.as_ref().and_then(|t| t.dep_node_debug.borrow().get(&dep_node).cloned())
+        self.data
+            .as_ref()?
+            .dep_node_debug
+            .borrow()
+            .get(&dep_node)
+            .cloned()
     }
 
     pub fn edge_deduplication_data(&self) -> (u64, u64) {
@@ -656,7 +662,7 @@ impl DepGraph {
                     // We failed to mark it green, so we try to force the query.
                     debug!("try_mark_green({:?}) --- trying to force \
                             dependency {:?}", dep_node, dep_dep_node);
-                    if ::ty::maps::force_from_dep_node(tcx, dep_dep_node) {
+                    if ::ty::query::force_from_dep_node(tcx, dep_dep_node) {
                         let dep_dep_node_color = data.colors.borrow().get(dep_dep_node_index);
 
                         match dep_dep_node_color {
@@ -742,14 +748,14 @@ impl DepGraph {
             // and emit other diagnostics before these diagnostics are emitted.
             // Such diagnostics should be emitted after these.
             // See https://github.com/rust-lang/rust/issues/48685
-            let diagnostics = tcx.on_disk_query_result_cache
+            let diagnostics = tcx.queries.on_disk_cache
                                  .load_diagnostics(tcx, prev_dep_node_index);
 
             if diagnostics.len() > 0 {
                 let handle = tcx.sess.diagnostic();
 
                 // Promote the previous diagnostics to the current session.
-                tcx.on_disk_query_result_cache
+                tcx.queries.on_disk_cache
                    .store_diagnostics(dep_node_index, diagnostics.clone());
 
                 for diagnostic in diagnostics {
@@ -874,7 +880,7 @@ pub struct WorkProduct {
     pub saved_files: Vec<(WorkProductFileKind, String)>,
 }
 
-#[derive(Clone, Copy, Debug, RustcEncodable, RustcDecodable)]
+#[derive(Clone, Copy, Debug, RustcEncodable, RustcDecodable, PartialEq)]
 pub enum WorkProductFileKind {
     Object,
     Bytecode,
@@ -1021,7 +1027,7 @@ impl CurrentDepGraph {
         } = task {
             debug_assert_eq!(node, key);
             let krate_idx = self.node_to_node_index[&DepNode::new_no_params(DepKind::Krate)];
-            self.alloc_node(node, SmallVec::one(krate_idx))
+            self.alloc_node(node, smallvec![krate_idx])
         } else {
             bug!("complete_eval_always_task() - Expected eval always task to be popped");
         }
@@ -1121,14 +1127,16 @@ impl DepNodeColorMap {
         match self.values[index] {
             COMPRESSED_NONE => None,
             COMPRESSED_RED => Some(DepNodeColor::Red),
-            value => Some(DepNodeColor::Green(DepNodeIndex(value - COMPRESSED_FIRST_GREEN)))
+            value => Some(DepNodeColor::Green(DepNodeIndex::from_u32(
+                value - COMPRESSED_FIRST_GREEN
+            )))
         }
     }
 
     fn insert(&mut self, index: SerializedDepNodeIndex, color: DepNodeColor) {
         self.values[index] = match color {
             DepNodeColor::Red => COMPRESSED_RED,
-            DepNodeColor::Green(index) => index.0 + COMPRESSED_FIRST_GREEN,
+            DepNodeColor::Green(index) => index.as_u32() + COMPRESSED_FIRST_GREEN,
         }
     }
 }

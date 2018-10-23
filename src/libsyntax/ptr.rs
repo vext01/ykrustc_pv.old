@@ -38,7 +38,7 @@
 
 use std::fmt::{self, Display, Debug};
 use std::iter::FromIterator;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::{mem, ptr, slice, vec};
 
 use serialize::{Encodable, Decodable, Encoder, Decoder};
@@ -46,7 +46,7 @@ use serialize::{Encodable, Decodable, Encoder, Decoder};
 use rustc_data_structures::stable_hasher::{StableHasher, StableHasherResult,
                                            HashStable};
 /// An owned smart pointer.
-#[derive(Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Hash, PartialEq, Eq)]
 pub struct P<T: ?Sized> {
     ptr: Box<T>
 }
@@ -100,6 +100,12 @@ impl<T: ?Sized> Deref for P<T> {
 
     fn deref(&self) -> &T {
         &self.ptr
+    }
+}
+
+impl<T: ?Sized> DerefMut for P<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.ptr
     }
 }
 

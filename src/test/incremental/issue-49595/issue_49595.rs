@@ -19,8 +19,7 @@
 #![rustc_partition_codegened(module="issue_49595-lit_test", cfg="cfail3")]
 
 mod tests {
-    #[cfg_attr(not(cfail1), ignore)]
-    #[test]
+    #[cfg_attr(not(cfail1), test)]
     fn test() {
     }
 }

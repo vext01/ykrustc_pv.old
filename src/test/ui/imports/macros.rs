@@ -10,8 +10,6 @@
 
 // aux-build:two_macros.rs
 
-#![feature(item_like_imports, use_extern_macros)]
-
 extern crate two_macros; // two identity macros `m` and `n`
 
 mod foo {
@@ -47,7 +45,7 @@ mod m3 {
 mod m4 {
     macro_rules! m { () => {} }
     use two_macros::m;
-    m!(); //~ ERROR ambiguous
+    m!();
 }
 
 fn main() {}

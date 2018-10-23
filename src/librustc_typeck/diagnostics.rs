@@ -207,7 +207,7 @@ let string = "salutations !";
 // The ordering relation for strings can't be evaluated at compile time,
 // so this doesn't work:
 match string {
-    "hello" ... "world" => {}
+    "hello" ..= "world" => {}
     _ => {}
 }
 
@@ -1041,32 +1041,38 @@ enum NightsWatch {}
 "##,
 
 E0087: r##"
-Too many type parameters were supplied for a function. For example:
+#### Note: this error code is no longer emitted by the compiler.
 
-```compile_fail,E0087
+Too many type arguments were supplied for a function. For example:
+
+```compile_fail,E0107
 fn foo<T>() {}
 
 fn main() {
-    foo::<f64, bool>(); // error, expected 1 parameter, found 2 parameters
+    foo::<f64, bool>(); // error: wrong number of type arguments:
+                        //        expected 1, found 2
 }
 ```
 
-The number of supplied parameters must exactly match the number of defined type
+The number of supplied arguments must exactly match the number of defined type
 parameters.
 "##,
 
 E0088: r##"
-You gave too many lifetime parameters. Erroneous code example:
+#### Note: this error code is no longer emitted by the compiler.
 
-```compile_fail,E0088
+You gave too many lifetime arguments. Erroneous code example:
+
+```compile_fail,E0107
 fn f() {}
 
 fn main() {
-    f::<'static>() // error: too many lifetime parameters provided
+    f::<'static>() // error: wrong number of lifetime arguments:
+                   //        expected 0, found 1
 }
 ```
 
-Please check you give the right number of lifetime parameters. Example:
+Please check you give the right number of lifetime arguments. Example:
 
 ```
 fn f() {}
@@ -1101,42 +1107,48 @@ fn main() {
 "##,
 
 E0089: r##"
-Not enough type parameters were supplied for a function. For example:
+#### Note: this error code is no longer emitted by the compiler.
 
-```compile_fail,E0089
+Too few type arguments were supplied for a function. For example:
+
+```compile_fail,E0107
 fn foo<T, U>() {}
 
 fn main() {
-    foo::<f64>(); // error, expected 2 parameters, found 1 parameter
+    foo::<f64>(); // error: wrong number of type arguments: expected 2, found 1
 }
 ```
 
-Note that if a function takes multiple type parameters but you want the compiler
+Note that if a function takes multiple type arguments but you want the compiler
 to infer some of them, you can use type placeholders:
 
-```compile_fail,E0089
+```compile_fail,E0107
 fn foo<T, U>(x: T) {}
 
 fn main() {
     let x: bool = true;
-    foo::<f64>(x);    // error, expected 2 parameters, found 1 parameter
+    foo::<f64>(x);    // error: wrong number of type arguments:
+                      //        expected 2, found 1
     foo::<_, f64>(x); // same as `foo::<bool, f64>(x)`
 }
 ```
 "##,
 
 E0090: r##"
-You gave too few lifetime parameters. Example:
+#### Note: this error code is no longer emitted by the compiler.
 
-```compile_fail,E0090
+You gave too few lifetime arguments. Example:
+
+```compile_fail,E0107
 fn foo<'a: 'b, 'b: 'a>() {}
 
 fn main() {
-    foo::<'static>(); // error, expected 2 lifetime parameters
+    foo::<'static>(); // error: wrong number of lifetime arguments:
+                      //        expected 2, found 1
 }
 ```
 
-Please check you give the right number of lifetime parameters. Example:
+Please check you give the right number of lifetime arguments. Example:
 
 ```
 fn foo<'a: 'b, 'b: 'a>() {}
@@ -1254,18 +1266,34 @@ extern "rust-intrinsic" {
 "##,
 
 E0107: r##"
-This error means that an incorrect number of lifetime parameters were provided
-for a type (like a struct or enum) or trait:
+This error means that an incorrect number of generic arguments were provided:
 
 ```compile_fail,E0107
-struct Foo<'a, 'b>(&'a str, &'b str);
-enum Bar { A, B, C }
+struct Foo<T> { x: T }
 
-struct Baz<'a> {
-    foo: Foo<'a>, // error: expected 2, found 1
-    bar: Bar<'a>, // error: expected 0, found 1
+struct Bar { x: Foo }             // error: wrong number of type arguments:
+                                  //        expected 1, found 0
+struct Baz<S, T> { x: Foo<S, T> } // error: wrong number of type arguments:
+                                  //        expected 1, found 2
+
+fn foo<T, U>(x: T, y: U) {}
+
+fn main() {
+    let x: bool = true;
+    foo::<bool>(x);                 // error: wrong number of type arguments:
+                                    //        expected 2, found 1
+    foo::<bool, i32, i32>(x, 2, 4); // error: wrong number of type arguments:
+                                    //        expected 2, found 3
+}
+
+fn f() {}
+
+fn main() {
+    f::<'static>(); // error: wrong number of lifetime arguments:
+                    //        expected 0, found 1
 }
 ```
+
 "##,
 
 E0109: r##"
@@ -1501,12 +1529,12 @@ struct Foo {
 "##,
 
 E0131: r##"
-It is not possible to define `main` with type parameters, or even with function
-parameters. When `main` is present, it must take no arguments and return `()`.
+It is not possible to define `main` with generic parameters.
+When `main` is present, it must take no arguments and return `()`.
 Erroneous code example:
 
 ```compile_fail,E0131
-fn main<T>() { // error: main function is not allowed to have type parameters
+fn main<T>() { // error: main function is not allowed to have generic parameters
 }
 ```
 "##,
@@ -2146,7 +2174,7 @@ fn main() -> i32 { 0 }
 
 let x = 1u8;
 match x {
-    0u8...3i8 => (),
+    0u8..=3i8 => (),
     // error: mismatched types in range: expected u8, found i8
     _ => ()
 }
@@ -2189,7 +2217,7 @@ as the type you're matching on. Example:
 let x = 1u8;
 
 match x {
-    0u8...3u8 => (), // ok!
+    0u8..=3u8 => (), // ok!
     _ => ()
 }
 ```
@@ -2338,7 +2366,7 @@ Rust does not currently support this. A simple example that causes this error:
 
 ```compile_fail,E0225
 fn main() {
-    let _: Box<std::io::Read + std::io::Write>;
+    let _: Box<dyn std::io::Read + std::io::Write>;
 }
 ```
 
@@ -2348,7 +2376,7 @@ auto traits. For example, the following compiles correctly:
 
 ```
 fn main() {
-    let _: Box<std::io::Read + Send + Sync>;
+    let _: Box<dyn std::io::Read + Send + Sync>;
 }
 ```
 "##,
@@ -2393,13 +2421,15 @@ fn baz<I>(x: &<I as Foo>::A) where I: Foo<A=Bar> {}
 "##,
 
 E0243: r##"
+#### Note: this error code is no longer emitted by the compiler.
+
 This error indicates that not enough type parameters were found in a type or
 trait.
 
 For example, the `Foo` struct below is defined to be generic in `T`, but the
 type parameter is missing in the definition of `Bar`:
 
-```compile_fail,E0243
+```compile_fail,E0107
 struct Foo<T> { x: T }
 
 struct Bar { x: Foo }
@@ -2407,13 +2437,15 @@ struct Bar { x: Foo }
 "##,
 
 E0244: r##"
+#### Note: this error code is no longer emitted by the compiler.
+
 This error indicates that too many type parameters were found in a type or
 trait.
 
 For example, the `Foo` struct below has no type parameters, but is supplied
 with two in the definition of `Bar`:
 
-```compile_fail,E0244
+```compile_fail,E0107
 struct Foo { x: bool }
 
 struct Bar<S, T> { x: Foo<S, T> }
@@ -3709,7 +3741,7 @@ The `export_name` attribute was malformed.
 Erroneous code example:
 
 ```ignore (error-emitted-at-codegen-which-cannot-be-handled-by-compile_fail)
-#[export_name] // error: export_name attribute has invalid format
+#[export_name] // error: `export_name` attribute has invalid format
 pub fn something() {}
 
 fn main() {}
@@ -4545,6 +4577,15 @@ fn start(_: isize, _: *const *const u8) -> isize where (): Copy {
 ```
 "##,
 
+E0648: r##"
+`export_name` attributes may not contain null characters (`\0`).
+
+```compile_fail,E0648
+#[export_name="\0foo"] // error: `export_name` may not contain null characters
+pub fn bar() {}
+```
+"##,
+
 E0689: r##"
 This error indicates that the numeric value for the method being passed exists
 but the type of the numeric value or binding could not be identified.
@@ -4581,8 +4622,6 @@ on fields that were not guaranteed to be zero-sized.
 Erroneous code example:
 
 ```compile_fail,E0690
-#![feature(repr_transparent)]
-
 #[repr(transparent)]
 struct LengthWithUnit<U> { // error: transparent struct needs exactly one
     value: f32,            //        non-zero-sized field, but has 2
@@ -4602,8 +4641,6 @@ To combine `repr(transparent)` with type parameters, `PhantomData` may be
 useful:
 
 ```
-#![feature(repr_transparent)]
-
 use std::marker::PhantomData;
 
 #[repr(transparent)]
@@ -4621,7 +4658,7 @@ field that requires non-trivial alignment.
 Erroneous code example:
 
 ```compile_fail,E0691
-#![feature(repr_transparent, repr_align, attr_literals)]
+#![feature(repr_align)]
 
 #[repr(align(32))]
 struct ForceAlign32;
@@ -4640,8 +4677,6 @@ requirement.
 Consider removing the over-aligned zero-sized field:
 
 ```
-#![feature(repr_transparent)]
-
 #[repr(transparent)]
 struct Wrapper(f32);
 ```
@@ -4650,7 +4685,7 @@ Alternatively, `PhantomData<T>` has alignment 1 for all `T`, so you can use it
 if you need to keep the field for some reason:
 
 ```
-#![feature(repr_transparent, repr_align, attr_literals)]
+#![feature(repr_align)]
 
 use std::marker::PhantomData;
 
@@ -4668,7 +4703,7 @@ alignment.
 "##,
 
 
-E0908: r##"
+E0699: r##"
 A method was called on a raw pointer whose inner type wasn't completely known.
 
 For example, you may have done something like:
@@ -4713,6 +4748,22 @@ and now when you call `.is_null()` on a raw pointer to `Foo`, there's ambiguity.
 Given that we don't know what type the pointer is, and there's potential
 ambiguity for some types, we disallow calling methods on raw pointers when
 the type is unknown.
+"##,
+
+E0714: r##"
+A `#[marker]` trait contained an associated item.
+
+The items of marker traits cannot be overridden, so there's no need to have them
+when they cannot be changed per-type anyway.  If you wanted them for ergonomic
+reasons, consider making an extension trait instead.
+"##,
+
+E0715: r##"
+An `impl` for a `#[marker]` trait tried to override an associated item.
+
+Because marker traits are allowed to have multiple implementations for the same
+type, it's not allowed to override anything in those implementations, as it
+would be ambiguous which override should actually be used.
 "##,
 
 }
@@ -4797,5 +4848,5 @@ register_diagnostics! {
     E0640, // infer outlives requirements
     E0641, // cannot cast to/from a pointer with an unknown kind
     E0645, // trait aliases not finished
-    E0907, // type inside generator must be known in this context
+    E0698, // type inside generator must be known in this context
 }

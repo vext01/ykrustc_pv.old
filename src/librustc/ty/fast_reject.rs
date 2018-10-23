@@ -47,7 +47,7 @@ pub enum SimplifiedTypeGen<D>
     ClosureSimplifiedType(D),
     GeneratorSimplifiedType(D),
     GeneratorWitnessSimplifiedType(usize),
-    AnonSimplifiedType(D),
+    OpaqueSimplifiedType(D),
     FunctionSimplifiedType(usize),
     ParameterSimplifiedType,
     ForeignSimplifiedType(DefId),
@@ -63,47 +63,48 @@ pub enum SimplifiedTypeGen<D>
 /// `can_simplify_params` should be true if type parameters appear free in `ty` and `false` if they
 /// are to be considered bound.
 pub fn simplify_type<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                                     ty: Ty,
+                                     ty: Ty<'_>,
                                      can_simplify_params: bool)
                                      -> Option<SimplifiedType>
 {
     match ty.sty {
-        ty::TyBool => Some(BoolSimplifiedType),
-        ty::TyChar => Some(CharSimplifiedType),
-        ty::TyInt(int_type) => Some(IntSimplifiedType(int_type)),
-        ty::TyUint(uint_type) => Some(UintSimplifiedType(uint_type)),
-        ty::TyFloat(float_type) => Some(FloatSimplifiedType(float_type)),
-        ty::TyAdt(def, _) => Some(AdtSimplifiedType(def.did)),
-        ty::TyStr => Some(StrSimplifiedType),
-        ty::TyArray(..) | ty::TySlice(_) => Some(ArraySimplifiedType),
-        ty::TyRawPtr(_) => Some(PtrSimplifiedType),
-        ty::TyDynamic(ref trait_info, ..) => {
-            trait_info.principal().map(|p| TraitSimplifiedType(p.def_id()))
+        ty::Bool => Some(BoolSimplifiedType),
+        ty::Char => Some(CharSimplifiedType),
+        ty::Int(int_type) => Some(IntSimplifiedType(int_type)),
+        ty::Uint(uint_type) => Some(UintSimplifiedType(uint_type)),
+        ty::Float(float_type) => Some(FloatSimplifiedType(float_type)),
+        ty::Adt(def, _) => Some(AdtSimplifiedType(def.did)),
+        ty::Str => Some(StrSimplifiedType),
+        ty::Array(..) | ty::Slice(_) => Some(ArraySimplifiedType),
+        ty::RawPtr(_) => Some(PtrSimplifiedType),
+        ty::Dynamic(ref trait_info, ..) => {
+            Some(TraitSimplifiedType(trait_info.principal().def_id()))
         }
-        ty::TyRef(_, ty, _) => {
+        ty::Ref(_, ty, _) => {
             // since we introduce auto-refs during method lookup, we
             // just treat &T and T as equivalent from the point of
             // view of possibly unifying
             simplify_type(tcx, ty, can_simplify_params)
         }
-        ty::TyFnDef(def_id, _) |
-        ty::TyClosure(def_id, _) => {
+        ty::FnDef(def_id, _) |
+        ty::Closure(def_id, _) => {
             Some(ClosureSimplifiedType(def_id))
         }
-        ty::TyGenerator(def_id, _, _) => {
+        ty::Generator(def_id, _, _) => {
             Some(GeneratorSimplifiedType(def_id))
         }
-        ty::TyGeneratorWitness(ref tys) => {
+        ty::GeneratorWitness(ref tys) => {
             Some(GeneratorWitnessSimplifiedType(tys.skip_binder().len()))
         }
-        ty::TyNever => Some(NeverSimplifiedType),
-        ty::TyTuple(ref tys) => {
+        ty::Never => Some(NeverSimplifiedType),
+        ty::Tuple(ref tys) => {
             Some(TupleSimplifiedType(tys.len()))
         }
-        ty::TyFnPtr(ref f) => {
+        ty::FnPtr(ref f) => {
             Some(FunctionSimplifiedType(f.skip_binder().inputs().len()))
         }
-        ty::TyProjection(_) | ty::TyParam(_) => {
+        ty::UnnormalizedProjection(..) => bug!("only used with chalk-engine"),
+        ty::Projection(_) | ty::Param(_) => {
             if can_simplify_params {
                 // In normalized types, projections don't unify with
                 // anything. when lazy normalization happens, this
@@ -115,13 +116,13 @@ pub fn simplify_type<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
                 None
             }
         }
-        ty::TyAnon(def_id, _) => {
-            Some(AnonSimplifiedType(def_id))
+        ty::Opaque(def_id, _) => {
+            Some(OpaqueSimplifiedType(def_id))
         }
-        ty::TyForeign(def_id) => {
+        ty::Foreign(def_id) => {
             Some(ForeignSimplifiedType(def_id))
         }
-        ty::TyInfer(_) | ty::TyError => None,
+        ty::Infer(_) | ty::Error => None,
     }
 }
 
@@ -146,7 +147,7 @@ impl<D: Copy + Debug + Ord + Eq + Hash> SimplifiedTypeGen<D> {
             ClosureSimplifiedType(d) => ClosureSimplifiedType(map(d)),
             GeneratorSimplifiedType(d) => GeneratorSimplifiedType(map(d)),
             GeneratorWitnessSimplifiedType(n) => GeneratorWitnessSimplifiedType(n),
-            AnonSimplifiedType(d) => AnonSimplifiedType(map(d)),
+            OpaqueSimplifiedType(d) => OpaqueSimplifiedType(map(d)),
             FunctionSimplifiedType(n) => FunctionSimplifiedType(n),
             ParameterSimplifiedType => ParameterSimplifiedType,
             ForeignSimplifiedType(d) => ForeignSimplifiedType(d),
@@ -181,7 +182,7 @@ impl<'a, 'gcx, D> HashStable<StableHashingContext<'a>> for SimplifiedTypeGen<D>
             ClosureSimplifiedType(d) => d.hash_stable(hcx, hasher),
             GeneratorSimplifiedType(d) => d.hash_stable(hcx, hasher),
             GeneratorWitnessSimplifiedType(n) => n.hash_stable(hcx, hasher),
-            AnonSimplifiedType(d) => d.hash_stable(hcx, hasher),
+            OpaqueSimplifiedType(d) => d.hash_stable(hcx, hasher),
             FunctionSimplifiedType(n) => n.hash_stable(hcx, hasher),
             ForeignSimplifiedType(d) => d.hash_stable(hcx, hasher),
         }

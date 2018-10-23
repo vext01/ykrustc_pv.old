@@ -26,6 +26,8 @@ use std::marker::PhantomData;
 mod node_index;
 use self::node_index::NodeIndex;
 
+mod graphviz;
+
 #[cfg(test)]
 mod test;
 
@@ -41,7 +43,7 @@ pub trait ObligationProcessor {
 
     fn process_obligation(&mut self,
                           obligation: &mut Self::Obligation)
-                          -> Result<Option<Vec<Self::Obligation>>, Self::Error>;
+                          -> ProcessResult<Self::Obligation, Self::Error>;
 
     /// As we do the cycle check, we invoke this callback when we
     /// encounter an actual cycle. `cycle` is an iterator that starts
@@ -57,6 +59,20 @@ pub trait ObligationProcessor {
         where I: Clone + Iterator<Item=&'c Self::Obligation>;
 }
 
+/// The result type used by `process_obligation`.
+#[derive(Debug)]
+pub enum ProcessResult<O, E> {
+    Unchanged,
+    Changed(Vec<O>),
+    Error(E),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct ObligationTreeId(usize);
+
+type ObligationTreeIdGenerator =
+    ::std::iter::Map<::std::ops::RangeFrom<usize>, fn(usize) -> ObligationTreeId>;
+
 pub struct ObligationForest<O: ForestObligation> {
     /// The list of obligations. In between calls to
     /// `process_obligations`, this list only contains nodes in the
@@ -71,11 +87,25 @@ pub struct ObligationForest<O: ForestObligation> {
     /// at a higher index than its parent. This is needed by the
     /// backtrace iterator (which uses `split_at`).
     nodes: Vec<Node<O>>,
+
     /// A cache of predicates that have been successfully completed.
     done_cache: FxHashSet<O::Predicate>,
+
     /// An cache of the nodes in `nodes`, indexed by predicate.
     waiting_cache: FxHashMap<O::Predicate, NodeIndex>,
+
     scratch: Option<Vec<usize>>,
+
+    obligation_tree_id_generator: ObligationTreeIdGenerator,
+
+    /// Per tree error cache.  This is used to deduplicate errors,
+    /// which is necessary to avoid trait resolution overflow in
+    /// some cases.
+    ///
+    /// See [this][details] for details.
+    ///
+    /// [details]: https://github.com/rust-lang/rust/pull/53255#issuecomment-421184780
+    error_cache: FxHashMap<ObligationTreeId, FxHashSet<O::Predicate>>,
 }
 
 #[derive(Debug)]
@@ -83,13 +113,17 @@ struct Node<O> {
     obligation: O,
     state: Cell<NodeState>,
 
+    /// The parent of a node - the original obligation of
+    /// which it is a subobligation. Except for error reporting,
+    /// it is just like any member of `dependents`.
+    parent: Option<NodeIndex>,
+
     /// Obligations that depend on this obligation for their
     /// completion. They must all be in a non-pending state.
     dependents: Vec<NodeIndex>,
-    /// The parent of a node - the original obligation of
-    /// which it is a subobligation. Except for error reporting,
-    /// this is just another member of `dependents`.
-    parent: Option<NodeIndex>,
+
+    /// Identifier of the obligation tree to which this node belongs.
+    obligation_tree_id: ObligationTreeId,
 }
 
 /// The state of one node in some tree within the forest. This
@@ -136,8 +170,8 @@ pub struct Outcome<O, E> {
 
     /// If true, then we saw no successful obligations, which means
     /// there is no point in further iteration. This is based on the
-    /// assumption that when trait matching returns `Err` or
-    /// `Ok(None)`, those results do not affect environmental
+    /// assumption that when trait matching returns `Error` or
+    /// `Unchanged`, those results do not affect environmental
     /// inference state. (Note that if we invoke `process_obligations`
     /// with no pending obligations, stalled will be true.)
     pub stalled: bool,
@@ -156,6 +190,8 @@ impl<O: ForestObligation> ObligationForest<O> {
             done_cache: FxHashSet(),
             waiting_cache: FxHashMap(),
             scratch: Some(vec![]),
+            obligation_tree_id_generator: (0..).map(|i| ObligationTreeId(i)),
+            error_cache: FxHashMap(),
         }
     }
 
@@ -178,22 +214,25 @@ impl<O: ForestObligation> ObligationForest<O> {
                               -> Result<(), ()>
     {
         if self.done_cache.contains(obligation.as_predicate()) {
-            return Ok(())
+            return Ok(());
         }
 
         match self.waiting_cache.entry(obligation.as_predicate().clone()) {
             Entry::Occupied(o) => {
                 debug!("register_obligation_at({:?}, {:?}) - duplicate of {:?}!",
                        obligation, parent, o.get());
+                let node = &mut self.nodes[o.get().get()];
                 if let Some(parent) = parent {
-                    if self.nodes[o.get().get()].dependents.contains(&parent) {
-                        debug!("register_obligation_at({:?}, {:?}) - duplicate subobligation",
-                               obligation, parent);
-                    } else {
-                        self.nodes[o.get().get()].dependents.push(parent);
+                    // If the node is already in `waiting_cache`, it's already
+                    // been marked with a parent. (It's possible that parent
+                    // has been cleared by `apply_rewrites`, though.) So just
+                    // dump `parent` into `node.dependents`... unless it's
+                    // already in `node.dependents` or `node.parent`.
+                    if !node.dependents.contains(&parent) && Some(parent) != node.parent {
+                        node.dependents.push(parent);
                     }
                 }
-                if let NodeState::Error = self.nodes[o.get().get()].state.get() {
+                if let NodeState::Error = node.state.get() {
                     Err(())
                 } else {
                     Ok(())
@@ -202,9 +241,29 @@ impl<O: ForestObligation> ObligationForest<O> {
             Entry::Vacant(v) => {
                 debug!("register_obligation_at({:?}, {:?}) - ok, new index is {}",
                        obligation, parent, self.nodes.len());
-                v.insert(NodeIndex::new(self.nodes.len()));
-                self.nodes.push(Node::new(parent, obligation));
-                Ok(())
+
+                let obligation_tree_id = match parent {
+                    Some(p) => {
+                        let parent_node = &self.nodes[p.get()];
+                        parent_node.obligation_tree_id
+                    }
+                    None => self.obligation_tree_id_generator.next().unwrap()
+                };
+
+                let already_failed =
+                    parent.is_some()
+                        && self.error_cache
+                            .get(&obligation_tree_id)
+                            .map(|errors| errors.contains(obligation.as_predicate()))
+                            .unwrap_or(false);
+
+                if already_failed {
+                    Err(())
+                } else {
+                    v.insert(NodeIndex::new(self.nodes.len()));
+                    self.nodes.push(Node::new(parent, obligation, obligation_tree_id));
+                    Ok(())
+                }
             }
         }
     }
@@ -229,14 +288,23 @@ impl<O: ForestObligation> ObligationForest<O> {
     }
 
     /// Returns the set of obligations that are in a pending state.
-    pub fn pending_obligations(&self) -> Vec<O>
-        where O: Clone
+    pub fn map_pending_obligations<P, F>(&self, f: F) -> Vec<P>
+        where F: Fn(&O) -> P
     {
         self.nodes
             .iter()
             .filter(|n| n.state.get() == NodeState::Pending)
-            .map(|n| n.obligation.clone())
+            .map(|n| f(&n.obligation))
             .collect()
+    }
+
+    fn insert_into_error_cache(&mut self, node_index: usize) {
+        let node = &self.nodes[node_index];
+
+        self.error_cache
+            .entry(node.obligation_tree_id)
+            .or_insert_with(|| FxHashSet())
+            .insert(node.obligation.as_predicate().clone());
     }
 
     /// Perform a pass through the obligation list. This must
@@ -252,29 +320,22 @@ impl<O: ForestObligation> ObligationForest<O> {
         let mut stalled = true;
 
         for index in 0..self.nodes.len() {
-            debug!("process_obligations: node {} == {:?}",
-                   index,
-                   self.nodes[index]);
+            debug!("process_obligations: node {} == {:?}", index, self.nodes[index]);
 
             let result = match self.nodes[index] {
-                Node { state: ref _state, ref mut obligation, .. }
-                    if _state.get() == NodeState::Pending =>
-                {
-                    processor.process_obligation(obligation)
-                }
+                Node { ref state, ref mut obligation, .. } if state.get() == NodeState::Pending =>
+                    processor.process_obligation(obligation),
                 _ => continue
             };
 
-            debug!("process_obligations: node {} got result {:?}",
-                   index,
-                   result);
+            debug!("process_obligations: node {} got result {:?}", index, result);
 
             match result {
-                Ok(None) => {
-                    // no change in state
+                ProcessResult::Unchanged => {
+                    // No change in state.
                 }
-                Ok(Some(children)) => {
-                    // if we saw a Some(_) result, we are not (yet) stalled
+                ProcessResult::Changed(children) => {
+                    // We are not (yet) stalled.
                     stalled = false;
                     self.nodes[index].state.set(NodeState::Success);
 
@@ -290,7 +351,7 @@ impl<O: ForestObligation> ObligationForest<O> {
                         }
                     }
                 }
-                Err(err) => {
+                ProcessResult::Error(err) => {
                     stalled = false;
                     let backtrace = self.error_at(index);
                     errors.push(Error {
@@ -372,10 +433,7 @@ impl<O: ForestObligation> ObligationForest<O> {
             NodeState::Success => {
                 node.state.set(NodeState::OnDfsStack);
                 stack.push(index);
-                if let Some(parent) = node.parent {
-                    self.find_cycles_from_node(stack, processor, parent.get());
-                }
-                for dependent in &node.dependents {
+                for dependent in node.parent.iter().chain(node.dependents.iter()) {
                     self.find_cycles_from_node(stack, processor, dependent.get());
                 }
                 stack.pop();
@@ -411,15 +469,15 @@ impl<O: ForestObligation> ObligationForest<O> {
         }
 
         while let Some(i) = error_stack.pop() {
-            let node = &self.nodes[i];
-
-            match node.state.get() {
+            match self.nodes[i].state.get() {
                 NodeState::Error => continue,
-                _ => node.state.set(NodeState::Error)
+                _ => self.nodes[i].state.set(NodeState::Error),
             }
 
+            let node = &self.nodes[i];
+
             error_stack.extend(
-                node.dependents.iter().cloned().chain(node.parent).map(|x| x.get())
+                node.parent.iter().chain(node.dependents.iter()).map(|x| x.get())
             );
         }
 
@@ -429,11 +487,7 @@ impl<O: ForestObligation> ObligationForest<O> {
 
     #[inline]
     fn mark_neighbors_as_waiting_from(&self, node: &Node<O>) {
-        if let Some(parent) = node.parent {
-            self.mark_as_waiting_from(&self.nodes[parent.get()]);
-        }
-
-        for dependent in &node.dependents {
+        for dependent in node.parent.iter().chain(node.dependents.iter()) {
             self.mark_as_waiting_from(&self.nodes[dependent.get()]);
         }
     }
@@ -491,9 +545,14 @@ impl<O: ForestObligation> ObligationForest<O> {
                     }
                 }
                 NodeState::Done => {
-                    self.waiting_cache.remove(self.nodes[i].obligation.as_predicate());
-                    // FIXME(HashMap): why can't I get my key back?
-                    self.done_cache.insert(self.nodes[i].obligation.as_predicate().clone());
+                    // Avoid cloning the key (predicate) in case it exists in the waiting cache
+                    if let Some((predicate, _)) = self.waiting_cache
+                        .remove_entry(self.nodes[i].obligation.as_predicate())
+                    {
+                        self.done_cache.insert(predicate);
+                    } else {
+                        self.done_cache.insert(self.nodes[i].obligation.as_predicate().clone());
+                    }
                     node_rewrites[i] = nodes_len;
                     dead_nodes += 1;
                 }
@@ -504,6 +563,7 @@ impl<O: ForestObligation> ObligationForest<O> {
                     self.waiting_cache.remove(self.nodes[i].obligation.as_predicate());
                     node_rewrites[i] = nodes_len;
                     dead_nodes += 1;
+                    self.insert_into_error_cache(i);
                 }
                 NodeState::OnDfsStack | NodeState::Success => unreachable!()
             }
@@ -563,7 +623,7 @@ impl<O: ForestObligation> ObligationForest<O> {
         }
 
         let mut kill_list = vec![];
-        for (predicate, index) in self.waiting_cache.iter_mut() {
+        for (predicate, index) in &mut self.waiting_cache {
             let new_index = node_rewrites[index.get()];
             if new_index >= nodes_len {
                 kill_list.push(predicate.clone());
@@ -577,12 +637,17 @@ impl<O: ForestObligation> ObligationForest<O> {
 }
 
 impl<O> Node<O> {
-    fn new(parent: Option<NodeIndex>, obligation: O) -> Node<O> {
+    fn new(
+        parent: Option<NodeIndex>,
+        obligation: O,
+        obligation_tree_id: ObligationTreeId
+    ) -> Node<O> {
         Node {
             obligation,
-            parent,
             state: Cell::new(NodeState::Pending),
+            parent,
             dependents: vec![],
+            obligation_tree_id,
         }
     }
 }

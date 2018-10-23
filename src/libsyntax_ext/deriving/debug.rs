@@ -12,6 +12,8 @@ use deriving::path_std;
 use deriving::generic::*;
 use deriving::generic::ty::*;
 
+use rustc_data_structures::thin_vec::ThinVec;
+
 use syntax::ast::{self, Ident};
 use syntax::ast::{Expr, MetaItem};
 use syntax::ext::base::{Annotatable, ExtCtxt};
@@ -23,7 +25,7 @@ pub fn expand_deriving_debug(cx: &mut ExtCtxt,
                              span: Span,
                              mitem: &MetaItem,
                              item: &Annotatable,
-                             push: &mut FnMut(Annotatable)) {
+                             push: &mut dyn FnMut(Annotatable)) {
     // &mut ::std::fmt::Formatter
     let fmtr = Ptr(Box::new(Literal(path_std!(cx, fmt::Formatter))),
                    Borrowed(None, ast::Mutability::Mutable));
@@ -139,7 +141,7 @@ fn stmt_let_undescore(cx: &mut ExtCtxt, sp: Span, expr: P<ast::Expr>) -> ast::St
         init: Some(expr),
         id: ast::DUMMY_NODE_ID,
         span: sp,
-        attrs: ast::ThinVec::new(),
+        attrs: ThinVec::new(),
     });
     ast::Stmt {
         id: ast::DUMMY_NODE_ID,

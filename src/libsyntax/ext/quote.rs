@@ -9,15 +9,15 @@
 // except according to those terms.
 
 use ast::{self, Arg, Arm, Block, Expr, Item, Pat, Stmt, Ty};
-use codemap::respan;
-use syntax_pos::Span;
+use source_map::respan;
+use syntax_pos::{Span, DUMMY_SP};
 use ext::base::ExtCtxt;
 use ext::base;
 use ext::build::AstBuilder;
 use parse::parser::{Parser, PathStyle};
 use parse::token;
 use ptr::P;
-use tokenstream::{TokenStream, TokenTree};
+use tokenstream::{DelimSpan, TokenStream, TokenTree};
 
 /// Quasiquoting works via token trees.
 ///
@@ -28,18 +28,19 @@ use tokenstream::{TokenStream, TokenTree};
 
 pub mod rt {
     use ast;
-    use codemap::Spanned;
+    use source_map::Spanned;
     use ext::base::ExtCtxt;
     use parse::{self, classify};
     use parse::token::{self, Token};
     use ptr::P;
     use symbol::Symbol;
+    use ThinVec;
 
-    use tokenstream::{self, TokenTree, TokenStream};
+    use tokenstream::{self, DelimSpan, TokenTree, TokenStream};
 
     pub use parse::new_parser_from_tts;
     pub use syntax_pos::{BytePos, Span, DUMMY_SP, FileName};
-    pub use codemap::{dummy_spanned};
+    pub use source_map::{dummy_spanned};
 
     pub trait ToTokens {
         fn to_tokens(&self, _cx: &ExtCtxt) -> Vec<TokenTree>;
@@ -244,7 +245,8 @@ pub mod rt {
             }
             inner.push(self.tokens.clone());
 
-            r.push(TokenTree::Delimited(self.span, tokenstream::Delimited {
+            let delim_span = DelimSpan::from_single(self.span);
+            r.push(TokenTree::Delimited(delim_span, tokenstream::Delimited {
                 delim: token::Bracket, tts: TokenStream::concat(inner).into()
             }));
             r
@@ -260,7 +262,7 @@ pub mod rt {
 
     impl ToTokens for () {
         fn to_tokens(&self, _cx: &ExtCtxt) -> Vec<TokenTree> {
-            vec![TokenTree::Delimited(DUMMY_SP, tokenstream::Delimited {
+            vec![TokenTree::Delimited(DelimSpan::dummy(), tokenstream::Delimited {
                 delim: token::Paren,
                 tts: TokenStream::empty().into(),
             })]
@@ -274,7 +276,7 @@ pub mod rt {
                 id: ast::DUMMY_NODE_ID,
                 node: ast::ExprKind::Lit(P(self.clone())),
                 span: DUMMY_SP,
-                attrs: ast::ThinVec::new(),
+                attrs: ThinVec::new(),
             }).to_tokens(cx)
         }
     }
@@ -305,7 +307,7 @@ pub mod rt {
                         id: ast::DUMMY_NODE_ID,
                         node: ast::ExprKind::Lit(P(dummy_spanned(lit))),
                         span: DUMMY_SP,
-                        attrs: ast::ThinVec::new(),
+                        attrs: ThinVec::new(),
                     });
                     if *self >= 0 {
                         return lit.to_tokens(cx);
@@ -314,7 +316,7 @@ pub mod rt {
                         id: ast::DUMMY_NODE_ID,
                         node: ast::ExprKind::Unary(ast::UnOp::Neg, lit),
                         span: DUMMY_SP,
-                        attrs: ast::ThinVec::new(),
+                        attrs: ThinVec::new(),
                     }).to_tokens(cx)
                 }
             }
@@ -384,13 +386,16 @@ pub fn unflatten(tts: Vec<TokenTree>) -> Vec<TokenTree> {
 
     let mut results = Vec::new();
     let mut result = Vec::new();
+    let mut open_span = DUMMY_SP;
     for tree in tts {
         match tree {
-            TokenTree::Token(_, token::OpenDelim(..)) => {
+            TokenTree::Token(span, token::OpenDelim(..)) => {
+                open_span = span;
                 results.push(::std::mem::replace(&mut result, Vec::new()));
             }
             TokenTree::Token(span, token::CloseDelim(delim)) => {
-                let tree = TokenTree::Delimited(span, Delimited {
+                let delim_span = DelimSpan::from_pair(open_span, span);
+                let tree = TokenTree::Delimited(delim_span, Delimited {
                     delim,
                     tts: result.into_iter().map(TokenStream::from).collect::<TokenStream>().into(),
                 });
@@ -452,7 +457,7 @@ pub fn parse_path_panic(parser: &mut Parser, mode: PathStyle) -> ast::Path {
 pub fn expand_quote_tokens<'cx>(cx: &'cx mut ExtCtxt,
                                 sp: Span,
                                 tts: &[TokenTree])
-                                -> Box<base::MacResult+'cx> {
+                                -> Box<dyn base::MacResult+'cx> {
     let (cx_expr, expr) = expand_tts(cx, sp, tts);
     let expanded = expand_wrapper(cx, sp, cx_expr, expr, &[&["syntax", "ext", "quote", "rt"]]);
     base::MacEager::expr(expanded)
@@ -461,7 +466,7 @@ pub fn expand_quote_tokens<'cx>(cx: &'cx mut ExtCtxt,
 pub fn expand_quote_expr<'cx>(cx: &'cx mut ExtCtxt,
                               sp: Span,
                               tts: &[TokenTree])
-                              -> Box<base::MacResult+'cx> {
+                              -> Box<dyn base::MacResult+'cx> {
     let expanded = expand_parse_call(cx, sp, "parse_expr_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -469,7 +474,7 @@ pub fn expand_quote_expr<'cx>(cx: &'cx mut ExtCtxt,
 pub fn expand_quote_item<'cx>(cx: &'cx mut ExtCtxt,
                               sp: Span,
                               tts: &[TokenTree])
-                              -> Box<base::MacResult+'cx> {
+                              -> Box<dyn base::MacResult+'cx> {
     let expanded = expand_parse_call(cx, sp, "parse_item_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -477,7 +482,7 @@ pub fn expand_quote_item<'cx>(cx: &'cx mut ExtCtxt,
 pub fn expand_quote_pat<'cx>(cx: &'cx mut ExtCtxt,
                              sp: Span,
                              tts: &[TokenTree])
-                             -> Box<base::MacResult+'cx> {
+                             -> Box<dyn base::MacResult+'cx> {
     let expanded = expand_parse_call(cx, sp, "parse_pat_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -485,7 +490,7 @@ pub fn expand_quote_pat<'cx>(cx: &'cx mut ExtCtxt,
 pub fn expand_quote_arm(cx: &mut ExtCtxt,
                         sp: Span,
                         tts: &[TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_arm_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -493,7 +498,7 @@ pub fn expand_quote_arm(cx: &mut ExtCtxt,
 pub fn expand_quote_ty(cx: &mut ExtCtxt,
                        sp: Span,
                        tts: &[TokenTree])
-                       -> Box<base::MacResult+'static> {
+                       -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_ty_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -501,7 +506,7 @@ pub fn expand_quote_ty(cx: &mut ExtCtxt,
 pub fn expand_quote_stmt(cx: &mut ExtCtxt,
                          sp: Span,
                          tts: &[TokenTree])
-                         -> Box<base::MacResult+'static> {
+                         -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_stmt_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -509,7 +514,7 @@ pub fn expand_quote_stmt(cx: &mut ExtCtxt,
 pub fn expand_quote_attr(cx: &mut ExtCtxt,
                          sp: Span,
                          tts: &[TokenTree])
-                         -> Box<base::MacResult+'static> {
+                         -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_attribute_panic",
                                     vec![cx.expr_bool(sp, true)], tts);
 
@@ -519,7 +524,7 @@ pub fn expand_quote_attr(cx: &mut ExtCtxt,
 pub fn expand_quote_arg(cx: &mut ExtCtxt,
                         sp: Span,
                         tts: &[TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_arg_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -527,7 +532,7 @@ pub fn expand_quote_arg(cx: &mut ExtCtxt,
 pub fn expand_quote_block(cx: &mut ExtCtxt,
                         sp: Span,
                         tts: &[TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_block_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -535,7 +540,7 @@ pub fn expand_quote_block(cx: &mut ExtCtxt,
 pub fn expand_quote_meta_item(cx: &mut ExtCtxt,
                         sp: Span,
                         tts: &[TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let expanded = expand_parse_call(cx, sp, "parse_meta_item_panic", vec![], tts);
     base::MacEager::expr(expanded)
 }
@@ -543,7 +548,7 @@ pub fn expand_quote_meta_item(cx: &mut ExtCtxt,
 pub fn expand_quote_path(cx: &mut ExtCtxt,
                         sp: Span,
                         tts: &[TokenTree])
-                        -> Box<base::MacResult+'static> {
+                        -> Box<dyn base::MacResult+'static> {
     let mode = mk_parser_path(cx, sp, &["PathStyle", "Type"]);
     let expanded = expand_parse_call(cx, sp, "parse_path_panic", vec![mode], tts);
     base::MacEager::expr(expanded)
@@ -755,9 +760,9 @@ fn statements_mk_tt(cx: &ExtCtxt, tt: &TokenTree, quoted: bool) -> Vec<ast::Stmt
             vec![cx.stmt_expr(e_push)]
         },
         TokenTree::Delimited(span, ref delimed) => {
-            let mut stmts = statements_mk_tt(cx, &delimed.open_tt(span), false);
+            let mut stmts = statements_mk_tt(cx, &delimed.open_tt(span.open), false);
             stmts.extend(statements_mk_tts(cx, delimed.stream()));
-            stmts.extend(statements_mk_tt(cx, &delimed.close_tt(span), false));
+            stmts.extend(statements_mk_tt(cx, &delimed.close_tt(span.close), false));
             stmts
         }
     }
@@ -801,7 +806,7 @@ fn mk_stmts_let(cx: &ExtCtxt, sp: Span) -> Vec<ast::Stmt> {
     // they happen to have a compiler on hand). Over all, the phase distinction
     // just makes quotes "hard to attribute". Possibly this could be fixed
     // by recreating some of the original qq machinery in the tt regime
-    // (pushing fake FileMaps onto the parser to account for original sites
+    // (pushing fake SourceFiles onto the parser to account for original sites
     // of quotes, for example) but at this point it seems not likely to be
     // worth the hassle.
 

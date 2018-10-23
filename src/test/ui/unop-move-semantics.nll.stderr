@@ -1,0 +1,39 @@
+error[E0382]: borrow of moved value: `x`
+  --> $DIR/unop-move-semantics.rs:18:5
+   |
+LL |     !x;
+   |      - value moved here
+LL | 
+LL |     x.clone();  //~ ERROR: use of moved value
+   |     ^ value borrowed here after move
+   |
+   = note: move occurs because `x` has type `T`, which does not implement the `Copy` trait
+
+error[E0507]: cannot move out of borrowed content
+  --> $DIR/unop-move-semantics.rs:34:6
+   |
+LL |     !*m;  //~ ERROR: cannot move out of borrowed content
+   |      ^^ cannot move out of borrowed content
+
+error[E0507]: cannot move out of borrowed content
+  --> $DIR/unop-move-semantics.rs:36:6
+   |
+LL |     !*n;  //~ ERROR: cannot move out of borrowed content
+   |      ^^ cannot move out of borrowed content
+
+error[E0507]: cannot move out of `*n` which is behind a `&` reference
+  --> $DIR/unop-move-semantics.rs:36:6
+   |
+LL |     let n = &y;
+   |             -- help: consider changing this to be a mutable reference: `&mut y`
+...
+LL |     !*n;  //~ ERROR: cannot move out of borrowed content
+   |      ^^
+   |      |
+   |      cannot move out of `*n` which is behind a `&` reference
+   |      `n` is a `&` reference, so the data it refers to cannot be moved
+
+error: aborting due to 4 previous errors
+
+Some errors occurred: E0382, E0507.
+For more information about an error, try `rustc --explain E0382`.

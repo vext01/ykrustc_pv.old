@@ -13,6 +13,7 @@ use abi::{HasDataLayout, LayoutOf, TyLayout, TyLayoutMethods};
 use spec::HasTargetSpec;
 
 mod aarch64;
+mod amdgpu;
 mod arm;
 mod asmjs;
 mod hexagon;
@@ -23,6 +24,7 @@ mod nvptx;
 mod nvptx64;
 mod powerpc;
 mod powerpc64;
+mod riscv;
 mod s390x;
 mod sparc;
 mod sparc64;
@@ -43,7 +45,9 @@ pub enum PassMode {
     /// a single uniform or a pair of registers.
     Cast(CastTarget),
     /// Pass the argument indirectly via a hidden pointer.
-    Indirect(ArgAttributes),
+    /// The second value, if any, is for the extra data (vtable or length)
+    /// which indicates that it refers to an unsized rvalue.
+    Indirect(ArgAttributes, Option<ArgAttributes>),
 }
 
 // Hack to disable non_upper_case_globals only for the bitflags! and not for the rest
@@ -89,7 +93,7 @@ impl ArgAttributes {
     }
 
     pub fn set(&mut self, attr: ArgAttribute) -> &mut Self {
-        self.regular = self.regular | attr;
+        self.regular |= attr;
         self
     }
 
@@ -139,11 +143,11 @@ impl Reg {
             RegKind::Integer => {
                 match self.size.bits() {
                     1 => dl.i1_align,
-                    2...8 => dl.i8_align,
-                    9...16 => dl.i16_align,
-                    17...32 => dl.i32_align,
-                    33...64 => dl.i64_align,
-                    65...128 => dl.i128_align,
+                    2..=8 => dl.i8_align,
+                    9..=16 => dl.i16_align,
+                    17..=32 => dl.i32_align,
+                    33..=64 => dl.i64_align,
+                    65..=128 => dl.i128_align,
                     _ => panic!("unsupported integer: {:?}", self)
                 }
             }
@@ -228,7 +232,7 @@ impl CastTarget {
 
     pub fn align<C: HasDataLayout>(&self, cx: C) -> Align {
         self.prefix.iter()
-            .filter_map(|x| x.map(|kind| Reg { kind: kind, size: self.prefix_chunk }.align(cx)))
+            .filter_map(|x| x.map(|kind| Reg { kind, size: self.prefix_chunk }.align(cx)))
             .fold(cx.data_layout().aggregate_align.max(self.rest.align(cx)),
                 |acc, align| acc.max(align))
     }
@@ -367,13 +371,19 @@ impl<'a, Ty> ArgType<'a, Ty> {
         // i686-pc-windows-msvc, it results in wrong stack offsets.
         // attrs.pointee_align = Some(self.layout.align);
 
-        self.mode = PassMode::Indirect(attrs);
+        let extra_attrs = if self.layout.is_unsized() {
+            Some(ArgAttributes::new())
+        } else {
+            None
+        };
+
+        self.mode = PassMode::Indirect(attrs, extra_attrs);
     }
 
     pub fn make_indirect_byval(&mut self) {
         self.make_indirect();
         match self.mode {
-            PassMode::Indirect(ref mut attrs) => {
+            PassMode::Indirect(ref mut attrs, _) => {
                 attrs.set(ArgAttribute::ByVal);
             }
             _ => unreachable!()
@@ -408,7 +418,21 @@ impl<'a, Ty> ArgType<'a, Ty> {
 
     pub fn is_indirect(&self) -> bool {
         match self.mode {
-            PassMode::Indirect(_) => true,
+            PassMode::Indirect(..) => true,
+            _ => false
+        }
+    }
+
+    pub fn is_sized_indirect(&self) -> bool {
+        match self.mode {
+            PassMode::Indirect(_, None) => true,
+            _ => false
+        }
+    }
+
+    pub fn is_unsized_indirect(&self) -> bool {
+        match self.mode {
+            PassMode::Indirect(_, Some(_)) => true,
             _ => false
         }
     }
@@ -436,6 +460,8 @@ pub enum Conv {
 
     X86_64SysV,
     X86_64Win64,
+
+    AmdGpuKernel,
 }
 
 /// Metadata describing how the arguments to a native function
@@ -478,6 +504,7 @@ impl<'a, Ty> FnType<'a, Ty> {
                 x86_64::compute_abi_info(cx, self);
             },
             "aarch64" => aarch64::compute_abi_info(cx, self),
+            "amdgpu" => amdgpu::compute_abi_info(cx, self),
             "arm" => arm::compute_abi_info(cx, self),
             "mips" => mips::compute_abi_info(cx, self),
             "mips64" => mips64::compute_abi_info(cx, self),
@@ -498,10 +525,12 @@ impl<'a, Ty> FnType<'a, Ty> {
             "nvptx" => nvptx::compute_abi_info(self),
             "nvptx64" => nvptx64::compute_abi_info(self),
             "hexagon" => hexagon::compute_abi_info(self),
+            "riscv32" => riscv::compute_abi_info(self, 32),
+            "riscv64" => riscv::compute_abi_info(self, 64),
             a => return Err(format!("unrecognized arch \"{}\" in target specification", a))
         }
 
-        if let PassMode::Indirect(ref mut attrs) = self.ret.mode {
+        if let PassMode::Indirect(ref mut attrs, _) = self.ret.mode {
             attrs.set(ArgAttribute::StructRet);
         }
 

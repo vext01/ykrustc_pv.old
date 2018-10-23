@@ -23,13 +23,13 @@
 // coherence challenge (e.g., specialization, neg impls, etc) we can
 // reconsider what crate these items belong in.
 
+use alloc::{AllocErr, LayoutErr, CannotReallocInPlace};
 use any::TypeId;
 use borrow::Cow;
 use cell;
 use char;
 use core::array;
 use fmt::{self, Debug, Display};
-use heap::{AllocErr, LayoutErr, CannotReallocInPlace};
 use mem::transmute;
 use num;
 use str;
@@ -49,6 +49,7 @@ use string;
 ///
 /// [`Result<T, E>`]: ../result/enum.Result.html
 /// [`Display`]: ../fmt/trait.Display.html
+/// [`Debug`]: ../fmt/trait.Debug.html
 /// [`cause`]: trait.Error.html#method.cause
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Error: Debug + Display {
@@ -137,7 +138,72 @@ pub trait Error: Debug + Display {
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    fn cause(&self) -> Option<&Error> { None }
+    #[rustc_deprecated(since = "1.33.0", reason = "replaced by Error::source, which can support \
+                                                   downcasting")]
+    fn cause(&self) -> Option<&dyn Error> {
+        self.source()
+    }
+
+    /// The lower-level source of this error, if any.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::error::Error;
+    /// use std::fmt;
+    ///
+    /// #[derive(Debug)]
+    /// struct SuperError {
+    ///     side: SuperErrorSideKick,
+    /// }
+    ///
+    /// impl fmt::Display for SuperError {
+    ///     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    ///         write!(f, "SuperError is here!")
+    ///     }
+    /// }
+    ///
+    /// impl Error for SuperError {
+    ///     fn description(&self) -> &str {
+    ///         "I'm the superhero of errors"
+    ///     }
+    ///
+    ///     fn source(&self) -> Option<&(dyn Error + 'static)> {
+    ///         Some(&self.side)
+    ///     }
+    /// }
+    ///
+    /// #[derive(Debug)]
+    /// struct SuperErrorSideKick;
+    ///
+    /// impl fmt::Display for SuperErrorSideKick {
+    ///     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    ///         write!(f, "SuperErrorSideKick is here!")
+    ///     }
+    /// }
+    ///
+    /// impl Error for SuperErrorSideKick {
+    ///     fn description(&self) -> &str {
+    ///         "I'm SuperError side kick"
+    ///     }
+    /// }
+    ///
+    /// fn get_super_error() -> Result<(), SuperError> {
+    ///     Err(SuperError { side: SuperErrorSideKick })
+    /// }
+    ///
+    /// fn main() {
+    ///     match get_super_error() {
+    ///         Err(e) => {
+    ///             println!("Error: {}", e.description());
+    ///             println!("Caused by: {}", e.source().unwrap());
+    ///         }
+    ///         _ => println!("No error"),
+    ///     }
+    /// }
+    /// ```
+    #[stable(feature = "error_source", since = "1.30.0")]
+    fn source(&self) -> Option<&(dyn Error + 'static)> { None }
 
     /// Get the `TypeId` of `self`
     #[doc(hidden)]
@@ -150,22 +216,99 @@ pub trait Error: Debug + Display {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, E: Error + 'a> From<E> for Box<Error + 'a> {
-    fn from(err: E) -> Box<Error + 'a> {
+impl<'a, E: Error + 'a> From<E> for Box<dyn Error + 'a> {
+    /// Converts a type of [`Error`] into a box of dyn [`Error`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::error::Error;
+    /// use std::fmt;
+    /// use std::mem;
+    ///
+    /// #[derive(Debug)]
+    /// struct AnError;
+    ///
+    /// impl fmt::Display for AnError {
+    ///     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    ///         write!(f , "An error")
+    ///     }
+    /// }
+    ///
+    /// impl Error for AnError {
+    ///     fn description(&self) -> &str {
+    ///         "Description of an error"
+    ///     }
+    /// }
+    ///
+    /// let an_error = AnError;
+    /// assert!(0 == mem::size_of_val(&an_error));
+    /// let a_boxed_error = Box::<Error>::from(an_error);
+    /// assert!(mem::size_of::<Box<dyn Error>>() == mem::size_of_val(&a_boxed_error))
+    /// ```
+    fn from(err: E) -> Box<dyn Error + 'a> {
         Box::new(err)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, E: Error + Send + Sync + 'a> From<E> for Box<Error + Send + Sync + 'a> {
-    fn from(err: E) -> Box<Error + Send + Sync + 'a> {
+impl<'a, E: Error + Send + Sync + 'a> From<E> for Box<dyn Error + Send + Sync + 'a> {
+    /// Converts a type of [`Error`] + [`Send`] + [`Sync`] into a box of dyn [`Error`] +
+    /// [`Send`] + [`Sync`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::error::Error;
+    /// use std::fmt;
+    /// use std::mem;
+    ///
+    /// #[derive(Debug)]
+    /// struct AnError;
+    ///
+    /// impl fmt::Display for AnError {
+    ///     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    ///         write!(f , "An error")
+    ///     }
+    /// }
+    ///
+    /// impl Error for AnError {
+    ///     fn description(&self) -> &str {
+    ///         "Description of an error"
+    ///     }
+    /// }
+    ///
+    /// unsafe impl Send for AnError {}
+    ///
+    /// unsafe impl Sync for AnError {}
+    ///
+    /// let an_error = AnError;
+    /// assert!(0 == mem::size_of_val(&an_error));
+    /// let a_boxed_error = Box::<Error + Send + Sync>::from(an_error);
+    /// assert!(
+    ///     mem::size_of::<Box<dyn Error + Send + Sync>>() == mem::size_of_val(&a_boxed_error))
+    /// ```
+    fn from(err: E) -> Box<dyn Error + Send + Sync + 'a> {
         Box::new(err)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl From<String> for Box<Error + Send + Sync> {
-    fn from(err: String) -> Box<Error + Send + Sync> {
+impl From<String> for Box<dyn Error + Send + Sync> {
+    /// Converts a [`String`] into a box of dyn [`Error`] + [`Send`] + [`Sync`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::error::Error;
+    /// use std::mem;
+    ///
+    /// let a_string_error = "a string error".to_string();
+    /// let a_boxed_error = Box::<Error + Send + Sync>::from(a_string_error);
+    /// assert!(
+    ///     mem::size_of::<Box<dyn Error + Send + Sync>>() == mem::size_of_val(&a_boxed_error))
+    /// ```
+    fn from(err: String) -> Box<dyn Error + Send + Sync> {
         #[derive(Debug)]
         struct StringError(String);
 
@@ -184,38 +327,102 @@ impl From<String> for Box<Error + Send + Sync> {
 }
 
 #[stable(feature = "string_box_error", since = "1.6.0")]
-impl From<String> for Box<Error> {
-    fn from(str_err: String) -> Box<Error> {
-        let err1: Box<Error + Send + Sync> = From::from(str_err);
-        let err2: Box<Error> = err1;
+impl From<String> for Box<dyn Error> {
+    /// Converts a [`String`] into a box of dyn [`Error`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::error::Error;
+    /// use std::mem;
+    ///
+    /// let a_string_error = "a string error".to_string();
+    /// let a_boxed_error = Box::<Error>::from(a_string_error);
+    /// assert!(mem::size_of::<Box<dyn Error>>() == mem::size_of_val(&a_boxed_error))
+    /// ```
+    fn from(str_err: String) -> Box<dyn Error> {
+        let err1: Box<dyn Error + Send + Sync> = From::from(str_err);
+        let err2: Box<dyn Error> = err1;
         err2
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, 'b> From<&'b str> for Box<Error + Send + Sync + 'a> {
-    fn from(err: &'b str) -> Box<Error + Send + Sync + 'a> {
+impl<'a, 'b> From<&'b str> for Box<dyn Error + Send + Sync + 'a> {
+    /// Converts a [`str`] into a box of dyn [`Error`] + [`Send`] + [`Sync`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::error::Error;
+    /// use std::mem;
+    ///
+    /// let a_str_error = "a str error";
+    /// let a_boxed_error = Box::<Error + Send + Sync>::from(a_str_error);
+    /// assert!(
+    ///     mem::size_of::<Box<dyn Error + Send + Sync>>() == mem::size_of_val(&a_boxed_error))
+    /// ```
+    fn from(err: &'b str) -> Box<dyn Error + Send + Sync + 'a> {
         From::from(String::from(err))
     }
 }
 
 #[stable(feature = "string_box_error", since = "1.6.0")]
-impl<'a> From<&'a str> for Box<Error> {
-    fn from(err: &'a str) -> Box<Error> {
+impl<'a> From<&'a str> for Box<dyn Error> {
+    /// Converts a [`str`] into a box of dyn [`Error`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::error::Error;
+    /// use std::mem;
+    ///
+    /// let a_str_error = "a str error";
+    /// let a_boxed_error = Box::<Error>::from(a_str_error);
+    /// assert!(mem::size_of::<Box<dyn Error>>() == mem::size_of_val(&a_boxed_error))
+    /// ```
+    fn from(err: &'a str) -> Box<dyn Error> {
         From::from(String::from(err))
     }
 }
 
 #[stable(feature = "cow_box_error", since = "1.22.0")]
-impl<'a, 'b> From<Cow<'b, str>> for Box<Error + Send + Sync + 'a> {
-    fn from(err: Cow<'b, str>) -> Box<Error + Send + Sync + 'a> {
+impl<'a, 'b> From<Cow<'b, str>> for Box<dyn Error + Send + Sync + 'a> {
+    /// Converts a [`Cow`] into a box of dyn [`Error`] + [`Send`] + [`Sync`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::error::Error;
+    /// use std::mem;
+    /// use std::borrow::Cow;
+    ///
+    /// let a_cow_str_error = Cow::from("a str error");
+    /// let a_boxed_error = Box::<Error + Send + Sync>::from(a_cow_str_error);
+    /// assert!(
+    ///     mem::size_of::<Box<dyn Error + Send + Sync>>() == mem::size_of_val(&a_boxed_error))
+    /// ```
+    fn from(err: Cow<'b, str>) -> Box<dyn Error + Send + Sync + 'a> {
         From::from(String::from(err))
     }
 }
 
 #[stable(feature = "cow_box_error", since = "1.22.0")]
-impl<'a> From<Cow<'a, str>> for Box<Error> {
-    fn from(err: Cow<'a, str>) -> Box<Error> {
+impl<'a> From<Cow<'a, str>> for Box<dyn Error> {
+    /// Converts a [`Cow`] into a box of dyn [`Error`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::error::Error;
+    /// use std::mem;
+    /// use std::borrow::Cow;
+    ///
+    /// let a_cow_str_error = Cow::from("a str error");
+    /// let a_boxed_error = Box::<Error>::from(a_cow_str_error);
+    /// assert!(mem::size_of::<Box<dyn Error>>() == mem::size_of_val(&a_boxed_error))
+    /// ```
+    fn from(err: Cow<'a, str>) -> Box<dyn Error> {
         From::from(String::from(err))
     }
 }
@@ -326,7 +533,7 @@ impl<T: Error> Error for Box<T> {
         Error::description(&**self)
     }
 
-    fn cause(&self) -> Option<&Error> {
+    fn cause(&self) -> Option<&dyn Error> {
         Error::cause(&**self)
     }
 }
@@ -367,7 +574,7 @@ impl Error for char::ParseCharError {
 }
 
 // copied from any.rs
-impl Error + 'static {
+impl dyn Error + 'static {
     /// Returns true if the boxed type is the same as `T`
     #[stable(feature = "error_downcast", since = "1.3.0")]
     #[inline]
@@ -389,7 +596,7 @@ impl Error + 'static {
     pub fn downcast_ref<T: Error + 'static>(&self) -> Option<&T> {
         if self.is::<T>() {
             unsafe {
-                Some(&*(self as *const Error as *const T))
+                Some(&*(self as *const dyn Error as *const T))
             }
         } else {
             None
@@ -403,7 +610,7 @@ impl Error + 'static {
     pub fn downcast_mut<T: Error + 'static>(&mut self) -> Option<&mut T> {
         if self.is::<T>() {
             unsafe {
-                Some(&mut *(self as *mut Error as *mut T))
+                Some(&mut *(self as *mut dyn Error as *mut T))
             }
         } else {
             None
@@ -411,60 +618,60 @@ impl Error + 'static {
     }
 }
 
-impl Error + 'static + Send {
+impl dyn Error + 'static + Send {
     /// Forwards to the method defined on the type `Any`.
     #[stable(feature = "error_downcast", since = "1.3.0")]
     #[inline]
     pub fn is<T: Error + 'static>(&self) -> bool {
-        <Error + 'static>::is::<T>(self)
+        <dyn Error + 'static>::is::<T>(self)
     }
 
     /// Forwards to the method defined on the type `Any`.
     #[stable(feature = "error_downcast", since = "1.3.0")]
     #[inline]
     pub fn downcast_ref<T: Error + 'static>(&self) -> Option<&T> {
-        <Error + 'static>::downcast_ref::<T>(self)
+        <dyn Error + 'static>::downcast_ref::<T>(self)
     }
 
     /// Forwards to the method defined on the type `Any`.
     #[stable(feature = "error_downcast", since = "1.3.0")]
     #[inline]
     pub fn downcast_mut<T: Error + 'static>(&mut self) -> Option<&mut T> {
-        <Error + 'static>::downcast_mut::<T>(self)
+        <dyn Error + 'static>::downcast_mut::<T>(self)
     }
 }
 
-impl Error + 'static + Send + Sync {
+impl dyn Error + 'static + Send + Sync {
     /// Forwards to the method defined on the type `Any`.
     #[stable(feature = "error_downcast", since = "1.3.0")]
     #[inline]
     pub fn is<T: Error + 'static>(&self) -> bool {
-        <Error + 'static>::is::<T>(self)
+        <dyn Error + 'static>::is::<T>(self)
     }
 
     /// Forwards to the method defined on the type `Any`.
     #[stable(feature = "error_downcast", since = "1.3.0")]
     #[inline]
     pub fn downcast_ref<T: Error + 'static>(&self) -> Option<&T> {
-        <Error + 'static>::downcast_ref::<T>(self)
+        <dyn Error + 'static>::downcast_ref::<T>(self)
     }
 
     /// Forwards to the method defined on the type `Any`.
     #[stable(feature = "error_downcast", since = "1.3.0")]
     #[inline]
     pub fn downcast_mut<T: Error + 'static>(&mut self) -> Option<&mut T> {
-        <Error + 'static>::downcast_mut::<T>(self)
+        <dyn Error + 'static>::downcast_mut::<T>(self)
     }
 }
 
-impl Error {
+impl dyn Error {
     #[inline]
     #[stable(feature = "error_downcast", since = "1.3.0")]
     /// Attempt to downcast the box to a concrete type.
-    pub fn downcast<T: Error + 'static>(self: Box<Self>) -> Result<Box<T>, Box<Error>> {
+    pub fn downcast<T: Error + 'static>(self: Box<Self>) -> Result<Box<T>, Box<dyn Error>> {
         if self.is::<T>() {
             unsafe {
-                let raw: *mut Error = Box::into_raw(self);
+                let raw: *mut dyn Error = Box::into_raw(self);
                 Ok(Box::from_raw(raw as *mut T))
             }
         } else {
@@ -473,30 +680,30 @@ impl Error {
     }
 }
 
-impl Error + Send {
+impl dyn Error + Send {
     #[inline]
     #[stable(feature = "error_downcast", since = "1.3.0")]
     /// Attempt to downcast the box to a concrete type.
     pub fn downcast<T: Error + 'static>(self: Box<Self>)
-                                        -> Result<Box<T>, Box<Error + Send>> {
-        let err: Box<Error> = self;
-        <Error>::downcast(err).map_err(|s| unsafe {
+                                        -> Result<Box<T>, Box<dyn Error + Send>> {
+        let err: Box<dyn Error> = self;
+        <dyn Error>::downcast(err).map_err(|s| unsafe {
             // reapply the Send marker
-            transmute::<Box<Error>, Box<Error + Send>>(s)
+            transmute::<Box<dyn Error>, Box<dyn Error + Send>>(s)
         })
     }
 }
 
-impl Error + Send + Sync {
+impl dyn Error + Send + Sync {
     #[inline]
     #[stable(feature = "error_downcast", since = "1.3.0")]
     /// Attempt to downcast the box to a concrete type.
     pub fn downcast<T: Error + 'static>(self: Box<Self>)
                                         -> Result<Box<T>, Box<Self>> {
-        let err: Box<Error> = self;
-        <Error>::downcast(err).map_err(|s| unsafe {
+        let err: Box<dyn Error> = self;
+        <dyn Error>::downcast(err).map_err(|s| unsafe {
             // reapply the Send+Sync marker
-            transmute::<Box<Error>, Box<Error + Send + Sync>>(s)
+            transmute::<Box<dyn Error>, Box<dyn Error + Send + Sync>>(s)
         })
     }
 }
@@ -532,13 +739,13 @@ mod tests {
     #[test]
     fn downcasting() {
         let mut a = A;
-        let a = &mut a as &mut (Error + 'static);
+        let a = &mut a as &mut (dyn Error + 'static);
         assert_eq!(a.downcast_ref::<A>(), Some(&A));
         assert_eq!(a.downcast_ref::<B>(), None);
         assert_eq!(a.downcast_mut::<A>(), Some(&mut A));
         assert_eq!(a.downcast_mut::<B>(), None);
 
-        let a: Box<Error> = Box::new(A);
+        let a: Box<dyn Error> = Box::new(A);
         match a.downcast::<B>() {
             Ok(..) => panic!("expected error"),
             Err(e) => assert_eq!(*e.downcast::<A>().unwrap(), A),

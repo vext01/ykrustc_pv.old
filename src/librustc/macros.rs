@@ -51,28 +51,39 @@ macro_rules! enum_from_u32 {
 macro_rules! bug {
     () => ( bug!("impossible case reached") );
     ($($message:tt)*) => ({
-        $crate::session::bug_fmt(file!(), line!(), format_args!($($message)*))
+        $crate::util::bug::bug_fmt(file!(), line!(), format_args!($($message)*))
     })
 }
 
 #[macro_export]
 macro_rules! span_bug {
     ($span:expr, $($message:tt)*) => ({
-        $crate::session::span_bug_fmt(file!(), line!(), $span, format_args!($($message)*))
+        $crate::util::bug::span_bug_fmt(file!(), line!(), $span, format_args!($($message)*))
     })
 }
 
 #[macro_export]
+macro_rules! static_assert {
+    ($name:ident: $test:expr) => {
+        // Use the bool to access an array such that if the bool is false, the access
+        // is out-of-bounds.
+        #[allow(dead_code)]
+        static $name: () = [()][!$test as usize];
+    }
+}
+
+#[macro_export]
 macro_rules! __impl_stable_hash_field {
-    (DECL IGNORED) => (_);
-    (DECL $name:ident) => (ref $name);
-    (USE IGNORED $ctx:expr, $hasher:expr) => ({});
-    (USE $name:ident, $ctx:expr, $hasher:expr) => ($name.hash_stable($ctx, $hasher));
+    ($field:ident, $ctx:expr, $hasher:expr) => ($field.hash_stable($ctx, $hasher));
+    ($field:ident, $ctx:expr, $hasher:expr, _) => ({ let _ = $field; });
+    ($field:ident, $ctx:expr, $hasher:expr, $delegate:expr) => ($delegate.hash_stable($ctx, $hasher));
 }
 
 #[macro_export]
 macro_rules! impl_stable_hash_for {
-    (enum $enum_name:path { $( $variant:ident $( ( $($arg:ident),* ) )* ),* $(,)* }) => {
+    // FIXME(mark-i-m): Some of these should be `?` rather than `*`. See the git blame and change
+    // them back when `?` is supported again.
+    (enum $enum_name:path { $( $variant:ident $( ( $($field:ident $(-> $delegate:tt)*),* ) )* ),* $(,)* }) => {
         impl<'a, 'tcx> ::rustc_data_structures::stable_hasher::HashStable<$crate::ich::StableHashingContext<'a>> for $enum_name {
             #[inline]
             fn hash_stable<W: ::rustc_data_structures::stable_hasher::StableHasherResult>(&self,
@@ -83,15 +94,16 @@ macro_rules! impl_stable_hash_for {
 
                 match *self {
                     $(
-                        $variant $( ( $( __impl_stable_hash_field!(DECL $arg) ),* ) )* => {
-                            $($( __impl_stable_hash_field!(USE $arg, __ctx, __hasher) );*)*
+                        $variant $( ( $(ref $field),* ) )* => {
+                            $($( __impl_stable_hash_field!($field, __ctx, __hasher $(, $delegate)*) );*)*
                         }
                     )*
                 }
             }
         }
     };
-    (struct $struct_name:path { $($field:ident),* }) => {
+    // FIXME(mark-i-m): same here.
+    (struct $struct_name:path { $($field:ident $(-> $delegate:tt)*),*  $(,)* }) => {
         impl<'a, 'tcx> ::rustc_data_structures::stable_hasher::HashStable<$crate::ich::StableHashingContext<'a>> for $struct_name {
             #[inline]
             fn hash_stable<W: ::rustc_data_structures::stable_hasher::StableHasherResult>(&self,
@@ -101,11 +113,12 @@ macro_rules! impl_stable_hash_for {
                     $(ref $field),*
                 } = *self;
 
-                $( $field.hash_stable(__ctx, __hasher));*
+                $( __impl_stable_hash_field!($field, __ctx, __hasher $(, $delegate)*) );*
             }
         }
     };
-    (tuple_struct $struct_name:path { $($field:ident),* }) => {
+    // FIXME(mark-i-m): same here.
+    (tuple_struct $struct_name:path { $($field:ident $(-> $delegate:tt)*),*  $(,)* }) => {
         impl<'a, 'tcx> ::rustc_data_structures::stable_hasher::HashStable<$crate::ich::StableHashingContext<'a>> for $struct_name {
             #[inline]
             fn hash_stable<W: ::rustc_data_structures::stable_hasher::StableHasherResult>(&self,
@@ -115,7 +128,7 @@ macro_rules! impl_stable_hash_for {
                     $(ref $field),*
                 ) = *self;
 
-                $( $field.hash_stable(__ctx, __hasher));*
+                $( __impl_stable_hash_field!($field, __ctx, __hasher $(, $delegate)*) );*
             }
         }
     };
@@ -144,7 +157,7 @@ macro_rules! impl_stable_hash_for {
 macro_rules! impl_stable_hash_for_spanned {
     ($T:path) => (
 
-        impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for ::syntax::codemap::Spanned<$T>
+        impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for ::syntax::source_map::Spanned<$T>
         {
             #[inline]
             fn hash_stable<W: StableHasherResult>(&self,

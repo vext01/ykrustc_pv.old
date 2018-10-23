@@ -24,13 +24,13 @@
 
 #![feature(core_intrinsics)]
 #![feature(libc)]
+#![feature(nll)]
 #![feature(panic_runtime)]
 #![feature(staged_api)]
 #![feature(rustc_attrs)]
 
 // Rust's "try" function, but if we're aborting on panics we just call the
 // function as there's nothing else we need to do here.
-#[no_mangle]
 #[rustc_std_internal_symbol]
 pub unsafe extern fn __rust_maybe_catch_panic(f: fn(*mut u8),
                                               data: *mut u8,
@@ -50,7 +50,6 @@ pub unsafe extern fn __rust_maybe_catch_panic(f: fn(*mut u8),
 // which would break compat with XP. For now just use `intrinsics::abort` which
 // will kill us with an illegal instruction, which will do a good enough job for
 // now hopefully.
-#[no_mangle]
 #[rustc_std_internal_symbol]
 pub unsafe extern fn __rust_start_panic(_payload: usize) -> u32 {
     abort();
@@ -97,9 +96,14 @@ pub unsafe extern fn __rust_start_panic(_payload: usize) -> u32 {
 // runtime at all.
 pub mod personalities {
     #[no_mangle]
-    #[cfg(not(all(target_os = "windows",
-                  target_env = "gnu",
-                  target_arch = "x86_64")))]
+    #[cfg(not(any(
+        target_arch = "wasm32",
+        all(
+            target_os = "windows",
+            target_env = "gnu",
+            target_arch = "x86_64",
+        ),
+    )))]
     pub extern fn rust_eh_personality() {}
 
     // On x86_64-pc-windows-gnu we use our own personality function that needs

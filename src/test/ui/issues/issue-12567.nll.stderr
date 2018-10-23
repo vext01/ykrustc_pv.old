@@ -1,0 +1,82 @@
+error[E0508]: cannot move out of type `[T]`, a non-copy slice
+  --> $DIR/issue-12567.rs:14:11
+   |
+LL |     match (l1, l2) {
+   |           ^^^^^^^^ cannot move out of here
+LL |         (&[], &[]) => println!("both empty"),
+LL |         (&[], &[hd, ..]) | (&[hd, ..], &[])
+   |                 -- data moved here
+...
+LL |         (&[hd1, ..], &[hd2, ..])
+   |                        --- ...and here
+   |
+note: move occurs because these variables have types that don't implement the `Copy` trait
+  --> $DIR/issue-12567.rs:16:17
+   |
+LL |         (&[], &[hd, ..]) | (&[hd, ..], &[])
+   |                 ^^
+...
+LL |         (&[hd1, ..], &[hd2, ..])
+   |                        ^^^
+
+error[E0508]: cannot move out of type `[T]`, a non-copy slice
+  --> $DIR/issue-12567.rs:14:11
+   |
+LL |     match (l1, l2) {
+   |           ^^^^^^^^ cannot move out of here
+LL |         (&[], &[]) => println!("both empty"),
+LL |         (&[], &[hd, ..]) | (&[hd, ..], &[])
+   |                 -- data moved here
+...
+LL |         (&[hd1, ..], &[hd2, ..])
+   |            --- ...and here
+   |
+note: move occurs because these variables have types that don't implement the `Copy` trait
+  --> $DIR/issue-12567.rs:16:17
+   |
+LL |         (&[], &[hd, ..]) | (&[hd, ..], &[])
+   |                 ^^
+...
+LL |         (&[hd1, ..], &[hd2, ..])
+   |            ^^^
+
+error[E0507]: cannot move out of data in a `&` reference
+  --> $DIR/issue-12567.rs:16:17
+   |
+LL |         (&[], &[hd, ..]) | (&[hd, ..], &[])
+   |                 ^^
+   |                 |
+   |                 cannot move out of data in a `&` reference
+   |                 cannot move
+
+error[E0507]: cannot move out of data in a `&` reference
+  --> $DIR/issue-12567.rs:16:31
+   |
+LL |         (&[], &[hd, ..]) | (&[hd, ..], &[])
+   |                               ^^
+   |                               |
+   |                               cannot move out of data in a `&` reference
+   |                               cannot move
+
+error[E0507]: cannot move out of data in a `&` reference
+  --> $DIR/issue-12567.rs:20:12
+   |
+LL |         (&[hd1, ..], &[hd2, ..])
+   |            ^^^
+   |            |
+   |            cannot move out of data in a `&` reference
+   |            cannot move
+
+error[E0507]: cannot move out of data in a `&` reference
+  --> $DIR/issue-12567.rs:20:24
+   |
+LL |         (&[hd1, ..], &[hd2, ..])
+   |                        ^^^
+   |                        |
+   |                        cannot move out of data in a `&` reference
+   |                        cannot move
+
+error: aborting due to 6 previous errors
+
+Some errors occurred: E0507, E0508.
+For more information about an error, try `rustc --explain E0507`.

@@ -8,7 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![allow(bad_style)]
+#![allow(nonstandard_style)]
+
+#![feature(nll)]
 
 pub struct Intrinsic {
     pub inputs: &'static [&'static Type],

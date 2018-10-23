@@ -45,7 +45,7 @@ pub struct ErrorLocation {
 impl ErrorLocation {
     /// Create an error location from a span.
     pub fn from_span(ecx: &ExtCtxt, sp: Span) -> ErrorLocation {
-        let loc = ecx.codemap().lookup_char_pos_adj(sp.lo());
+        let loc = ecx.source_map().lookup_char_pos_adj(sp.lo());
         ErrorLocation {
             filename: loc.filename,
             line: loc.line
@@ -73,7 +73,7 @@ fn get_metadata_path(directory: PathBuf, name: &str) -> PathBuf {
 /// For our current purposes the prefix is the target architecture and the name is a crate name.
 /// If an error occurs steps will be taken to ensure that no file is created.
 pub fn output_metadata(ecx: &ExtCtxt, prefix: &str, name: &str, err_map: &ErrorMap)
-    -> Result<(), Box<Error>>
+    -> Result<(), Box<dyn Error>>
 {
     // Create the directory to place the file in.
     let metadata_dir = get_metadata_dir(prefix);

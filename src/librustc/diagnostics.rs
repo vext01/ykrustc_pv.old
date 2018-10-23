@@ -637,8 +637,8 @@ Erroneous code example:
 ```compile_fail,E0152
 #![feature(lang_items)]
 
-#[lang = "panic_impl"]
-struct Foo; // error: duplicate lang item found: `panic_impl`
+#[lang = "arc"]
+struct Foo; // error: duplicate lang item found: `arc`
 ```
 
 Lang items are already implemented in the standard library. Unless you are
@@ -1232,41 +1232,54 @@ let x: i32 = "I am not a number!";
 "##,
 
 E0309: r##"
-Types in type definitions have lifetimes associated with them that represent
-how long the data stored within them is guaranteed to be live. This lifetime
-must be as long as the data needs to be alive, and missing the constraint that
-denotes this will cause this error.
+The type definition contains some field whose type
+requires an outlives annotation. Outlives annotations
+(e.g., `T: 'a`) are used to guarantee that all the data in T is valid
+for at least the lifetime `'a`. This scenario most commonly
+arises when the type contains an associated type reference
+like `<T as SomeTrait<'a>>::Output`, as shown in this example:
 
 ```compile_fail,E0309
-// This won't compile because T is not constrained, meaning the data
-// stored in it is not guaranteed to last as long as the reference
+// This won't compile because the applicable impl of
+// `SomeTrait` (below) requires that `T: 'a`, but the struct does
+// not have a matching where-clause.
 struct Foo<'a, T> {
-    foo: &'a T
+    foo: <T as SomeTrait<'a>>::Output,
+}
+
+trait SomeTrait<'a> {
+    type Output;
+}
+
+impl<'a, T> SomeTrait<'a> for T
+where
+    T: 'a,
+{
+    type Output = u32;
 }
 ```
 
-This will compile, because it has the constraint on the type parameter:
+Here, the where clause `T: 'a` that appears on the impl is not known to be
+satisfied on the struct. To make this example compile, you have to add
+a where-clause like `T: 'a` to the struct definition:
 
 ```
-struct Foo<'a, T: 'a> {
-    foo: &'a T
-}
-```
-
-To see why this is important, consider the case where `T` is itself a reference
-(e.g., `T = &str`). If we don't include the restriction that `T: 'a`, the
-following code would be perfectly legal:
-
-```compile_fail,E0309
-struct Foo<'a, T> {
-    foo: &'a T
+struct Foo<'a, T>
+where
+    T: 'a,
+{
+    foo: <T as SomeTrait<'a>>::Output
 }
 
-fn main() {
-    let v = "42".to_string();
-    let f = Foo{foo: &v};
-    drop(v);
-    println!("{}", f.foo); // but we've already dropped v!
+trait SomeTrait<'a> {
+    type Output;
+}
+
+impl<'a, T> SomeTrait<'a> for T
+where
+    T: 'a,
+{
+    type Output = u32;
 }
 ```
 "##,
@@ -1465,30 +1478,31 @@ A reference has a longer lifetime than the data it references.
 Erroneous code example:
 
 ```compile_fail,E0491
-// struct containing a reference requires a lifetime parameter,
-// because the data the reference points to must outlive the struct (see E0106)
-struct Struct<'a> {
-    ref_i32: &'a i32,
+trait SomeTrait<'a> {
+    type Output;
 }
 
-// However, a nested struct like this, the signature itself does not tell
-// whether 'a outlives 'b or the other way around.
-// So it could be possible that 'b of reference outlives 'a of the data.
-struct Nested<'a, 'b> {
-    ref_struct: &'b Struct<'a>, // compile error E0491
+impl<'a, T> SomeTrait<'a> for T {
+    type Output = &'a T; // compile error E0491
 }
 ```
 
-To fix this issue, you can specify a bound to the lifetime like below:
+Here, the problem is that a reference type like `&'a T` is only valid
+if all the data in T outlives the lifetime `'a`. But this impl as written
+is applicable to any lifetime `'a` and any type `T` -- we have no guarantee
+that `T` outlives `'a`. To fix this, you can add a where clause like
+`where T: 'a`.
 
 ```
-struct Struct<'a> {
-    ref_i32: &'a i32,
+trait SomeTrait<'a> {
+    type Output;
 }
 
-// 'a: 'b means 'a outlives 'b
-struct Nested<'a: 'b, 'b> {
-    ref_struct: &'b Struct<'a>,
+impl<'a, T> SomeTrait<'a> for T
+where
+    T: 'a,
+{
+    type Output = &'a T; // compile error E0491
 }
 ```
 "##,
@@ -1725,7 +1739,7 @@ specified exit code, use `std::process::exit`.
 
 E0562: r##"
 Abstract return types (written `impl Trait` for some trait `Trait`) are only
-allowed as function return types.
+allowed as function and inherent impl return types.
 
 Erroneous code example:
 
@@ -1918,6 +1932,30 @@ fn foo<'a>(x: &'a i32, y: &i32) -> &'a i32 {
 ```
 "##,
 
+E0635: r##"
+The `#![feature]` attribute specified an unknown feature.
+
+Erroneous code example:
+
+```compile_fail,E0635
+#![feature(nonexistent_rust_feature)] // error: unknown feature
+```
+
+"##,
+
+E0636: r##"
+A `#![feature]` attribute was declared multiple times.
+
+Erroneous code example:
+
+```compile_fail,E0636
+#![allow(stable_features)]
+#![feature(rust1)]
+#![feature(rust1)] // error: the feature `rust1` has already been declared
+```
+
+"##,
+
 E0644: r##"
 A closure or generator was constructed that references its own type.
 
@@ -1958,8 +1996,6 @@ representation hints.
 Erroneous code example:
 
 ```compile_fail,E0692
-#![feature(repr_transparent)]
-
 #[repr(transparent, C)] // error: incompatible representation hints
 struct Grams(f32);
 ```
@@ -1969,8 +2005,6 @@ another type, so adding more representation hints is contradictory. Remove
 either the `transparent` hint or the other hints, like this:
 
 ```
-#![feature(repr_transparent)]
-
 #[repr(transparent)]
 struct Grams(f32);
 ```
@@ -1978,8 +2012,6 @@ struct Grams(f32);
 Alternatively, move the other attributes to the contained type:
 
 ```
-#![feature(repr_transparent)]
-
 #[repr(C)]
 struct Foo {
     x: i32,
@@ -1994,8 +2026,6 @@ Note that introducing another `struct` just to have a place for the other
 attributes may have unintended side effects on the representation:
 
 ```
-#![feature(repr_transparent)]
-
 #[repr(transparent)]
 struct Grams(f32);
 
@@ -2011,13 +2041,13 @@ a (non-transparent) struct containing a single float, while `Grams` is a
 transparent wrapper around a float. This can make a difference for the ABI.
 "##,
 
-E0909: r##"
+E0700: r##"
 The `impl Trait` return type captures lifetime parameters that do not
 appear within the `impl Trait` itself.
 
 Erroneous code example:
 
-```compile-fail,E0909
+```compile-fail,E0700
 use std::cell::Cell;
 
 trait Trait<'a> { }
@@ -2058,13 +2088,13 @@ where 'x: 'y
 ```
 "##,
 
-E0910: r##"
+E0701: r##"
 This error indicates that a `#[non_exhaustive]` attribute was incorrectly placed
 on something other than a struct or enum.
 
 Examples of erroneous code:
 
-```compile_fail,E0910
+```compile_fail,E0701
 # #![feature(non_exhaustive)]
 
 #[non_exhaustive]
@@ -2072,17 +2102,31 @@ trait Foo { }
 ```
 "##,
 
-E0911: r##"
+E0702: r##"
 This error indicates that a `#[non_exhaustive]` attribute had a value. The
 `#[non_exhaustive]` should be empty.
 
 Examples of erroneous code:
 
-```compile_fail,E0911
+```compile_fail,E0702
 # #![feature(non_exhaustive)]
 
 #[non_exhaustive(anything)]
 struct Foo;
+```
+"##,
+
+E0718: r##"
+This error indicates that a `#[lang = ".."]` attribute was placed
+on the wrong type of item.
+
+Examples of erroneous code:
+
+```compile_fail,E0718
+#![feature(lang_items)]
+
+#[lang = "arc"]
+static X: u32 = 42;
 ```
 "##,
 
@@ -2140,5 +2184,11 @@ register_diagnostics! {
     E0687, // in-band lifetimes cannot be used in `fn`/`Fn` syntax
     E0688, // in-band lifetimes cannot be mixed with explicit lifetime binders
 
-    E0906, // closures cannot be static
+    E0697, // closures cannot be static
+
+    E0707, // multiple elided lifetimes used in arguments of `async fn`
+    E0708, // `async` non-`move` closures with arguments are not currently supported
+    E0709, // multiple different lifetimes used in arguments of `async fn`
+    E0710, // an unknown tool name found in scoped lint
+    E0711, // a feature has been declared with conflicting stability attributes
 }

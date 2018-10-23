@@ -8,6 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(dead_code)]
+#![allow(unused_variables)]
+
 #![feature(specialization)]
 
 // Regression test for ICE when combining specialized associated types and type

@@ -12,6 +12,8 @@
 //
 use self::State::*;
 
+use rustc_data_structures::thin_vec::ThinVec;
+
 use syntax::ast;
 use syntax::ext::base;
 use syntax::ext::base::*;
@@ -50,7 +52,7 @@ const OPTIONS: &'static [&'static str] = &["volatile", "alignstack", "intel"];
 pub fn expand_asm<'cx>(cx: &'cx mut ExtCtxt,
                        sp: Span,
                        tts: &[tokenstream::TokenTree])
-                       -> Box<base::MacResult + 'cx> {
+                       -> Box<dyn base::MacResult + 'cx> {
     if !cx.ecfg.enable_asm() {
         feature_gate::emit_feature_err(&cx.parse_sess,
                                        "asm",
@@ -263,6 +265,6 @@ pub fn expand_asm<'cx>(cx: &'cx mut ExtCtxt,
             ctxt: cx.backtrace(),
         })),
         span: sp,
-        attrs: ast::ThinVec::new(),
+        attrs: ThinVec::new(),
     }))
 }

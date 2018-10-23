@@ -8,11 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use llvm::{self, ValueRef};
+use llvm;
 use common::*;
 use type_::Type;
 use type_of::LayoutLlvmExt;
 use builder::Builder;
+use value::Value;
 
 use rustc::hir;
 
@@ -24,12 +25,12 @@ use syntax::ast::AsmDialect;
 use libc::{c_uint, c_char};
 
 // Take an inline assembly expression and splat it out via LLVM
-pub fn codegen_inline_asm<'a, 'tcx>(
-    bx: &Builder<'a, 'tcx>,
+pub fn codegen_inline_asm(
+    bx: &Builder<'a, 'll, 'tcx>,
     ia: &hir::InlineAsm,
-    outputs: Vec<PlaceRef<'tcx>>,
-    mut inputs: Vec<ValueRef>
-) {
+    outputs: Vec<PlaceRef<'ll, 'tcx>>,
+    mut inputs: Vec<&'ll Value>
+) -> bool {
     let mut ext_constraints = vec![];
     let mut output_types = vec![];
 
@@ -96,6 +97,10 @@ pub fn codegen_inline_asm<'a, 'tcx>(
         ia.alignstack,
         dialect
     );
+    if r.is_none() {
+        return false;
+    }
+    let r = r.unwrap();
 
     // Again, based on how many outputs we have
     let outputs = ia.outputs.iter().zip(&outputs).filter(|&(ref o, _)| !o.is_indirect);
@@ -111,11 +116,13 @@ pub fn codegen_inline_asm<'a, 'tcx>(
         let kind = llvm::LLVMGetMDKindIDInContext(bx.cx.llcx,
             key.as_ptr() as *const c_char, key.len() as c_uint);
 
-        let val: llvm::ValueRef = C_i32(bx.cx, ia.ctxt.outer().as_u32() as i32);
+        let val: &'ll Value = C_i32(bx.cx, ia.ctxt.outer().as_u32() as i32);
 
         llvm::LLVMSetMetadata(r, kind,
             llvm::LLVMMDNodeInContext(bx.cx.llcx, &val, 1));
     }
+
+    return true;
 }
 
 pub fn codegen_global_asm<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,

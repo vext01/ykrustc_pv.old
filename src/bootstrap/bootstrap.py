@@ -88,7 +88,10 @@ def _download(path, url, probably_big, verbose, exception):
             option = "-#"
         else:
             option = "-s"
-        run(["curl", option, "--retry", "3", "-Sf", "-o", path, url],
+        run(["curl", option,
+             "-y", "30", "-Y", "10",    # timeout if speed is < 10 bytes/sec for > 30 seconds
+             "--connect-timeout", "30", # timeout if cannot connect within 30 seconds
+             "--retry", "3", "-Sf", "-o", path, url],
             verbose=verbose,
             exception=exception)
 
@@ -303,6 +306,19 @@ def default_build_triple():
     return "{}-{}".format(cputype, ostype)
 
 
+@contextlib.contextmanager
+def output(filepath):
+    tmp = filepath + '.tmp'
+    with open(tmp, 'w') as f:
+        yield f
+    try:
+        os.remove(filepath)  # PermissionError/OSError on Win32 if in use
+        os.rename(tmp, filepath)
+    except OSError:
+        shutil.copy2(tmp, filepath)
+        os.remove(tmp)
+
+
 class RustBuild(object):
     """Provide all the methods required to build Rust"""
     def __init__(self):
@@ -346,7 +362,7 @@ class RustBuild(object):
             self._download_stage0_helper(filename, "rustc")
             self.fix_executable("{}/bin/rustc".format(self.bin_root()))
             self.fix_executable("{}/bin/rustdoc".format(self.bin_root()))
-            with open(self.rustc_stamp(), 'w') as rust_stamp:
+            with output(self.rustc_stamp()) as rust_stamp:
                 rust_stamp.write(self.date)
 
             # This is required so that we don't mix incompatible MinGW
@@ -363,7 +379,7 @@ class RustBuild(object):
             filename = "cargo-{}-{}.tar.gz".format(cargo_channel, self.build)
             self._download_stage0_helper(filename, "cargo")
             self.fix_executable("{}/bin/cargo".format(self.bin_root()))
-            with open(self.cargo_stamp(), 'w') as cargo_stamp:
+            with output(self.cargo_stamp()) as cargo_stamp:
                 cargo_stamp.write(self.date)
 
     def _download_stage0_helper(self, filename, pattern):
@@ -705,6 +721,10 @@ class RustBuild(object):
                 config = self.get_toml('lld')
                 if config is None or config == 'false':
                     continue
+            if module.endswith("lldb") or module.endswith("clang"):
+                config = self.get_toml('lldb')
+                if config is None or config == 'false':
+                    continue
             check = self.check_submodule(module, slow_submodules)
             filtered_submodules.append((module, check))
             submodules_names.append(module)
@@ -776,7 +796,7 @@ def bootstrap(help_triggered):
     if build.use_vendored_sources:
         if not os.path.exists('.cargo'):
             os.makedirs('.cargo')
-        with open('.cargo/config', 'w') as cargo_config:
+        with output('.cargo/config') as cargo_config:
             cargo_config.write("""
                 [source.crates-io]
                 replace-with = 'vendored-sources'
@@ -815,12 +835,20 @@ def bootstrap(help_triggered):
     env["BOOTSTRAP_PARENT_ID"] = str(os.getpid())
     env["BOOTSTRAP_PYTHON"] = sys.executable
     env["BUILD_DIR"] = build.build_dir
+    env["RUSTC_BOOTSTRAP"] = '1'
+    env["CARGO"] = build.cargo()
+    env["RUSTC"] = build.rustc()
     run(args, env=env, verbose=build.verbose)
 
 
 def main():
     """Entry point for the bootstrap process"""
     start_time = time()
+
+    # x.py help <cmd> ...
+    if len(sys.argv) > 1 and sys.argv[1] == 'help':
+        sys.argv = sys.argv[:1] + [sys.argv[2], '-h'] + sys.argv[3:]
+
     help_triggered = (
         '-h' in sys.argv) or ('--help' in sys.argv) or (len(sys.argv) == 1)
     try:

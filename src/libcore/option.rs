@@ -146,8 +146,8 @@
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use iter::{FromIterator, FusedIterator, TrustedLen};
-use {mem, ops};
-use mem::PinMut;
+use {hint, mem, ops::{self, Deref}};
+use pin::Pin;
 
 // Note that this is not a lang item per se, but it has a hidden dependency on
 // `Iterator`, which is one. The compiler assumes that the `next` method of
@@ -270,12 +270,22 @@ impl<T> Option<T> {
         }
     }
 
-    /// Converts from `Option<T>` to `Option<PinMut<'_, T>>`
+
+    /// Converts from `Pin<&Option<T>>` to `Option<Pin<&T>>`
     #[inline]
     #[unstable(feature = "pin", issue = "49150")]
-    pub fn as_pin_mut<'a>(self: PinMut<'a, Self>) -> Option<PinMut<'a, T>> {
+    pub fn as_pin_ref<'a>(self: Pin<&'a Option<T>>) -> Option<Pin<&'a T>> {
         unsafe {
-            PinMut::get_mut(self).as_mut().map(|x| PinMut::new_unchecked(x))
+            Pin::get_ref(self).as_ref().map(|x| Pin::new_unchecked(x))
+        }
+    }
+
+    /// Converts from `Pin<&mut Option<T>>` to `Option<Pin<&mut T>>`
+    #[inline]
+    #[unstable(feature = "pin", issue = "49150")]
+    pub fn as_pin_mut<'a>(self: Pin<&'a mut Option<T>>) -> Option<Pin<&'a mut T>> {
+        unsafe {
+            Pin::get_mut_unchecked(self).as_mut().map(|x| Pin::new_unchecked(x))
         }
     }
 
@@ -784,7 +794,7 @@ impl<T> Option<T> {
 
         match *self {
             Some(ref mut v) => v,
-            _ => unreachable!(),
+            None => unsafe { hint::unreachable_unchecked() },
         }
     }
 
@@ -817,7 +827,7 @@ impl<T> Option<T> {
 
         match *self {
             Some(ref mut v) => v,
-            _ => unreachable!(),
+            None => unsafe { hint::unreachable_unchecked() },
         }
     }
 
@@ -833,17 +843,44 @@ impl<T> Option<T> {
     ///
     /// ```
     /// let mut x = Some(2);
-    /// x.take();
+    /// let y = x.take();
     /// assert_eq!(x, None);
+    /// assert_eq!(y, Some(2));
     ///
     /// let mut x: Option<u32> = None;
-    /// x.take();
+    /// let y = x.take();
     /// assert_eq!(x, None);
+    /// assert_eq!(y, None);
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn take(&mut self) -> Option<T> {
         mem::replace(self, None)
+    }
+
+    /// Replaces the actual value in the option by the value given in parameter,
+    /// returning the old value if present,
+    /// leaving a [`Some`] in its place without deinitializing either one.
+    ///
+    /// [`Some`]: #variant.Some
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut x = Some(2);
+    /// let old = x.replace(5);
+    /// assert_eq!(x, Some(5));
+    /// assert_eq!(old, Some(2));
+    ///
+    /// let mut x = None;
+    /// let old = x.replace(3);
+    /// assert_eq!(x, Some(3));
+    /// assert_eq!(old, None);
+    /// ```
+    #[inline]
+    #[stable(feature = "option_replace", since = "1.31.0")]
+    pub fn replace(&mut self, value: T) -> Option<T> {
+        mem::replace(self, Some(value))
     }
 }
 
@@ -924,6 +961,17 @@ impl<T: Default> Option<T> {
     }
 }
 
+#[unstable(feature = "inner_deref", reason = "newly added", issue = "50264")]
+impl<T: Deref> Option<T> {
+    /// Converts from `&Option<T>` to `Option<&T::Target>`.
+    ///
+    /// Leaves the original Option in-place, creating a new one with a reference
+    /// to the original one, additionally coercing the contents via `Deref`.
+    pub fn deref(&self) -> Option<&T::Target> {
+        self.as_ref().map(|t| t.deref())
+    }
+}
+
 impl<T, E> Option<Result<T, E>> {
     /// Transposes an `Option` of a `Result` into a `Result` of an `Option`.
     ///
@@ -960,16 +1008,13 @@ fn expect_failed(msg: &str) -> ! {
     panic!("{}", msg)
 }
 
-
 /////////////////////////////////////////////////////////////////////////////
 // Trait implementations
 /////////////////////////////////////////////////////////////////////////////
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T> Default for Option<T> {
-    /// Returns [`None`].
-    ///
-    /// [`None`]: #variant.None
+    /// Returns [`None`][Option::None].
     #[inline]
     fn default() -> Option<T> { None }
 }
@@ -1022,6 +1067,20 @@ impl<'a, T> IntoIterator for &'a mut Option<T> {
 impl<T> From<T> for Option<T> {
     fn from(val: T) -> Option<T> {
         Some(val)
+    }
+}
+
+#[stable(feature = "option_ref_from_ref_option", since = "1.30.0")]
+impl<'a, T> From<&'a Option<T>> for Option<&'a T> {
+    fn from(o: &'a Option<T>) -> Option<&'a T> {
+        o.as_ref()
+    }
+}
+
+#[stable(feature = "option_ref_from_ref_option", since = "1.30.0")]
+impl<'a, T> From<&'a mut Option<T>> for Option<&'a mut T> {
+    fn from(o: &'a mut Option<T>) -> Option<&'a mut T> {
+        o.as_mut()
     }
 }
 
@@ -1092,17 +1151,18 @@ impl<'a, A> DoubleEndedIterator for Iter<'a, A> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, A> ExactSizeIterator for Iter<'a, A> {}
+impl<A> ExactSizeIterator for Iter<'_, A> {}
 
 #[stable(feature = "fused", since = "1.26.0")]
-impl<'a, A> FusedIterator for Iter<'a, A> {}
+impl<A> FusedIterator for Iter<'_, A> {}
 
 #[unstable(feature = "trusted_len", issue = "37572")]
-unsafe impl<'a, A> TrustedLen for Iter<'a, A> {}
+unsafe impl<A> TrustedLen for Iter<'_, A> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, A> Clone for Iter<'a, A> {
-    fn clone(&self) -> Iter<'a, A> {
+impl<A> Clone for Iter<'_, A> {
+    #[inline]
+    fn clone(&self) -> Self {
         Iter { inner: self.inner.clone() }
     }
 }
@@ -1137,12 +1197,12 @@ impl<'a, A> DoubleEndedIterator for IterMut<'a, A> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, A> ExactSizeIterator for IterMut<'a, A> {}
+impl<A> ExactSizeIterator for IterMut<'_, A> {}
 
 #[stable(feature = "fused", since = "1.26.0")]
-impl<'a, A> FusedIterator for IterMut<'a, A> {}
+impl<A> FusedIterator for IterMut<'_, A> {}
 #[unstable(feature = "trusted_len", issue = "37572")]
-unsafe impl<'a, A> TrustedLen for IterMut<'a, A> {}
+unsafe impl<A> TrustedLen for IterMut<'_, A> {}
 
 /// An iterator over the value in [`Some`] variant of an [`Option`].
 ///
@@ -1188,9 +1248,10 @@ unsafe impl<A> TrustedLen for IntoIter<A> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A, V: FromIterator<A>> FromIterator<Option<A>> for Option<V> {
-    /// Takes each element in the [`Iterator`]: if it is [`None`], no further
-    /// elements are taken, and the [`None`] is returned. Should no [`None`] occur, a
-    /// container with the values of each `Option` is returned.
+    /// Takes each element in the [`Iterator`]: if it is [`None`][Option::None],
+    /// no further elements are taken, and the [`None`][Option::None] is
+    /// returned. Should no [`None`][Option::None] occur, a container with the
+    /// values of each [`Option`] is returned.
     ///
     /// Here is an example which increments every integer in a vector,
     /// checking for overflow:
@@ -1207,7 +1268,6 @@ impl<A, V: FromIterator<A>> FromIterator<Option<A>> for Option<V> {
     /// ```
     ///
     /// [`Iterator`]: ../iter/trait.Iterator.html
-    /// [`None`]: enum.Option.html#variant.None
     #[inline]
     fn from_iter<I: IntoIterator<Item=Option<A>>>(iter: I) -> Option<V> {
         // FIXME(#11084): This could be replaced with Iterator::scan when this
@@ -1268,14 +1328,17 @@ impl<T> ops::Try for Option<T> {
     type Ok = T;
     type Error = NoneError;
 
+    #[inline]
     fn into_result(self) -> Result<T, NoneError> {
         self.ok_or(NoneError)
     }
 
+    #[inline]
     fn from_ok(v: T) -> Self {
         Some(v)
     }
 
+    #[inline]
     fn from_error(_: NoneError) -> Self {
         None
     }

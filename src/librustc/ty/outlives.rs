@@ -72,14 +72,13 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         // in the `subtys` iterator (e.g., when encountering a
         // projection).
         match ty.sty {
-            ty::TyClosure(def_id, ref substs) => {
-
+            ty::Closure(def_id, ref substs) => {
                 for upvar_ty in substs.upvar_tys(def_id, *self) {
                     self.compute_components(upvar_ty, out);
                 }
             }
 
-            ty::TyGenerator(def_id, ref substs, _) => {
+            ty::Generator(def_id, ref substs, _) => {
                 // Same as the closure case
                 for upvar_ty in substs.upvar_tys(def_id, *self) {
                     self.compute_components(upvar_ty, out);
@@ -90,11 +89,11 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             }
 
             // All regions are bound inside a witness
-            ty::TyGeneratorWitness(..) => (),
+            ty::GeneratorWitness(..) => (),
 
             // OutlivesTypeParameterEnv -- the actual checking that `X:'a`
             // is implied by the environment is done in regionck.
-            ty::TyParam(p) => {
+            ty::Param(p) => {
                 out.push(Component::Param(p));
             }
 
@@ -106,7 +105,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             // trait-ref. Therefore, if we see any higher-ranke regions,
             // we simply fallback to the most restrictive rule, which
             // requires that `Pi: 'a` for all `i`.
-            ty::TyProjection(ref data) => {
+            ty::Projection(ref data) => {
                 if !data.has_escaping_regions() {
                     // best case: no escaping regions, so push the
                     // projection and skip the subtree (thus generating no
@@ -124,10 +123,12 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                 }
             }
 
+            ty::UnnormalizedProjection(..) => bug!("only used with chalk-engine"),
+
             // We assume that inference variables are fully resolved.
             // So, if we encounter an inference variable, just record
             // the unresolved variable as a component.
-            ty::TyInfer(infer_ty) => {
+            ty::Infer(infer_ty) => {
                 out.push(Component::UnresolvedInferenceVariable(infer_ty));
             }
 
@@ -137,25 +138,25 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             // the type and then visits the types that are lexically
             // contained within. (The comments refer to relevant rules
             // from RFC1214.)
-            ty::TyBool |            // OutlivesScalar
-            ty::TyChar |            // OutlivesScalar
-            ty::TyInt(..) |         // OutlivesScalar
-            ty::TyUint(..) |        // OutlivesScalar
-            ty::TyFloat(..) |       // OutlivesScalar
-            ty::TyNever |           // ...
-            ty::TyAdt(..) |         // OutlivesNominalType
-            ty::TyAnon(..) |        // OutlivesNominalType (ish)
-            ty::TyForeign(..) |     // OutlivesNominalType
-            ty::TyStr |             // OutlivesScalar (ish)
-            ty::TyArray(..) |       // ...
-            ty::TySlice(..) |       // ...
-            ty::TyRawPtr(..) |      // ...
-            ty::TyRef(..) |         // OutlivesReference
-            ty::TyTuple(..) |       // ...
-            ty::TyFnDef(..) |       // OutlivesFunction (*)
-            ty::TyFnPtr(_) |        // OutlivesFunction (*)
-            ty::TyDynamic(..) |       // OutlivesObject, OutlivesFragment (*)
-            ty::TyError => {
+            ty::Bool |            // OutlivesScalar
+            ty::Char |            // OutlivesScalar
+            ty::Int(..) |         // OutlivesScalar
+            ty::Uint(..) |        // OutlivesScalar
+            ty::Float(..) |       // OutlivesScalar
+            ty::Never |           // ...
+            ty::Adt(..) |         // OutlivesNominalType
+            ty::Opaque(..) |        // OutlivesNominalType (ish)
+            ty::Foreign(..) |     // OutlivesNominalType
+            ty::Str |             // OutlivesScalar (ish)
+            ty::Array(..) |       // ...
+            ty::Slice(..) |       // ...
+            ty::RawPtr(..) |      // ...
+            ty::Ref(..) |         // OutlivesReference
+            ty::Tuple(..) |       // ...
+            ty::FnDef(..) |       // OutlivesFunction (*)
+            ty::FnPtr(_) |        // OutlivesFunction (*)
+            ty::Dynamic(..) |       // OutlivesObject, OutlivesFragment (*)
+            ty::Error => {
                 // (*) Bare functions and traits are both binders. In the
                 // RFC, this means we would add the bound regions to the
                 // "bound regions list".  In our representation, no such
@@ -181,9 +182,5 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
 }
 
 fn push_region_constraints<'tcx>(out: &mut Vec<Component<'tcx>>, regions: Vec<ty::Region<'tcx>>) {
-    for r in regions {
-        if !r.is_late_bound() {
-            out.push(Component::Region(r));
-        }
-    }
+    out.extend(regions.iter().filter(|&r| !r.is_late_bound()).map(|r| Component::Region(r)));
 }

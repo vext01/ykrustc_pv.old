@@ -9,11 +9,10 @@
 // except according to those terms.
 
 #![crate_type = "rlib"]
-#![feature(wasm_custom_section)]
 #![deny(warnings)]
 
-#[wasm_custom_section = "foo"]
-const A: [u8; 2] = [1, 2];
+#[link_section = "foo"]
+pub static A: [u8; 2] = [1, 2];
 
-#[wasm_custom_section = "bar"]
-const B: [u8; 2] = [3, 4];
+#[link_section = "bar"]
+pub static B: [u8; 2] = [3, 4];

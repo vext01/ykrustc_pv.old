@@ -8,9 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// https://github.com/rust-lang/rust/issues/48279
+// run-pass
+#![allow(dead_code)]
+#![allow(unused_unsafe)]
 
-#![feature(const_fn)]
+// https://github.com/rust-lang/rust/issues/48279
 
 #[derive(PartialEq, Eq)]
 pub struct NonZeroU32 {

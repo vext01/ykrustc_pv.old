@@ -8,12 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+
 // compile-flags:-C panic=abort
 // no-prefer-dynamic
+// ignore-macos
 
 #![feature(panic_abort)]
 
 extern crate panic_abort;
 
-fn main() {
-}
+fn main() {}

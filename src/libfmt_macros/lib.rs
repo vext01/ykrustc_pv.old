@@ -20,6 +20,8 @@
        html_playground_url = "https://play.rust-lang.org/",
        test(attr(deny(warnings))))]
 
+#![feature(nll)]
+
 pub use self::Piece::*;
 pub use self::Position::*;
 pub use self::Alignment::*;
@@ -148,12 +150,19 @@ pub struct Parser<'a> {
     pub errors: Vec<ParseError>,
     /// Current position of implicit positional argument pointer
     curarg: usize,
+    /// `Some(raw count)` when the string is "raw", used to position spans correctly
+    style: Option<usize>,
+    /// How many newlines have been seen in the string so far, to adjust the error spans
+    seen_newlines: usize,
+    /// Start and end byte offset of every successfully parsed argument
+    pub arg_places: Vec<(usize, usize)>,
 }
 
 impl<'a> Iterator for Parser<'a> {
     type Item = Piece<'a>;
 
     fn next(&mut self) -> Option<Piece<'a>> {
+        let raw = self.style.map(|raw| raw + self.seen_newlines).unwrap_or(0);
         if let Some(&(pos, c)) = self.cur.peek() {
             match c {
                 '{' => {
@@ -161,26 +170,34 @@ impl<'a> Iterator for Parser<'a> {
                     if self.consume('{') {
                         Some(String(self.string(pos + 1)))
                     } else {
-                        let ret = Some(NextArgument(self.argument()));
-                        self.must_consume('}');
-                        ret
+                        let arg = self.argument();
+                        if let Some(arg_pos) = self.must_consume('}').map(|end| {
+                            (pos + raw + 1, end + raw + 2)
+                        }) {
+                            self.arg_places.push(arg_pos);
+                        }
+                        Some(NextArgument(arg))
                     }
                 }
                 '}' => {
                     self.cur.next();
-                    let pos = pos + 1;
                     if self.consume('}') {
-                        Some(String(self.string(pos)))
+                        Some(String(self.string(pos + 1)))
                     } else {
+                        let err_pos = pos + raw + 1;
                         self.err_with_note(
                             "unmatched `}` found",
                             "unmatched `}`",
                             "if you intended to print `}`, you can escape it using `}}`",
-                            pos,
-                            pos,
+                            err_pos,
+                            err_pos,
                         );
                         None
                     }
+                }
+                '\n' => {
+                    self.seen_newlines += 1;
+                    Some(String(self.string(pos)))
                 }
                 _ => Some(String(self.string(pos))),
             }
@@ -192,12 +209,15 @@ impl<'a> Iterator for Parser<'a> {
 
 impl<'a> Parser<'a> {
     /// Creates a new parser for the given format string
-    pub fn new(s: &'a str) -> Parser<'a> {
+    pub fn new(s: &'a str, style: Option<usize>) -> Parser<'a> {
         Parser {
             input: s,
             cur: s.char_indices().peekable(),
             errors: vec![],
             curarg: 0,
+            style,
+            seen_newlines: 0,
+            arg_places: vec![],
         }
     }
 
@@ -258,29 +278,40 @@ impl<'a> Parser<'a> {
 
     /// Forces consumption of the specified character. If the character is not
     /// found, an error is emitted.
-    fn must_consume(&mut self, c: char) {
+    fn must_consume(&mut self, c: char) -> Option<usize> {
         self.ws();
+        let raw = self.style.unwrap_or(0);
+
+        let padding = raw + self.seen_newlines;
         if let Some(&(pos, maybe)) = self.cur.peek() {
             if c == maybe {
                 self.cur.next();
+                Some(pos)
             } else {
+                let pos = pos + raw + 1;
                 self.err(format!("expected `{:?}`, found `{:?}`", c, maybe),
                          format!("expected `{}`", c),
-                         pos + 1,
-                         pos + 1);
+                         pos,
+                         pos);
+                None
             }
         } else {
             let msg = format!("expected `{:?}` but string was terminated", c);
-            let pos = self.input.len() + 1; // point at closing `"`
+            // point at closing `"`, unless the last char is `\n` to account for `println`
+            let pos = match self.input.chars().last() {
+                Some('\n') => self.input.len(),
+                _ => self.input.len() + 1,
+            };
             if c == '}' {
                 self.err_with_note(msg,
                                    format!("expected `{:?}`", c),
                                    "if you intended to print `{`, you can escape it using `{{`",
-                                   pos,
-                                   pos);
+                                   pos + padding,
+                                   pos + padding);
             } else {
                 self.err(msg, format!("expected `{:?}`", c), pos, pos);
             }
+            None
         }
     }
 
@@ -380,7 +411,7 @@ impl<'a> Parser<'a> {
 
         // fill character
         if let Some(&(_, c)) = self.cur.peek() {
-            match self.cur.clone().skip(1).next() {
+            match self.cur.clone().nth(1) {
                 Some((_, '>')) | Some((_, '<')) | Some((_, '^')) => {
                     spec.fill = Some(c);
                     self.cur.next();
@@ -473,13 +504,11 @@ impl<'a> Parser<'a> {
             if word.is_empty() {
                 self.cur = tmp;
                 CountImplied
+            } else if self.consume('$') {
+                CountIsName(word)
             } else {
-                if self.consume('$') {
-                    CountIsName(word)
-                } else {
-                    self.cur = tmp;
-                    CountImplied
-                }
+                self.cur = tmp;
+                CountImplied
             }
         }
     }
@@ -534,7 +563,7 @@ mod tests {
     use super::*;
 
     fn same(fmt: &'static str, p: &[Piece<'static>]) {
-        let parser = Parser::new(fmt);
+        let parser = Parser::new(fmt, None);
         assert!(parser.collect::<Vec<Piece<'static>>>() == p);
     }
 
@@ -550,7 +579,7 @@ mod tests {
     }
 
     fn musterr(s: &str) {
-        let mut p = Parser::new(s);
+        let mut p = Parser::new(s, None);
         p.next();
         assert!(!p.errors.is_empty());
     }

@@ -43,6 +43,7 @@
 #![feature(rustc_attrs)] // For `rustc_error`; see note below.
 #![warn(unused_attributes, unknown_lints)]
 #![allow(dead_code)]
+#![allow(stable_features)]
 
 // UNGATED WHITE-LISTED BUILT-IN ATTRIBUTES
 
@@ -59,7 +60,9 @@
 #![start                     = "x4300"] //~ WARN unused attribute
 // see issue-43106-gating-of-test.rs for crate-level; but non crate-level is below at "4200"
 // see issue-43106-gating-of-bench.rs for crate-level; but non crate-level is below at "4100"
-#![repr                       = "3900"] //~ WARN unused attribute
+#![repr                       = "3900"]
+//~^ WARN unused attribute
+//~| WARN `repr` attribute isn't configurable with a literal
 #![path                       = "3800"] //~ WARN unused attribute
 #![abi                        = "3700"] //~ WARN unused attribute
 #![automatically_derived      = "3600"] //~ WARN unused attribute
@@ -98,7 +101,7 @@
 // For #![crate_id], see issue #43142. (I cannot bear to enshrine current behavior in a test)
 
 // FIXME(#44232) we should warn that this isn't used.
-#![feature                    ( x0600)]
+#![feature                    ( rust1)]
 
 // For #![no_start], see issue #43144. (I cannot bear to enshrine current behavior in a test)
 
@@ -309,20 +312,25 @@ mod bench {
 
 #[repr = "3900"]
 //~^ WARN unused attribute
+//~| WARN `repr` attribute isn't configurable with a literal
 mod repr {
     mod inner { #![repr="3900"] }
     //~^ WARN unused attribute
+    //~| WARN `repr` attribute isn't configurable with a literal
 
     #[repr = "3900"] fn f() { }
     //~^ WARN unused attribute
+    //~| WARN `repr` attribute isn't configurable with a literal
 
     struct S;
 
     #[repr = "3900"] type T = S;
     //~^ WARN unused attribute
+    //~| WARN `repr` attribute isn't configurable with a literal
 
     #[repr = "3900"] impl S { }
     //~^ WARN unused attribute
+    //~| WARN `repr` attribute isn't configurable with a literal
 }
 
 #[path = "3800"]
@@ -385,7 +393,6 @@ mod no_mangle {
     mod inner { #![no_mangle="3500"] }
 
     #[no_mangle = "3500"] fn f() { }
-    //~^ WARN function is marked #[no_mangle], but not exported
 
     #[no_mangle = "3500"] struct S;
 

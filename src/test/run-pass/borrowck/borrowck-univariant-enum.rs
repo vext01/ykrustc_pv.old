@@ -8,7 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-
+// run-pass
+#![allow(non_camel_case_types)]
 
 use std::cell::Cell;
 

@@ -8,10 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(unused_variables)]
 // aux-build:lifetimes.rs
 // ignore-stage1
-
-#![feature(proc_macro)]
 
 extern crate lifetimes;
 use lifetimes::*;

@@ -1,3 +1,13 @@
+// Copyright 2018 The Rust Project Developers. See the COPYRIGHT
+// file at the top-level directory of this distribution and at
+// http://rust-lang.org/COPYRIGHT.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+
 //! An interpreter for MIR used in CTFE and by miri
 
 #[macro_export]
@@ -8,9 +18,12 @@ macro_rules! err {
 mod error;
 mod value;
 
-pub use self::error::{EvalError, EvalResult, EvalErrorKind, AssertMessage};
+pub use self::error::{
+    EvalError, EvalResult, EvalErrorKind, AssertMessage, ConstEvalErr, struct_error,
+    FrameInfo, ConstEvalResult,
+};
 
-pub use self::value::{Scalar, Value, ConstValue};
+pub use self::value::{Scalar, ConstValue};
 
 use std::fmt;
 use mir;
@@ -33,11 +46,12 @@ use ty::codec::TyDecoder;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::num::NonZeroU32;
 
-#[derive(Clone, Debug, PartialEq, RustcEncodable, RustcDecodable)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, RustcEncodable, RustcDecodable)]
 pub enum Lock {
     NoLock,
     WriteLock(DynamicLifetime),
-    /// This should never be empty -- that would be a read lock held and nobody there to release it...
+    /// This should never be empty -- that would be a read lock held and nobody
+    /// there to release it...
     ReadLock(Vec<DynamicLifetime>),
 }
 
@@ -71,9 +85,14 @@ pub struct GlobalId<'tcx> {
 pub trait PointerArithmetic: layout::HasDataLayout {
     // These are not supposed to be overridden.
 
+    #[inline(always)]
+    fn pointer_size(self) -> Size {
+        self.data_layout().pointer_size
+    }
+
     //// Trunace the given value to the pointer size; also return whether there was an overflow
     fn truncate_to_ptr(self, val: u128) -> (u64, bool) {
-        let max_ptr_plus_1 = 1u128 << self.data_layout().pointer_size.bits();
+        let max_ptr_plus_1 = 1u128 << self.pointer_size().bits();
         ((val % max_ptr_plus_1) as u64, val >= max_ptr_plus_1)
     }
 
@@ -114,53 +133,86 @@ pub trait PointerArithmetic: layout::HasDataLayout {
 impl<T: layout::HasDataLayout> PointerArithmetic for T {}
 
 
+/// Pointer is generic over the type that represents a reference to Allocations,
+/// thus making it possible for the most convenient representation to be used in
+/// each context.
+///
+/// Defaults to the index based and loosely coupled AllocId.
+///
+/// Pointer is also generic over the `Tag` associated with each pointer,
+/// which is used to do provenance tracking during execution.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, RustcEncodable, RustcDecodable, Hash)]
-pub struct Pointer {
-    pub alloc_id: AllocId,
+pub struct Pointer<Tag=(),Id=AllocId> {
+    pub alloc_id: Id,
     pub offset: Size,
+    pub tag: Tag,
 }
 
 /// Produces a `Pointer` which points to the beginning of the Allocation
 impl From<AllocId> for Pointer {
+    #[inline(always)]
     fn from(alloc_id: AllocId) -> Self {
         Pointer::new(alloc_id, Size::ZERO)
     }
 }
 
-impl<'tcx> Pointer {
+impl<'tcx> Pointer<()> {
+    #[inline(always)]
     pub fn new(alloc_id: AllocId, offset: Size) -> Self {
-        Pointer { alloc_id, offset }
+        Pointer { alloc_id, offset, tag: () }
     }
 
-    pub(crate) fn wrapping_signed_offset<C: HasDataLayout>(self, i: i64, cx: C) -> Self {
-        Pointer::new(
+    #[inline(always)]
+    pub fn with_default_tag<Tag>(self) -> Pointer<Tag>
+        where Tag: Default
+    {
+        Pointer::new_with_tag(self.alloc_id, self.offset, Default::default())
+    }
+}
+
+impl<'tcx, Tag> Pointer<Tag> {
+    #[inline(always)]
+    pub fn new_with_tag(alloc_id: AllocId, offset: Size, tag: Tag) -> Self {
+        Pointer { alloc_id, offset, tag }
+    }
+
+    pub fn wrapping_signed_offset<C: HasDataLayout>(self, i: i64, cx: C) -> Self {
+        Pointer::new_with_tag(
             self.alloc_id,
             Size::from_bytes(cx.data_layout().wrapping_signed_offset(self.offset.bytes(), i)),
+            self.tag,
         )
     }
 
     pub fn overflowing_signed_offset<C: HasDataLayout>(self, i: i128, cx: C) -> (Self, bool) {
         let (res, over) = cx.data_layout().overflowing_signed_offset(self.offset.bytes(), i);
-        (Pointer::new(self.alloc_id, Size::from_bytes(res)), over)
+        (Pointer::new_with_tag(self.alloc_id, Size::from_bytes(res), self.tag), over)
     }
 
-    pub(crate) fn signed_offset<C: HasDataLayout>(self, i: i64, cx: C) -> EvalResult<'tcx, Self> {
-        Ok(Pointer::new(
+    pub fn signed_offset<C: HasDataLayout>(self, i: i64, cx: C) -> EvalResult<'tcx, Self> {
+        Ok(Pointer::new_with_tag(
             self.alloc_id,
             Size::from_bytes(cx.data_layout().signed_offset(self.offset.bytes(), i)?),
+            self.tag,
         ))
     }
 
     pub fn overflowing_offset<C: HasDataLayout>(self, i: Size, cx: C) -> (Self, bool) {
         let (res, over) = cx.data_layout().overflowing_offset(self.offset.bytes(), i.bytes());
-        (Pointer::new(self.alloc_id, Size::from_bytes(res)), over)
+        (Pointer::new_with_tag(self.alloc_id, Size::from_bytes(res), self.tag), over)
     }
 
     pub fn offset<C: HasDataLayout>(self, i: Size, cx: C) -> EvalResult<'tcx, Self> {
-        Ok(Pointer::new(
+        Ok(Pointer::new_with_tag(
             self.alloc_id,
             Size::from_bytes(cx.data_layout().offset(self.offset.bytes(), i.bytes())?),
+            self.tag
         ))
+    }
+
+    #[inline]
+    pub fn erase_tag(self) -> Pointer {
+        Pointer { alloc_id: self.alloc_id, offset: self.offset, tag: () }
     }
 }
 
@@ -229,7 +281,7 @@ pub struct AllocDecodingState {
 
 impl AllocDecodingState {
 
-    pub fn new_decoding_session(&self) -> AllocDecodingSession {
+    pub fn new_decoding_session(&self) -> AllocDecodingSession<'_> {
         static DECODER_SESSION_ID: AtomicU32 = AtomicU32::new(0);
         let counter = DECODER_SESSION_ID.fetch_add(1, Ordering::SeqCst);
 
@@ -370,7 +422,7 @@ impl<'s> AllocDecodingSession<'s> {
 }
 
 impl fmt::Display for AllocId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -379,7 +431,8 @@ impl fmt::Display for AllocId {
 pub enum AllocType<'tcx, M> {
     /// The alloc id is used as a function pointer
     Function(Instance<'tcx>),
-    /// The alloc id points to a static variable
+    /// The alloc id points to a "lazy" static variable that did not get computed (yet).
+    /// This is also used to break the cycle in recursive statics.
     Static(DefId),
     /// The alloc id points to memory
     Memory(M)
@@ -471,24 +524,27 @@ impl<'tcx, M: fmt::Debug + Eq + Hash + Clone> AllocMap<'tcx, M> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, RustcEncodable, RustcDecodable)]
-pub struct Allocation {
+pub struct Allocation<Tag=()> {
     /// The actual bytes of the allocation.
     /// Note that the bytes of a pointer represent the offset of the pointer
     pub bytes: Vec<u8>,
-    /// Maps from byte addresses to allocations.
-    /// Only the first byte of a pointer is inserted into the map.
-    pub relocations: Relocations,
+    /// Maps from byte addresses to extra data for each pointer.
+    /// Only the first byte of a pointer is inserted into the map; i.e.,
+    /// every entry in this map applies to `pointer_size` consecutive bytes starting
+    /// at the given offset.
+    pub relocations: Relocations<Tag>,
     /// Denotes undefined memory. Reading from undefined memory is forbidden in miri
     pub undef_mask: UndefMask,
     /// The alignment of the allocation to detect unaligned reads.
     pub align: Align,
-    /// Whether the allocation (of a static) should be put into mutable memory when codegenning
-    ///
-    /// Only happens for `static mut` or `static` with interior mutability
-    pub runtime_mutability: Mutability,
+    /// Whether the allocation is mutable.
+    /// Also used by codegen to determine if a static should be put into mutable memory,
+    /// which happens for `static mut` and `static` with interior mutability.
+    pub mutability: Mutability,
 }
 
-impl Allocation {
+impl<Tag> Allocation<Tag> {
+    /// Creates a read-only allocation initialized by the given bytes
     pub fn from_bytes(slice: &[u8], align: Align) -> Self {
         let mut undef_mask = UndefMask::new(Size::ZERO);
         undef_mask.grow(Size::from_bytes(slice.len() as u64), true);
@@ -497,7 +553,7 @@ impl Allocation {
             relocations: Relocations::new(),
             undef_mask,
             align,
-            runtime_mutability: Mutability::Immutable,
+            mutability: Mutability::Immutable,
         }
     }
 
@@ -512,7 +568,7 @@ impl Allocation {
             relocations: Relocations::new(),
             undef_mask: UndefMask::new(size),
             align,
-            runtime_mutability: Mutability::Immutable,
+            mutability: Mutability::Mutable,
         }
     }
 }
@@ -520,29 +576,29 @@ impl Allocation {
 impl<'tcx> ::serialize::UseSpecializedDecodable for &'tcx Allocation {}
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, RustcEncodable, RustcDecodable)]
-pub struct Relocations(SortedMap<Size, AllocId>);
+pub struct Relocations<Tag=(), Id=AllocId>(SortedMap<Size, (Tag, Id)>);
 
-impl Relocations {
-    pub fn new() -> Relocations {
+impl<Tag, Id> Relocations<Tag, Id> {
+    pub fn new() -> Self {
         Relocations(SortedMap::new())
     }
 
     // The caller must guarantee that the given relocations are already sorted
     // by address and contain no duplicates.
-    pub fn from_presorted(r: Vec<(Size, AllocId)>) -> Relocations {
+    pub fn from_presorted(r: Vec<(Size, (Tag, Id))>) -> Self {
         Relocations(SortedMap::from_presorted_elements(r))
     }
 }
 
-impl Deref for Relocations {
-    type Target = SortedMap<Size, AllocId>;
+impl<Tag> Deref for Relocations<Tag> {
+    type Target = SortedMap<Size, (Tag, AllocId)>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for Relocations {
+impl<Tag> DerefMut for Relocations<Tag> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
@@ -564,23 +620,31 @@ pub fn write_target_uint(
     }
 }
 
-pub fn write_target_int(
-    endianness: layout::Endian,
-    mut target: &mut [u8],
-    data: i128,
-) -> Result<(), io::Error> {
-    let len = target.len();
-    match endianness {
-        layout::Endian::Little => target.write_int128::<LittleEndian>(data, len),
-        layout::Endian::Big => target.write_int128::<BigEndian>(data, len),
-    }
-}
-
 pub fn read_target_uint(endianness: layout::Endian, mut source: &[u8]) -> Result<u128, io::Error> {
     match endianness {
         layout::Endian::Little => source.read_uint128::<LittleEndian>(source.len()),
         layout::Endian::Big => source.read_uint128::<BigEndian>(source.len()),
     }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Methods to faciliate working with signed integers stored in a u128
+////////////////////////////////////////////////////////////////////////////////
+
+pub fn sign_extend(value: u128, size: Size) -> u128 {
+    let size = size.bits();
+    // sign extend
+    let shift = 128 - size;
+    // shift the unsigned value to the left
+    // and back to the right as signed (essentially fills with FF on the left)
+    (((value << shift) as i128) >> shift) as u128
+}
+
+pub fn truncate(value: u128, size: Size) -> u128 {
+    let size = size.bits();
+    let shift = 128 - size;
+    // truncate (shift left to drop out leftover values, shift right to fill with zeroes)
+    (value << shift) >> shift
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -609,16 +673,23 @@ impl UndefMask {
     }
 
     /// Check whether the range `start..end` (end-exclusive) is entirely defined.
-    pub fn is_range_defined(&self, start: Size, end: Size) -> bool {
+    ///
+    /// Returns `Ok(())` if it's defined. Otherwise returns the index of the byte
+    /// at which the first undefined access begins.
+    #[inline]
+    pub fn is_range_defined(&self, start: Size, end: Size) -> Result<(), Size> {
         if end > self.len {
-            return false;
+            return Err(self.len);
         }
-        for i in start.bytes()..end.bytes() {
-            if !self.get(Size::from_bytes(i)) {
-                return false;
-            }
+
+        let idx = (start.bytes()..end.bytes())
+            .map(|i| Size::from_bytes(i))
+            .find(|&i| !self.get(i));
+
+        match idx {
+            Some(idx) => Err(idx),
+            None => Ok(())
         }
-        true
     }
 
     pub fn set_range(&mut self, start: Size, end: Size, new_state: bool) {
@@ -635,11 +706,13 @@ impl UndefMask {
         }
     }
 
+    #[inline]
     pub fn get(&self, i: Size) -> bool {
         let (block, bit) = bit_index(i);
         (self.blocks[block] & 1 << bit) != 0
     }
 
+    #[inline]
     pub fn set(&mut self, i: Size, new_state: bool) {
         let (block, bit) = bit_index(i);
         if new_state {
@@ -664,6 +737,7 @@ impl UndefMask {
     }
 }
 
+#[inline]
 fn bit_index(bits: Size) -> (usize, usize) {
     let bits = bits.bytes();
     let a = bits / BLOCK_SIZE;

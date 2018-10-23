@@ -15,22 +15,22 @@ use ext::tt::macro_parser::{NamedMatch, MatchedSeq, MatchedNonterminal};
 use ext::tt::quoted;
 use fold::noop_fold_tt;
 use parse::token::{self, Token, NtTT};
-use syntax_pos::{Span, DUMMY_SP};
-use tokenstream::{TokenStream, TokenTree, Delimited};
-use util::small_vector::SmallVector;
+use smallvec::SmallVec;
+use syntax_pos::DUMMY_SP;
+use tokenstream::{TokenStream, TokenTree, Delimited, DelimSpan};
 
-use std::rc::Rc;
+use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sync::Lrc;
 use std::mem;
 use std::ops::Add;
-use std::collections::HashMap;
+use std::rc::Rc;
 
 // An iterator over the token trees in a delimited token tree (`{ ... }`) or a sequence (`$(...)`).
 enum Frame {
     Delimited {
         forest: Lrc<quoted::Delimited>,
         idx: usize,
-        span: Span,
+        span: DelimSpan,
     },
     Sequence {
         forest: Lrc<quoted::SequenceRepetition>,
@@ -42,7 +42,7 @@ enum Frame {
 impl Frame {
     fn new(tts: Vec<quoted::TokenTree>) -> Frame {
         let forest = Lrc::new(quoted::Delimited { delim: token::NoDelim, tts: tts });
-        Frame::Delimited { forest: forest, idx: 0, span: DUMMY_SP }
+        Frame::Delimited { forest: forest, idx: 0, span: DelimSpan::dummy() }
     }
 }
 
@@ -67,11 +67,11 @@ impl Iterator for Frame {
 /// `src` contains no `TokenTree::{Sequence, MetaVar, MetaVarDecl}`s, `interp` can
 /// (and should) be None.
 pub fn transcribe(cx: &ExtCtxt,
-                  interp: Option<HashMap<Ident, Rc<NamedMatch>>>,
+                  interp: Option<FxHashMap<Ident, Rc<NamedMatch>>>,
                   src: Vec<quoted::TokenTree>)
                   -> TokenStream {
-    let mut stack = SmallVector::one(Frame::new(src));
-    let interpolations = interp.unwrap_or_else(HashMap::new); /* just a convenience */
+    let mut stack: SmallVec<[Frame; 1]> = smallvec![Frame::new(src)];
+    let interpolations = interp.unwrap_or_else(FxHashMap::default); /* just a convenience */
     let mut repeats = Vec::new();
     let mut result: Vec<TokenStream> = Vec::new();
     let mut result_stack = Vec::new();
@@ -123,20 +123,20 @@ pub fn transcribe(cx: &ExtCtxt,
                                          &interpolations,
                                          &repeats) {
                     LockstepIterSize::Unconstrained => {
-                        cx.span_fatal(sp, /* blame macro writer */
+                        cx.span_fatal(sp.entire(), /* blame macro writer */
                             "attempted to repeat an expression \
                              containing no syntax \
                              variables matched as repeating at this depth");
                     }
                     LockstepIterSize::Contradiction(ref msg) => {
                         // FIXME #2887 blame macro invoker instead
-                        cx.span_fatal(sp, &msg[..]);
+                        cx.span_fatal(sp.entire(), &msg[..]);
                     }
                     LockstepIterSize::Constraint(len, _) => {
                         if len == 0 {
                             if seq.op == quoted::KleeneOp::OneOrMore {
                                 // FIXME #2887 blame invoker
-                                cx.span_fatal(sp, "this must repeat at least once");
+                                cx.span_fatal(sp.entire(), "this must repeat at least once");
                             }
                         } else {
                             repeats.push((0, len));
@@ -187,7 +187,7 @@ pub fn transcribe(cx: &ExtCtxt,
 }
 
 fn lookup_cur_matched(ident: Ident,
-                      interpolations: &HashMap<Ident, Rc<NamedMatch>>,
+                      interpolations: &FxHashMap<Ident, Rc<NamedMatch>>,
                       repeats: &[(usize, usize)])
                       -> Option<Rc<NamedMatch>> {
     interpolations.get(&ident).map(|matched| {
@@ -234,7 +234,7 @@ impl Add for LockstepIterSize {
 }
 
 fn lockstep_iter_size(tree: &quoted::TokenTree,
-                      interpolations: &HashMap<Ident, Rc<NamedMatch>>,
+                      interpolations: &FxHashMap<Ident, Rc<NamedMatch>>,
                       repeats: &[(usize, usize)])
                       -> LockstepIterSize {
     use self::quoted::TokenTree;

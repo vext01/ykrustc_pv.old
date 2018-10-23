@@ -48,7 +48,7 @@ always work, and sometimes it's hard to know what to search for, so consider thi
 extra credit. We won't mind if you accidentally file a duplicate report.
 
 Similarly, to help others who encountered the bug find your issue,
-consider filing an issue with with a descriptive title, which contains information that might be unique to it.
+consider filing an issue with a descriptive title, which contains information that might be unique to it.
 This can be the language or compiler feature used, the conditions that trigger the bug,
 or part of the error message if there is any.
 An example could be: **"impossible case reached" on lifetime inference for impl Trait in return position**.
@@ -142,7 +142,7 @@ file. If you still have a `config.mk` file in your directory - from
 ### Building
 [building]: #building
 
-A default configuration shall use around 3.5 GB of disk space, whereas building a debug configuration may require more than 30 GB.
+A default configuration requires around 3.5 GB of disk space, whereas building a debug configuration may require more than 30 GB.
 
 Dependencies
 - [build dependencies](README.md#building-from-source)
@@ -368,8 +368,7 @@ will run all the tests on every platform we support. If it all works out,
 [merge-queue]: https://buildbot2.rust-lang.org/homu/queue/rust
 
 Speaking of tests, Rust has a comprehensive test suite. More information about
-it can be found
-[here](https://github.com/rust-lang/rust/blob/master/src/test/COMPILER_TESTS.md).
+it can be found [here][rctd].
 
 ### External Dependencies
 [external-dependencies]: #external-dependencies
@@ -405,7 +404,8 @@ before the PR is merged.
 [breaking-tools-built-with-the-compiler]: #breaking-tools-built-with-the-compiler
 
 Rust's build system builds a number of tools that make use of the
-internals of the compiler. This includes clippy,
+internals of the compiler. This includes 
+[Clippy](https://github.com/rust-lang-nursery/rust-clippy),
 [RLS](https://github.com/rust-lang-nursery/rls) and
 [rustfmt](https://github.com/rust-lang-nursery/rustfmt). If these tools
 break because of your changes, you may run into a sort of "chicken and egg"
@@ -566,7 +566,7 @@ labels to triage issues:
   to fix the issue.
 
 * The dark blue **final-comment-period** label marks bugs that are using the
-  RFC signoff functionality of [rfcbot][rfcbot] and are currenty in the final
+  RFC signoff functionality of [rfcbot][rfcbot] and are currently in the final
   comment period.
 
 * Red, **I**-prefixed labels indicate the **importance** of the issue. The
@@ -646,12 +646,12 @@ are:
 * Don't be afraid to ask! The Rust community is friendly and helpful.
 
 [rustc guide]: https://rust-lang-nursery.github.io/rustc-guide/about-this-guide.html
-[gdfrustc]: http://manishearth.github.io/rust-internals-docs/rustc/
+[gdfrustc]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc/
 [gsearchdocs]: https://www.google.com/search?q=site:doc.rust-lang.org+your+query+here
 [rif]: http://internals.rust-lang.org
 [rr]: https://doc.rust-lang.org/book/README.html
 [rustforge]: https://forge.rust-lang.org/
 [tlgba]: http://tomlee.co/2014/04/a-more-detailed-tour-of-the-rust-compiler/
 [ro]: http://www.rustaceans.org/
-[rctd]: ./src/test/COMPILER_TESTS.md
+[rctd]: https://rust-lang-nursery.github.io/rustc-guide/tests/intro.html
 [cheatsheet]: https://buildbot2.rust-lang.org/homu/

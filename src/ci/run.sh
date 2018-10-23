@@ -24,13 +24,16 @@ if [ "$NO_CHANGE_USER" = "" ]; then
   fi
 fi
 
+# only enable core dump on Linux
+if [ -f /proc/sys/kernel/core_pattern ]; then
+  ulimit -c unlimited
+fi
+
 ci_dir=`cd $(dirname $0) && pwd`
 source "$ci_dir/shared.sh"
 
-if [ "$TRAVIS" == "true" ] && [ "$TRAVIS_BRANCH" != "auto" ]; then
-    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-quiet-tests"
-else
-    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set build.print-step-timings"
+if [ "$TRAVIS" != "true" ] || [ "$TRAVIS_BRANCH" == "auto" ]; then
+    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set build.print-step-timings --enable-verbose-tests"
 fi
 
 RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-sccache"
@@ -52,6 +55,7 @@ export RUST_RELEASE_CHANNEL=nightly
 if [ "$DEPLOY$DEPLOY_ALT" != "" ]; then
   RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --release-channel=$RUST_RELEASE_CHANNEL"
   RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-llvm-static-stdcpp"
+  RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --set rust.remap-debuginfo"
 
   if [ "$NO_LLVM_ASSERTIONS" = "1" ]; then
     RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --disable-llvm-assertions"
@@ -70,6 +74,10 @@ else
   if [ "$NO_LLVM_ASSERTIONS" = "" ]; then
     RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-llvm-assertions"
   fi
+fi
+
+if [ "$RUST_RELEASE_CHANNEL" = "nightly" ] || [ "$DIST_REQUIRE_ALL_TOOLS" = "" ]; then
+    RUST_CONFIGURE_ARGS="$RUST_CONFIGURE_ARGS --enable-missing-tools"
 fi
 
 # We've had problems in the past of shell scripts leaking fds into the sccache

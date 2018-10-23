@@ -25,16 +25,14 @@ use monomorphize::Instance;
 use type_of::LayoutLlvmExt;
 use rustc::hir;
 use rustc::hir::def::Def;
-use rustc::hir::def_id::DefId;
+use rustc::hir::def_id::{DefId, LOCAL_CRATE};
 use rustc::mir::mono::{Linkage, Visibility};
 use rustc::ty::TypeFoldable;
 use rustc::ty::layout::LayoutOf;
-use syntax::attr;
 use std::fmt;
 
 pub use rustc::mir::mono::MonoItem;
 
-pub use rustc_mir::monomorphize::item::*;
 pub use rustc_mir::monomorphize::item::MonoItemExt as BaseMonoItemExt;
 
 pub trait MonoItemExt<'a, 'tcx>: fmt::Debug + BaseMonoItemExt<'a, 'tcx> {
@@ -56,13 +54,11 @@ pub trait MonoItemExt<'a, 'tcx>: fmt::Debug + BaseMonoItemExt<'a, 'tcx> {
                         bug!("Expected Def::Static for {:?}, found nothing", def_id)
                     }
                 };
-                let attrs = tcx.get_attrs(def_id);
-
-                consts::codegen_static(&cx, def_id, is_mutable, &attrs);
+                consts::codegen_static(&cx, def_id, is_mutable);
             }
             MonoItem::GlobalAsm(node_id) => {
                 let item = cx.tcx.hir.expect_item(node_id);
-                if let hir::ItemGlobalAsm(ref ga) = item.node {
+                if let hir::ItemKind::GlobalAsm(ref ga) = item.node {
                     asm::codegen_global_asm(cx, ga);
                 } else {
                     span_bug!(item.span, "Mismatch between hir::Item type and MonoItem type")
@@ -112,8 +108,8 @@ pub trait MonoItemExt<'a, 'tcx>: fmt::Debug + BaseMonoItemExt<'a, 'tcx> {
         match *self.as_mono_item() {
             MonoItem::Fn(instance) => {
                 format!("Fn({:?}, {})",
-                         instance.def,
-                         instance.substs.as_ptr() as usize)
+                        instance.def,
+                        instance.substs.as_ptr() as usize)
             }
             MonoItem::Static(id) => {
                 format!("Static({:?})", id)
@@ -147,7 +143,6 @@ fn predefine_static<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
     }
 
     cx.instances.borrow_mut().insert(instance, g);
-    cx.statics.borrow_mut().insert(g, def_id);
 }
 
 fn predefine_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
@@ -159,10 +154,10 @@ fn predefine_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
             !instance.substs.has_param_types());
 
     let mono_ty = instance.ty(cx.tcx);
-    let attrs = instance.def.attrs(cx.tcx);
+    let attrs = cx.tcx.codegen_fn_attrs(instance.def_id());
     let lldecl = declare::declare_fn(cx, symbol_name, mono_ty);
     unsafe { llvm::LLVMRustSetLinkage(lldecl, base::linkage_to_llvm(linkage)) };
-    base::set_link_section(cx, lldecl, &attrs);
+    base::set_link_section(lldecl, &attrs);
     if linkage == Linkage::LinkOnceODR ||
         linkage == Linkage::WeakODR {
         llvm::SetUniqueComdat(cx.llmod, lldecl);
@@ -173,7 +168,7 @@ fn predefine_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
     // visibility as we're going to link this object all over the place but
     // don't want the symbols to get exported.
     if linkage != Linkage::Internal && linkage != Linkage::Private &&
-       attr::contains_name(cx.tcx.hir.krate_attrs(), "compiler_builtins") {
+       cx.tcx.is_compiler_builtins(LOCAL_CRATE) {
         unsafe {
             llvm::LLVMRustSetVisibility(lldecl, llvm::Visibility::Hidden);
         }
@@ -185,9 +180,9 @@ fn predefine_fn<'a, 'tcx>(cx: &CodegenCx<'a, 'tcx>,
 
     debug!("predefine_fn: mono_ty = {:?} instance = {:?}", mono_ty, instance);
     if instance.def.is_inline(cx.tcx) {
-        attributes::inline(lldecl, attributes::InlineAttr::Hint);
+        attributes::inline(cx, lldecl, attributes::InlineAttr::Hint);
     }
-    attributes::from_fn_attrs(cx, lldecl, instance.def.def_id());
+    attributes::from_fn_attrs(cx, lldecl, Some(instance.def.def_id()));
 
     cx.instances.borrow_mut().insert(instance, lldecl);
 }

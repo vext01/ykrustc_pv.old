@@ -8,11 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(unused_variables)]
 // compile-flags:-C panic=abort
 // aux-build:exit-success-if-unwind.rs
 // no-prefer-dynamic
 // ignore-cloudabi no processes
 // ignore-emscripten no processes
+// ignore-macos
 
 extern crate exit_success_if_unwind;
 

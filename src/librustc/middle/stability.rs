@@ -18,12 +18,12 @@ use hir::def::Def;
 use hir::def_id::{CrateNum, CRATE_DEF_INDEX, DefId, LOCAL_CRATE};
 use ty::{self, TyCtxt};
 use middle::privacy::AccessLevels;
-use session::DiagnosticMessageId;
+use session::{DiagnosticMessageId, Session};
 use syntax::symbol::Symbol;
-use syntax_pos::{Span, MultiSpan, DUMMY_SP};
+use syntax_pos::{Span, MultiSpan};
 use syntax::ast;
 use syntax::ast::{NodeId, Attribute};
-use syntax::feature_gate::{GateIssue, emit_feature_err, find_lang_feature_accepted_version};
+use syntax::feature_gate::{GateIssue, emit_feature_err};
 use syntax::attr::{self, Stability, Deprecation};
 use util::nodemap::{FxHashSet, FxHashMap};
 
@@ -164,8 +164,10 @@ impl<'a, 'tcx: 'a> Annotator<'a, 'tcx> {
                 if let (&Some(attr::RustcDeprecation {since: dep_since, ..}),
                         &attr::Stable {since: stab_since}) = (&stab.rustc_depr, &stab.level) {
                     // Explicit version of iter::order::lt to handle parse errors properly
-                    for (dep_v, stab_v) in
-                            dep_since.as_str().split(".").zip(stab_since.as_str().split(".")) {
+                    for (dep_v, stab_v) in dep_since.as_str()
+                                                    .split('.')
+                                                    .zip(stab_since.as_str().split('.'))
+                    {
                         if let (Ok(dep_v), Ok(stab_v)) = (dep_v.parse::<u64>(), stab_v.parse()) {
                             match dep_v.cmp(&stab_v) {
                                 Ordering::Less => {
@@ -263,14 +265,14 @@ impl<'a, 'tcx> Visitor<'tcx> for Annotator<'a, 'tcx> {
             // they don't have their own stability. They still can be annotated as unstable
             // and propagate this unstability to children, but this annotation is completely
             // optional. They inherit stability from their parents when unannotated.
-            hir::ItemImpl(.., None, _, _) | hir::ItemForeignMod(..) => {
+            hir::ItemKind::Impl(.., None, _, _) | hir::ItemKind::ForeignMod(..) => {
                 self.in_trait_impl = false;
                 kind = AnnotationKind::Container;
             }
-            hir::ItemImpl(.., Some(_), _, _) => {
+            hir::ItemKind::Impl(.., Some(_), _, _) => {
                 self.in_trait_impl = true;
             }
-            hir::ItemStruct(ref sd, _) => {
+            hir::ItemKind::Struct(ref sd, _) => {
                 if !sd.is_struct() {
                     self.annotate(sd.id(), &i.attrs, i.span, AnnotationKind::Required, |_| {})
                 }
@@ -353,7 +355,7 @@ impl<'a, 'tcx> Visitor<'tcx> for MissingStabilityAnnotations<'a, 'tcx> {
             // they don't have their own stability. They still can be annotated as unstable
             // and propagate this unstability to children, but this annotation is completely
             // optional. They inherit stability from their parents when unannotated.
-            hir::ItemImpl(.., None, _, _) | hir::ItemForeignMod(..) => {}
+            hir::ItemKind::Impl(.., None, _, _) | hir::ItemKind::ForeignMod(..) => {}
 
             _ => self.check_missing_stability(i.id, i.span)
         }
@@ -440,7 +442,8 @@ impl<'a, 'tcx> Index<'tcx> {
                     },
                     feature: Symbol::intern("rustc_private"),
                     rustc_depr: None,
-                    rustc_const_unstable: None,
+                    const_stability: None,
+                    promotable: false,
                 });
                 annotator.parent_stab = Some(stability);
             }
@@ -522,15 +525,12 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             Some(Def::Method(_)) |
             Some(Def::AssociatedTy(_)) |
             Some(Def::AssociatedConst(_)) => {
-                match self.associated_item(def_id).container {
-                    ty::TraitContainer(trait_def_id) => {
-                        // Trait methods do not declare visibility (even
-                        // for visibility info in cstore). Use containing
-                        // trait instead, so methods of pub traits are
-                        // themselves considered pub.
-                        def_id = trait_def_id;
-                    }
-                    _ => {}
+                if let ty::TraitContainer(trait_def_id) = self.associated_item(def_id).container {
+                    // Trait methods do not declare visibility (even
+                    // for visibility info in cstore). Use containing
+                    // trait instead, so methods of pub traits are
+                    // themselves considered pub.
+                    def_id = trait_def_id;
                 }
             }
             _ => {}
@@ -560,8 +560,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     /// `id`.
     pub fn eval_stability(self, def_id: DefId, id: Option<NodeId>, span: Span) -> EvalResult {
         if span.allows_unstable() {
-            debug!("stability: \
-                    skipping span={:?} since it is internal", span);
+            debug!("stability: skipping span={:?} since it is internal", span);
             return EvalResult::Allow;
         }
 
@@ -614,10 +613,12 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         debug!("stability: \
                 inspecting def_id={:?} span={:?} of stability={:?}", def_id, span, stability);
 
-        if let Some(&Stability{rustc_depr: Some(attr::RustcDeprecation { reason, .. }), ..})
+        if let Some(&Stability{rustc_depr: Some(attr::RustcDeprecation { reason, since }), ..})
                 = stability {
             if let Some(id) = id {
-                lint_deprecated(def_id, id, Some(reason));
+                if deprecation_in_effect(&since.as_str()) {
+                    lint_deprecated(def_id, id, Some(reason));
+                }
             }
         }
 
@@ -683,9 +684,9 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                 };
 
                 let msp: MultiSpan = span.into();
-                let cm = &self.sess.parse_sess.codemap();
+                let cm = &self.sess.parse_sess.source_map();
                 let span_key = msp.primary_span().and_then(|sp: Span|
-                    if sp != DUMMY_SP {
+                    if !sp.is_dummy() {
                         let file = cm.lookup_char_pos(sp.lo()).file;
                         if file.name.is_macros() {
                             None
@@ -721,9 +722,9 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
 
     fn visit_item(&mut self, item: &'tcx hir::Item) {
         match item.node {
-            hir::ItemExternCrate(_) => {
+            hir::ItemKind::ExternCrate(_) => {
                 // compiler-generated `extern crate` items have a dummy span.
-                if item.span == DUMMY_SP { return }
+                if item.span.is_dummy() { return }
 
                 let def_id = self.tcx.hir.local_def_id(item.id);
                 let cnum = match self.tcx.extern_mod_stmt_cnum(def_id) {
@@ -737,12 +738,13 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
             // For implementations of traits, check the stability of each item
             // individually as it's possible to have a stable trait with unstable
             // items.
-            hir::ItemImpl(.., Some(ref t), _, ref impl_item_refs) => {
+            hir::ItemKind::Impl(.., Some(ref t), _, ref impl_item_refs) => {
                 if let Def::Trait(trait_did) = t.path.def {
                     for impl_item_ref in impl_item_refs {
                         let impl_item = self.tcx.hir.impl_item(impl_item_ref.id);
                         let trait_item_def_id = self.tcx.associated_items(trait_did)
-                            .find(|item| item.name == impl_item.name).map(|item| item.def_id);
+                            .find(|item| item.ident.name == impl_item.ident.name)
+                            .map(|item| item.def_id);
                         if let Some(def_id) = trait_item_def_id {
                             // Pass `None` to skip deprecation warnings.
                             self.tcx.check_stability(def_id, None, impl_item.span);
@@ -753,7 +755,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
 
             // There's no good place to insert stability check for non-Copy unions,
             // so semi-randomly perform it here in stability.rs
-            hir::ItemUnion(..) if !self.tcx.features().untagged_unions => {
+            hir::ItemKind::Union(..) if !self.tcx.features().untagged_unions => {
                 let def_id = self.tcx.hir.local_def_id(item.id);
                 let adt_def = self.tcx.adt_def(def_id);
                 let ty = self.tcx.type_of(def_id);
@@ -766,8 +768,8 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
                     let param_env = self.tcx.param_env(def_id);
                     if !param_env.can_type_implement_copy(self.tcx, ty).is_ok() {
                         emit_feature_err(&self.tcx.sess.parse_sess,
-                                        "untagged_unions", item.span, GateIssue::Language,
-                                        "unions with non-`Copy` fields are unstable");
+                                         "untagged_unions", item.span, GateIssue::Language,
+                                         "unions with non-`Copy` fields are unstable");
                     }
                 }
             }
@@ -777,9 +779,10 @@ impl<'a, 'tcx> Visitor<'tcx> for Checker<'a, 'tcx> {
         intravisit::walk_item(self, item);
     }
 
-    fn visit_path(&mut self, path: &'tcx hir::Path, id: ast::NodeId) {
+    fn visit_path(&mut self, path: &'tcx hir::Path, id: hir::HirId) {
+        let id = self.tcx.hir.hir_to_node_id(id);
         match path.def {
-            Def::Local(..) | Def::Upvar(..) |
+            Def::Local(..) | Def::Upvar(..) | Def::SelfCtor(..) |
             Def::PrimTy(..) | Def::SelfTy(..) | Def::Err => {}
             _ => self.tcx.check_stability(path.def.def_id(), Some(id), path.span)
         }
@@ -810,37 +813,90 @@ pub fn check_unused_or_stable_features<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
         krate.visit_all_item_likes(&mut missing.as_deep_visitor());
     }
 
-    let ref declared_lib_features = tcx.features().declared_lib_features;
-    let mut remaining_lib_features: FxHashMap<Symbol, Span>
-        = declared_lib_features.clone().into_iter().collect();
-    remaining_lib_features.remove(&Symbol::intern("proc_macro"));
-
-    for &(ref stable_lang_feature, span) in &tcx.features().declared_stable_lang_features {
-        let version = find_lang_feature_accepted_version(&stable_lang_feature.as_str())
-            .expect("unexpectedly couldn't find version feature was stabilized");
-        tcx.lint_node(lint::builtin::STABLE_FEATURES,
-                      ast::CRATE_NODE_ID,
-                      span,
-                      &format_stable_since_msg(version));
+    let declared_lang_features = &tcx.features().declared_lang_features;
+    let mut lang_features = FxHashSet();
+    for &(feature, span, since) in declared_lang_features {
+        if let Some(since) = since {
+            // Warn if the user has enabled an already-stable lang feature.
+            unnecessary_stable_feature_lint(tcx, span, feature, since);
+        }
+        if lang_features.contains(&feature) {
+            // Warn if the user enables a lang feature multiple times.
+            duplicate_feature_err(tcx.sess, span, feature);
+        }
+        lang_features.insert(feature);
     }
 
-    // FIXME(#44232) the `used_features` table no longer exists, so we don't
-    //               lint about unknown or unused features. We should reenable
-    //               this one day!
-    //
-    // let index = tcx.stability();
-    // for (used_lib_feature, level) in &index.used_features {
-    //     remaining_lib_features.remove(used_lib_feature);
-    // }
-    //
-    // for &span in remaining_lib_features.values() {
-    //     tcx.lint_node(lint::builtin::UNUSED_FEATURES,
-    //                   ast::CRATE_NODE_ID,
-    //                   span,
-    //                   "unused or unknown feature");
-    // }
+    let declared_lib_features = &tcx.features().declared_lib_features;
+    let mut remaining_lib_features = FxHashMap();
+    for (feature, span) in declared_lib_features {
+        if remaining_lib_features.contains_key(&feature) {
+            // Warn if the user enables a lib feature multiple times.
+            duplicate_feature_err(tcx.sess, *span, *feature);
+        }
+        remaining_lib_features.insert(feature, span.clone());
+    }
+    // `stdbuild` has special handling for `libc`, so we need to
+    // recognise the feature when building std.
+    // Likewise, libtest is handled specially, so `test` isn't
+    // available as we'd like it to be.
+    // FIXME: only remove `libc` when `stdbuild` is active.
+    // FIXME: remove special casing for `test`.
+    remaining_lib_features.remove(&Symbol::intern("libc"));
+    remaining_lib_features.remove(&Symbol::intern("test"));
+
+    let check_features =
+        |remaining_lib_features: &mut FxHashMap<_, _>, defined_features: &Vec<_>| {
+            for &(feature, since) in defined_features {
+                if let Some(since) = since {
+                    if let Some(span) = remaining_lib_features.get(&feature) {
+                        // Warn if the user has enabled an already-stable lib feature.
+                        unnecessary_stable_feature_lint(tcx, *span, feature, since);
+                    }
+                }
+                remaining_lib_features.remove(&feature);
+                if remaining_lib_features.is_empty() {
+                    break;
+                }
+            }
+        };
+
+    // We always collect the lib features declared in the current crate, even if there are
+    // no unknown features, because the collection also does feature attribute validation.
+    let local_defined_features = tcx.lib_features().to_vec();
+    if !remaining_lib_features.is_empty() {
+        check_features(&mut remaining_lib_features, &local_defined_features);
+
+        for &cnum in &*tcx.crates() {
+            if remaining_lib_features.is_empty() {
+                break;
+            }
+            check_features(&mut remaining_lib_features, &tcx.defined_lib_features(cnum));
+        }
+    }
+
+    for (feature, span) in remaining_lib_features {
+        struct_span_err!(tcx.sess, span, E0635, "unknown feature `{}`", feature).emit();
+    }
+
+    // FIXME(#44232): the `used_features` table no longer exists, so we
+    // don't lint about unused features. We should reenable this one day!
 }
 
-fn format_stable_since_msg(version: &str) -> String {
-    format!("this feature has been stable since {}. Attribute no longer needed", version)
+fn unnecessary_stable_feature_lint<'a, 'tcx>(
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    span: Span,
+    feature: Symbol,
+    since: Symbol
+) {
+    tcx.lint_node(lint::builtin::STABLE_FEATURES,
+        ast::CRATE_NODE_ID,
+        span,
+        &format!("the feature `{}` has been stable since {} and no longer requires \
+                  an attribute to enable", feature, since));
+}
+
+fn duplicate_feature_err(sess: &Session, span: Span, feature: Symbol) {
+    struct_span_err!(sess, span, E0636, "the feature `{}` has already been declared", feature)
+        .emit();
 }

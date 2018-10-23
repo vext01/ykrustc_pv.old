@@ -8,8 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+
 // compile-flags: -Z thinlto -C codegen-units=8 -O
-// min-llvm-version 4.0
 // ignore-emscripten can't inspect instructions on emscripten
 
 // We want to assert here that ThinLTO will inline across codegen units. There's

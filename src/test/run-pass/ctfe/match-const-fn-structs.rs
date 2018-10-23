@@ -8,9 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// https://github.com/rust-lang/rust/issues/46114
+// run-pass
+#![allow(unused_variables)]
 
-#![feature(const_fn)]
+// https://github.com/rust-lang/rust/issues/46114
 
 #[derive(Eq, PartialEq)]
 struct A { value: u32 }

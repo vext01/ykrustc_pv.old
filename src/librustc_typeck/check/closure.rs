@@ -24,7 +24,7 @@ use rustc::ty::subst::Substs;
 use std::cmp;
 use std::iter;
 use rustc_target::spec::abi::Abi;
-use syntax::codemap::Span;
+use syntax::source_map::Span;
 use rustc::hir;
 
 /// What signature do we *expect* the closure to have from context?
@@ -190,7 +190,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         );
 
         match expected_ty.sty {
-            ty::TyDynamic(ref object_type, ..) => {
+            ty::Dynamic(ref object_type, ..) => {
                 let sig = object_type
                     .projection_bounds()
                     .filter_map(|pb| {
@@ -198,13 +198,11 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         self.deduce_sig_from_projection(None, &pb)
                     })
                     .next();
-                let kind = object_type
-                    .principal()
-                    .and_then(|p| self.tcx.lang_items().fn_trait_kind(p.def_id()));
+                let kind = self.tcx.lang_items().fn_trait_kind(object_type.principal().def_id());
                 (sig, kind)
             }
-            ty::TyInfer(ty::TyVar(vid)) => self.deduce_expectations_from_obligations(vid),
-            ty::TyFnPtr(sig) => {
+            ty::Infer(ty::TyVar(vid)) => self.deduce_expectations_from_obligations(vid),
+            ty::FnPtr(sig) => {
                 let expected_sig = ExpectedSig {
                     cause_span: None,
                     sig: sig.skip_binder().clone(),
@@ -225,27 +223,25 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         let expected_sig = fulfillment_cx
             .pending_obligations()
             .iter()
-            .map(|obligation| &obligation.obligation)
             .filter_map(|obligation| {
                 debug!(
                     "deduce_expectations_from_obligations: obligation.predicate={:?}",
                     obligation.predicate
                 );
 
-                match obligation.predicate {
+                if let ty::Predicate::Projection(ref proj_predicate) = obligation.predicate {
                     // Given a Projection predicate, we can potentially infer
                     // the complete signature.
-                    ty::Predicate::Projection(ref proj_predicate) => {
-                        let trait_ref = proj_predicate.to_poly_trait_ref(self.tcx);
-                        self.self_type_matches_expected_vid(trait_ref, expected_vid)
-                            .and_then(|_| {
-                                self.deduce_sig_from_projection(
-                                    Some(obligation.cause.span),
-                                    proj_predicate,
-                                )
-                            })
-                    }
-                    _ => None,
+                    let trait_ref = proj_predicate.to_poly_trait_ref(self.tcx);
+                    self.self_type_matches_expected_vid(trait_ref, expected_vid)
+                        .and_then(|_| {
+                            self.deduce_sig_from_projection(
+                                Some(obligation.cause.span),
+                                proj_predicate
+                            )
+                        })
+                } else {
+                    None
                 }
             })
             .next();
@@ -257,7 +253,6 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         let expected_kind = fulfillment_cx
             .pending_obligations()
             .iter()
-            .map(|obligation| &obligation.obligation)
             .filter_map(|obligation| {
                 let opt_trait_ref = match obligation.predicate {
                     ty::Predicate::Projection(ref data) => Some(data.to_poly_trait_ref(self.tcx)),
@@ -271,9 +266,9 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
                     // NB: This predicate is created by breaking down a
                     // `ClosureType: FnFoo()` predicate, where
-                    // `ClosureType` represents some `TyClosure`. It can't
+                    // `ClosureType` represents some `Closure`. It can't
                     // possibly be referring to the current closure,
-                    // because we haven't produced the `TyClosure` for
+                    // because we haven't produced the `Closure` for
                     // this closure yet; this is exactly why the other
                     // code is looking for a self type of a unresolved
                     // inference variable.
@@ -319,10 +314,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         );
 
         let input_tys = match arg_param_ty.sty {
-            ty::TyTuple(tys) => tys.into_iter(),
-            _ => {
-                return None;
-            }
+            ty::Tuple(tys) => tys.into_iter(),
+            _ => return None
         };
 
         let ret_param_ty = projection.skip_binder().ty;
@@ -355,7 +348,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             trait_ref, self_ty
         );
         match self_ty.sty {
-            ty::TyInfer(ty::TyVar(v)) if expected_vid == v => Some(trait_ref),
+            ty::Infer(ty::TyVar(v)) if expected_vid == v => Some(trait_ref),
             _ => None,
         }
     }
@@ -465,7 +458,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         // Create a `PolyFnSig`. Note the oddity that late bound
         // regions appearing free in `expected_sig` are now bound up
         // in this binder we are creating.
-        assert!(!expected_sig.sig.has_regions_bound_above(ty::DebruijnIndex::INNERMOST));
+        assert!(!expected_sig.sig.has_regions_bound_above(ty::INNERMOST));
         let bound_sig = ty::Binder::bind(self.tcx.mk_fn_sig(
             expected_sig.sig.inputs().iter().cloned(),
             expected_sig.sig.output(),
@@ -506,7 +499,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             .sig
             .inputs()
             .iter()
-            .map(|ty| ArgKind::from_expected_ty(ty))
+            .map(|ty| ArgKind::from_expected_ty(ty, None))
             .collect();
         let (closure_span, found_args) = self.get_fn_like_arguments(expr_map_node);
         let expected_span = expected_sig.cause_span.unwrap_or(closure_span);
@@ -562,8 +555,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             // The liberated version of this signature should be be a subtype
             // of the liberated form of the expectation.
             for ((hir_ty, &supplied_ty), expected_ty) in decl.inputs.iter()
-                           .zip(*supplied_sig.inputs().skip_binder()) // binder moved to (*) below
-                           .zip(expected_sigs.liberated_sig.inputs())
+               .zip(*supplied_sig.inputs().skip_binder()) // binder moved to (*) below
+               .zip(expected_sigs.liberated_sig.inputs())
             // `liberated_sig` is E'.
             {
                 // Instantiate (this part of..) S to S', i.e., with fresh variables.
@@ -606,7 +599,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
     /// If there is no expected signature, then we will convert the
     /// types that the user gave into a signature.
     fn supplied_sig_of_closure(&self, decl: &hir::FnDecl) -> ty::PolyFnSig<'tcx> {
-        let astconv: &AstConv = self;
+        let astconv: &dyn AstConv = self;
 
         // First, convert the types that the user supplied (if any).
         let supplied_arguments = decl.inputs.iter().map(|a| astconv.ast_ty_to_ty(a));
@@ -632,7 +625,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
     /// so should yield an error, but returns back a signature where
     /// all parameters are of type `TyErr`.
     fn error_sig_of_closure(&self, decl: &hir::FnDecl) -> ty::PolyFnSig<'tcx> {
-        let astconv: &AstConv = self;
+        let astconv: &dyn AstConv = self;
 
         let supplied_arguments = decl.inputs.iter().map(|a| {
             // Convert the types that the user supplied (if any), but ignore them.
@@ -640,11 +633,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             self.tcx.types.err
         });
 
-        match decl.output {
-            hir::Return(ref output) => {
-                astconv.ast_ty_to_ty(&output);
-            }
-            hir::DefaultReturn(_) => {}
+        if let hir::Return(ref output) = decl.output {
+            astconv.ast_ty_to_ty(&output);
         }
 
         let result = ty::Binder::bind(self.tcx.mk_fn_sig(

@@ -41,19 +41,24 @@ pub use rustc_data_structures::sync::MetadataRef;
 
 pub struct MetadataBlob(pub MetadataRef);
 
-/// Holds information about a syntax_pos::FileMap imported from another crate.
-/// See `imported_filemaps()` for more information.
-pub struct ImportedFileMap {
-    /// This FileMap's byte-offset within the codemap of its original crate
+/// Holds information about a syntax_pos::SourceFile imported from another crate.
+/// See `imported_source_files()` for more information.
+pub struct ImportedSourceFile {
+    /// This SourceFile's byte-offset within the source_map of its original crate
     pub original_start_pos: syntax_pos::BytePos,
-    /// The end of this FileMap within the codemap of its original crate
+    /// The end of this SourceFile within the source_map of its original crate
     pub original_end_pos: syntax_pos::BytePos,
-    /// The imported FileMap's representation within the local codemap
-    pub translated_filemap: Lrc<syntax_pos::FileMap>,
+    /// The imported SourceFile's representation within the local source_map
+    pub translated_source_file: Lrc<syntax_pos::SourceFile>,
 }
 
 pub struct CrateMetadata {
+    /// Original name of the crate.
     pub name: Symbol,
+
+    /// Name of the crate as imported.  I.e. if imported with
+    /// `extern crate foo as bar;` this will be `bar`.
+    pub imported_name: Symbol,
 
     /// Information about the extern crate that caused this crate to
     /// be loaded. If this is `None`, then the crate was injected
@@ -64,7 +69,7 @@ pub struct CrateMetadata {
     pub cnum_map: CrateNumMap,
     pub cnum: CrateNum,
     pub dependencies: Lock<Vec<CrateNum>>,
-    pub codemap_import_info: RwLock<Vec<ImportedFileMap>>,
+    pub source_map_import_info: RwLock<Vec<ImportedSourceFile>>,
 
     /// Used for decoding interpret::AllocIds in a cached & thread-safe manner.
     pub alloc_decoding_state: AllocDecodingState,
@@ -90,11 +95,16 @@ pub struct CStore {
     metas: RwLock<IndexVec<CrateNum, Option<Lrc<CrateMetadata>>>>,
     /// Map from NodeId's of local extern crate statements to crate numbers
     extern_mod_crate_map: Lock<NodeMap<CrateNum>>,
-    pub metadata_loader: Box<MetadataLoader + Sync>,
+    pub metadata_loader: Box<dyn MetadataLoader + Sync>,
+}
+
+pub enum LoadedMacro {
+    MacroDef(ast::Item),
+    ProcMacro(Lrc<SyntaxExtension>),
 }
 
 impl CStore {
-    pub fn new(metadata_loader: Box<MetadataLoader + Sync>) -> CStore {
+    pub fn new(metadata_loader: Box<dyn MetadataLoader + Sync>) -> CStore {
         CStore {
             // We add an empty entry for LOCAL_CRATE (which maps to zero) in
             // order to make array indices in `metas` match with the

@@ -14,7 +14,7 @@ use rustc::infer;
 use rustc::mir::*;
 use rustc::ty::{self, Ty, TyCtxt, GenericParamDefKind};
 use rustc::ty::subst::{Subst, Substs};
-use rustc::ty::maps::Providers;
+use rustc::ty::query::Providers;
 
 use rustc_data_structures::indexed_vec::{IndexVec, Idx};
 
@@ -140,11 +140,15 @@ enum CallKind {
 fn temp_decl(mutability: Mutability, ty: Ty, span: Span) -> LocalDecl {
     let source_info = SourceInfo { scope: OUTERMOST_SOURCE_SCOPE, span };
     LocalDecl {
-        mutability, ty, name: None,
+        mutability,
+        ty,
+        user_ty: None,
+        name: None,
         source_info,
         visibility_scope: source_info.scope,
         internal: false,
-        is_user_variable: false
+        is_user_variable: None,
+        is_block_tail: None,
     }
 }
 
@@ -165,7 +169,7 @@ fn build_drop_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     debug!("build_drop_shim(def_id={:?}, ty={:?})", def_id, ty);
 
     // Check if this is a generator, if so, return the drop glue for it
-    if let Some(&ty::TyS { sty: ty::TyGenerator(gen_def_id, substs, _), .. }) = ty {
+    if let Some(&ty::TyS { sty: ty::Generator(gen_def_id, substs, _), .. }) = ty {
         let mir = &**tcx.optimized_mir(gen_def_id).generator_drop.as_ref().unwrap();
         return mir.subst(tcx, substs.substs);
     }
@@ -301,17 +305,17 @@ fn build_clone_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     match self_ty.sty {
         _ if is_copy => builder.copy_shim(),
-        ty::TyArray(ty, len) => {
+        ty::Array(ty, len) => {
             let len = len.unwrap_usize(tcx);
             builder.array_shim(dest, src, ty, len)
         }
-        ty::TyClosure(def_id, substs) => {
+        ty::Closure(def_id, substs) => {
             builder.tuple_like_shim(
                 dest, src,
                 substs.upvar_tys(def_id, tcx)
             )
         }
-        ty::TyTuple(tys) => builder.tuple_like_shim(dest, src, tys.iter().cloned()),
+        ty::Tuple(tys) => builder.tuple_like_shim(dest, src, tys.iter().cloned()),
         _ => {
             bug!("clone shim for `{:?}` which is not `Copy` and is not an aggregate", self_ty)
         }
@@ -405,7 +409,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         let ret_statement = self.make_statement(
             StatementKind::Assign(
                 Place::Local(RETURN_PLACE),
-                Rvalue::Use(Operand::Copy(rcvr))
+                box Rvalue::Use(Operand::Copy(rcvr))
             )
         );
         self.block(vec![ret_statement], TerminatorKind::Return, false);
@@ -440,9 +444,8 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         let func = Operand::Constant(box Constant {
             span: self.span,
             ty: func_ty,
-            literal: Literal::Value {
-                value: ty::Const::zero_sized(self.tcx, func_ty)
-            },
+            user_ty: None,
+            literal: ty::Const::zero_sized(self.tcx, func_ty),
         });
 
         let ref_loc = self.make_place(
@@ -457,7 +460,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         let statement = self.make_statement(
             StatementKind::Assign(
                 ref_loc.clone(),
-                Rvalue::Ref(tcx.types.re_erased, BorrowKind::Shared, src)
+                box Rvalue::Ref(tcx.types.re_erased, BorrowKind::Shared, src)
             )
         );
 
@@ -467,6 +470,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
             args: vec![Operand::Move(ref_loc)],
             destination: Some((dest, next)),
             cleanup: Some(cleanup),
+            from_hir_call: true,
         }, false);
     }
 
@@ -484,7 +488,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         let compute_cond = self.make_statement(
             StatementKind::Assign(
                 cond.clone(),
-                Rvalue::BinaryOp(BinOp::Ne, Operand::Copy(end), Operand::Copy(beg))
+                box Rvalue::BinaryOp(BinOp::Ne, Operand::Copy(end), Operand::Copy(beg))
             )
         );
 
@@ -500,9 +504,8 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         box Constant {
             span: self.span,
             ty: self.tcx.types.usize,
-            literal: Literal::Value {
-                value: ty::Const::from_usize(self.tcx, value),
-            }
+            user_ty: None,
+            literal: ty::Const::from_usize(self.tcx, value),
         }
     }
 
@@ -521,13 +524,13 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
             self.make_statement(
                 StatementKind::Assign(
                     Place::Local(beg),
-                    Rvalue::Use(Operand::Constant(self.make_usize(0)))
+                    box Rvalue::Use(Operand::Constant(self.make_usize(0)))
                 )
             ),
             self.make_statement(
                 StatementKind::Assign(
                     end.clone(),
-                    Rvalue::Use(Operand::Constant(self.make_usize(len)))
+                    box Rvalue::Use(Operand::Constant(self.make_usize(len)))
                 )
             )
         ];
@@ -555,7 +558,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
             self.make_statement(
                 StatementKind::Assign(
                     Place::Local(beg),
-                    Rvalue::BinaryOp(
+                    box Rvalue::BinaryOp(
                         BinOp::Add,
                         Operand::Copy(Place::Local(beg)),
                         Operand::Constant(self.make_usize(1))
@@ -578,7 +581,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         let init = self.make_statement(
             StatementKind::Assign(
                 Place::Local(beg),
-                Rvalue::Use(Operand::Constant(self.make_usize(0)))
+                box Rvalue::Use(Operand::Constant(self.make_usize(0)))
             )
         );
         self.block(vec![init], TerminatorKind::Goto { target: BasicBlock::new(6) }, true);
@@ -605,7 +608,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         let statement = self.make_statement(
             StatementKind::Assign(
                 Place::Local(beg),
-                Rvalue::BinaryOp(
+                box Rvalue::BinaryOp(
                     BinOp::Add,
                     Operand::Copy(Place::Local(beg)),
                     Operand::Constant(self.make_usize(1))
@@ -715,7 +718,7 @@ fn build_call_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 source_info,
                 kind: StatementKind::Assign(
                     Place::Local(ref_rcvr),
-                    Rvalue::Ref(tcx.types.re_erased, borrow_kind, rcvr_l)
+                    box Rvalue::Ref(tcx.types.re_erased, borrow_kind, rcvr_l)
                 )
             });
             Operand::Move(Place::Local(ref_rcvr))
@@ -729,9 +732,8 @@ fn build_call_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             (Operand::Constant(box Constant {
                 span,
                 ty,
-                literal: Literal::Value {
-                    value: ty::Const::zero_sized(tcx, ty)
-                },
+                user_ty: None,
+                literal: ty::Const::zero_sized(tcx, ty),
              }),
              vec![rcvr])
         }
@@ -767,7 +769,8 @@ fn build_call_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             Some(BasicBlock::new(3))
         } else {
             None
-        }
+        },
+        from_hir_call: true,
     }, false);
 
     if let Adjustment::RefMut = rcvr_adjustment {
@@ -827,7 +830,7 @@ pub fn build_adt_ctor<'a, 'gcx, 'tcx>(infcx: &infer::InferCtxt<'a, 'gcx, 'tcx>,
     let sig = gcx.normalize_erasing_regions(param_env, sig);
 
     let (adt_def, substs) = match sig.output().sty {
-        ty::TyAdt(adt_def, substs) => (adt_def, substs),
+        ty::Adt(adt_def, substs) => (adt_def, substs),
         _ => bug!("unexpected type for ADT ctor {:?}", sig.output())
     };
 
@@ -852,8 +855,8 @@ pub fn build_adt_ctor<'a, 'gcx, 'tcx>(infcx: &infer::InferCtxt<'a, 'gcx, 'tcx>,
             source_info,
             kind: StatementKind::Assign(
                 Place::Local(RETURN_PLACE),
-                Rvalue::Aggregate(
-                    box AggregateKind::Adt(adt_def, variant_no, substs, None),
+                box Rvalue::Aggregate(
+                    box AggregateKind::Adt(adt_def, variant_no, substs, None, None),
                     (1..sig.inputs().len()+1).map(|i| {
                         Operand::Move(Place::Local(Local::new(i)))
                     }).collect()

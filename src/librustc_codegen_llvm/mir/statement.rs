@@ -15,12 +15,13 @@ use builder::Builder;
 
 use super::FunctionCx;
 use super::LocalRef;
+use super::OperandValue;
 
-impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
+impl FunctionCx<'a, 'll, 'tcx> {
     pub fn codegen_statement(&mut self,
-                           bx: Builder<'a, 'tcx>,
+                           bx: Builder<'a, 'll, 'tcx>,
                            statement: &mir::Statement<'tcx>)
-                           -> Builder<'a, 'tcx> {
+                           -> Builder<'a, 'll, 'tcx> {
         debug!("codegen_statement(statement={:?})", statement);
 
         self.set_debug_loc(&bx, statement.source_info);
@@ -30,6 +31,9 @@ impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
                     match self.locals[index] {
                         LocalRef::Place(cg_dest) => {
                             self.codegen_rvalue(bx, cg_dest, rvalue)
+                        }
+                        LocalRef::UnsizedPlace(cg_indirect_dest) => {
+                            self.codegen_rvalue_unsized(bx, cg_indirect_dest, rvalue)
                         }
                         LocalRef::Operand(None) => {
                             let (bx, operand) = self.codegen_rvalue_operand(bx, rvalue);
@@ -61,12 +65,16 @@ impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
             mir::StatementKind::StorageLive(local) => {
                 if let LocalRef::Place(cg_place) = self.locals[local] {
                     cg_place.storage_live(&bx);
+                } else if let LocalRef::UnsizedPlace(cg_indirect_place) = self.locals[local] {
+                    cg_indirect_place.storage_live(&bx);
                 }
                 bx
             }
             mir::StatementKind::StorageDead(local) => {
                 if let LocalRef::Place(cg_place) = self.locals[local] {
                     cg_place.storage_dead(&bx);
+                } else if let LocalRef::UnsizedPlace(cg_indirect_place) = self.locals[local] {
+                    cg_indirect_place.storage_dead(&bx);
                 }
                 bx
             }
@@ -75,17 +83,34 @@ impl<'a, 'tcx> FunctionCx<'a, 'tcx> {
                     self.codegen_place(&bx, output)
                 }).collect();
 
-                let input_vals = inputs.iter().map(|input| {
-                    self.codegen_operand(&bx, input).immediate()
-                }).collect();
+                let input_vals = inputs.iter()
+                    .try_fold(Vec::with_capacity(inputs.len()), |mut acc, input| {
+                        let op = self.codegen_operand(&bx, input);
+                        if let OperandValue::Immediate(_) = op.val {
+                            acc.push(op.immediate());
+                            Ok(acc)
+                        } else {
+                            Err(op)
+                        }
+                });
 
-                asm::codegen_inline_asm(&bx, asm, outputs, input_vals);
+                if input_vals.is_err() {
+                   span_err!(bx.sess(), statement.source_info.span, E0669,
+                             "invalid value for constraint in inline assembly");
+                } else {
+                    let input_vals = input_vals.unwrap();
+                    let res = asm::codegen_inline_asm(&bx, asm, outputs, input_vals);
+                    if !res {
+                        span_err!(bx.sess(), statement.source_info.span, E0668,
+                                  "malformed inline assembly");
+                    }
+                }
                 bx
             }
-            mir::StatementKind::ReadForMatch(_) |
+            mir::StatementKind::FakeRead(..) |
             mir::StatementKind::EndRegion(_) |
             mir::StatementKind::Validate(..) |
-            mir::StatementKind::UserAssertTy(..) |
+            mir::StatementKind::AscribeUserType(..) |
             mir::StatementKind::Nop => bx,
         }
     }

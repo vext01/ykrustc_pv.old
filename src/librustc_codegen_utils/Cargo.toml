@@ -10,7 +10,6 @@ crate-type = ["dylib"]
 test = false
 
 [dependencies]
-ar = "0.3.0"
 flate2 = "1.0"
 log = "0.4"
 
@@ -21,3 +20,4 @@ rustc_target = { path = "../librustc_target" }
 rustc_data_structures = { path = "../librustc_data_structures" }
 rustc_mir = { path = "../librustc_mir" }
 rustc_incremental = { path = "../librustc_incremental" }
+rustc_metadata_utils = { path = "../librustc_metadata_utils" }

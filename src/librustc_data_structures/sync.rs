@@ -26,6 +26,8 @@
 //!
 //! `MTLock` is a mutex which disappears if cfg!(parallel_queries) is false.
 //!
+//! `MTRef` is a immutable reference if cfg!(parallel_queries), and an mutable reference otherwise.
+//!
 //! `rustc_erase_owner!` erases a OwningRef owner into Erased or Erased + Send + Sync
 //! depending on the value of cfg!(parallel_queries).
 
@@ -86,13 +88,16 @@ cfg_if! {
             t.into_iter()
         }
 
-        pub type MetadataRef = OwningRef<Box<Erased>, [u8]>;
+        pub type MetadataRef = OwningRef<Box<dyn Erased>, [u8]>;
 
         pub use std::rc::Rc as Lrc;
         pub use std::rc::Weak as Weak;
         pub use std::cell::Ref as ReadGuard;
+        pub use std::cell::Ref as MappedReadGuard;
         pub use std::cell::RefMut as WriteGuard;
+        pub use std::cell::RefMut as MappedWriteGuard;
         pub use std::cell::RefMut as LockGuard;
+        pub use std::cell::RefMut as MappedLockGuard;
 
         use std::cell::RefCell as InnerRwLock;
         use std::cell::RefCell as InnerLock;
@@ -126,6 +131,8 @@ cfg_if! {
             }
         }
 
+        pub type MTRef<'a, T> = &'a mut T;
+
         #[derive(Debug)]
         pub struct MTLock<T>(T);
 
@@ -151,13 +158,8 @@ cfg_if! {
             }
 
             #[inline(always)]
-            pub fn borrow(&self) -> &T {
-                &self.0
-            }
-
-            #[inline(always)]
-            pub fn borrow_mut(&self) -> &T {
-                &self.0
+            pub fn lock_mut(&mut self) -> &mut T {
+                &mut self.0
             }
         }
 
@@ -214,14 +216,47 @@ cfg_if! {
         pub use std::marker::Sync as Sync;
 
         pub use parking_lot::RwLockReadGuard as ReadGuard;
+        pub use parking_lot::MappedRwLockReadGuard as MappedReadGuard;
         pub use parking_lot::RwLockWriteGuard as WriteGuard;
+        pub use parking_lot::MappedRwLockWriteGuard as MappedWriteGuard;
 
         pub use parking_lot::MutexGuard as LockGuard;
+        pub use parking_lot::MappedMutexGuard as MappedLockGuard;
 
         pub use std::sync::Arc as Lrc;
         pub use std::sync::Weak as Weak;
 
-        pub use self::Lock as MTLock;
+        pub type MTRef<'a, T> = &'a T;
+
+        #[derive(Debug)]
+        pub struct MTLock<T>(Lock<T>);
+
+        impl<T> MTLock<T> {
+            #[inline(always)]
+            pub fn new(inner: T) -> Self {
+                MTLock(Lock::new(inner))
+            }
+
+            #[inline(always)]
+            pub fn into_inner(self) -> T {
+                self.0.into_inner()
+            }
+
+            #[inline(always)]
+            pub fn get_mut(&mut self) -> &mut T {
+                self.0.get_mut()
+            }
+
+            #[inline(always)]
+            pub fn lock(&self) -> LockGuard<T> {
+                self.0.lock()
+            }
+
+            #[inline(always)]
+            pub fn lock_mut(&self) -> LockGuard<T> {
+                self.lock()
+            }
+        }
 
         use parking_lot::Mutex as InnerLock;
         use parking_lot::RwLock as InnerRwLock;
@@ -239,7 +274,7 @@ cfg_if! {
             t.into_par_iter()
         }
 
-        pub type MetadataRef = OwningRef<Box<Erased + Send + Sync>, [u8]>;
+        pub type MetadataRef = OwningRef<Box<dyn Erased + Send + Sync>, [u8]>;
 
         /// This makes locks panic if they are already held.
         /// It is only useful when you are running in a single thread
@@ -403,7 +438,7 @@ impl<T> Once<T> {
     /// closures may concurrently be computing a value which the inner value should take.
     /// Only one of these closures are used to actually initialize the value.
     /// If some other closure already set the value, we assert that it our closure computed
-    /// a value equal to the value aready set and then
+    /// a value equal to the value already set and then
     /// we return the value our closure computed wrapped in a `Option`.
     /// If our closure set the value, `None` is returned.
     /// If the value is already initialized, the closure is not called and `None` is returned.

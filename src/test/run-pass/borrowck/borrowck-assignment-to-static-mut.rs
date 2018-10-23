@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(dead_code)]
 // Test taken from #45641 (https://github.com/rust-lang/rust/issues/45641)
 
 // revisions: ast mir

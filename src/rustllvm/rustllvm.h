@@ -22,8 +22,6 @@
 #include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
-#include "llvm/IR/InlineAsm.h"
-#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
@@ -99,6 +97,7 @@ enum LLVMRustAttribute {
   SanitizeThread = 20,
   SanitizeAddress = 21,
   SanitizeMemory = 22,
+  NonLazyBind = 23,
 };
 
 typedef struct OpaqueRustString *RustStringRef;

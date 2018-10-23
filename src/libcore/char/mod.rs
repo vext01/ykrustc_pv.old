@@ -50,11 +50,6 @@ pub use self::decode::{decode_utf16, DecodeUtf16, DecodeUtf16Error};
 pub use unicode::tables::UNICODE_VERSION;
 #[unstable(feature = "unicode_version", issue = "49726")]
 pub use unicode::version::UnicodeVersion;
-#[unstable(feature = "decode_utf8", issue = "33906")]
-#[rustc_deprecated(since = "1.27.0", reason = "Use str::from_utf8 instead:
-    https://doc.rust-lang.org/nightly/std/str/struct.Utf8Error.html#examples")]
-#[allow(deprecated)]
-pub use self::decode::{decode_utf8, DecodeUtf8, InvalidSequence};
 
 use fmt::{self, Write};
 use iter::FusedIterator;
@@ -317,8 +312,8 @@ impl Iterator for EscapeDefault {
                     None
                 }
             },
-            EscapeDefaultState::Done => return None,
-            EscapeDefaultState::Unicode(ref mut i) => return i.nth(n),
+            EscapeDefaultState::Done => None,
+            EscapeDefaultState::Unicode(ref mut i) => i.nth(n),
         }
     }
 

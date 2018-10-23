@@ -1,0 +1,9 @@
+error[E0381]: assign to part of possibly uninitialized variable: `x`
+  --> $DIR/reassignment_immutable_fields_overlapping.rs:22:5
+   |
+LL |     x.a = 1;  //~ ERROR
+   |     ^^^^^^^ use of possibly uninitialized `x`
+
+error: aborting due to previous error
+
+For more information about this error, try `rustc --explain E0381`.

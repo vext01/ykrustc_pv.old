@@ -37,7 +37,7 @@ pub trait EncodableWithShorthand: Clone + Eq + Hash {
 }
 
 impl<'tcx> EncodableWithShorthand for Ty<'tcx> {
-    type Variant = ty::TypeVariants<'tcx>;
+    type Variant = ty::TyKind<'tcx>;
     fn variant(&self) -> &Self::Variant {
         &self.sty
     }
@@ -54,7 +54,7 @@ pub trait TyEncoder: Encoder {
     fn position(&self) -> usize;
 }
 
-impl<'buf> TyEncoder for opaque::Encoder<'buf> {
+impl TyEncoder for opaque::Encoder {
     #[inline]
     fn position(&self) -> usize {
         self.position()
@@ -109,8 +109,9 @@ pub fn encode_predicates<'tcx, E, C>(encoder: &mut E,
 {
     predicates.parent.encode(encoder)?;
     predicates.predicates.len().encode(encoder)?;
-    for predicate in &predicates.predicates {
-        encode_with_shorthand(encoder, predicate, &cache)?
+    for (predicate, span) in &predicates.predicates {
+        encode_with_shorthand(encoder, predicate, &cache)?;
+        span.encode(encoder)?;
     }
     Ok(())
 }
@@ -164,7 +165,7 @@ pub fn decode_ty<'a, 'tcx, D>(decoder: &mut D) -> Result<Ty<'tcx>, D::Error>
         })
     } else {
         let tcx = decoder.tcx();
-        Ok(tcx.mk_ty(ty::TypeVariants::decode(decoder)?))
+        Ok(tcx.mk_ty(ty::TyKind::decode(decoder)?))
     }
 }
 
@@ -177,18 +178,19 @@ pub fn decode_predicates<'a, 'tcx, D>(decoder: &mut D)
     Ok(ty::GenericPredicates {
         parent: Decodable::decode(decoder)?,
         predicates: (0..decoder.read_usize()?).map(|_| {
-                // Handle shorthands first, if we have an usize > 0x80.
-                if decoder.positioned_at_shorthand() {
-                    let pos = decoder.read_usize()?;
-                    assert!(pos >= SHORTHAND_OFFSET);
-                    let shorthand = pos - SHORTHAND_OFFSET;
+            // Handle shorthands first, if we have an usize > 0x80.
+            let predicate = if decoder.positioned_at_shorthand() {
+                let pos = decoder.read_usize()?;
+                assert!(pos >= SHORTHAND_OFFSET);
+                let shorthand = pos - SHORTHAND_OFFSET;
 
-                    decoder.with_position(shorthand, ty::Predicate::decode)
-                } else {
-                    ty::Predicate::decode(decoder)
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+                decoder.with_position(shorthand, ty::Predicate::decode)
+            } else {
+                ty::Predicate::decode(decoder)
+            }?;
+            Ok((predicate, Decodable::decode(decoder)?))
+        })
+        .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -212,7 +214,7 @@ pub fn decode_region<'a, 'tcx, D>(decoder: &mut D) -> Result<ty::Region<'tcx>, D
 
 #[inline]
 pub fn decode_ty_slice<'a, 'tcx, D>(decoder: &mut D)
-                                    -> Result<&'tcx ty::Slice<Ty<'tcx>>, D::Error>
+                                    -> Result<&'tcx ty::List<Ty<'tcx>>, D::Error>
     where D: TyDecoder<'a, 'tcx>,
           'tcx: 'a,
 {
@@ -232,7 +234,7 @@ pub fn decode_adt_def<'a, 'tcx, D>(decoder: &mut D)
 
 #[inline]
 pub fn decode_existential_predicate_slice<'a, 'tcx, D>(decoder: &mut D)
-    -> Result<&'tcx ty::Slice<ty::ExistentialPredicate<'tcx>>, D::Error>
+    -> Result<&'tcx ty::List<ty::ExistentialPredicate<'tcx>>, D::Error>
     where D: TyDecoder<'a, 'tcx>,
           'tcx: 'a,
 {
@@ -265,7 +267,7 @@ pub fn decode_const<'a, 'tcx, D>(decoder: &mut D)
 
 #[inline]
 pub fn decode_allocation<'a, 'tcx, D>(decoder: &mut D)
-                                 -> Result<&'tcx Allocation, D::Error>
+    -> Result<&'tcx Allocation, D::Error>
     where D: TyDecoder<'a, 'tcx>,
           'tcx: 'a,
 {
@@ -318,7 +320,7 @@ macro_rules! implement_ty_decoder {
                     read_f64 -> f64;
                     read_f32 -> f32;
                     read_char -> char;
-                    read_str -> Cow<str>;
+                    read_str -> Cow<'_, str>;
                 }
 
                 fn error(&mut self, err: &str) -> Self::Error {
@@ -366,10 +368,10 @@ macro_rules! implement_ty_decoder {
                 }
             }
 
-            impl<$($typaram),*> SpecializedDecoder<&'tcx ty::Slice<ty::Ty<'tcx>>>
+            impl<$($typaram),*> SpecializedDecoder<&'tcx ty::List<ty::Ty<'tcx>>>
             for $DecoderName<$($typaram),*> {
                 fn specialized_decode(&mut self)
-                                      -> Result<&'tcx ty::Slice<ty::Ty<'tcx>>, Self::Error> {
+                                      -> Result<&'tcx ty::List<ty::Ty<'tcx>>, Self::Error> {
                     decode_ty_slice(self)
                 }
             }
@@ -381,10 +383,10 @@ macro_rules! implement_ty_decoder {
                 }
             }
 
-            impl<$($typaram),*> SpecializedDecoder<&'tcx ty::Slice<ty::ExistentialPredicate<'tcx>>>
+            impl<$($typaram),*> SpecializedDecoder<&'tcx ty::List<ty::ExistentialPredicate<'tcx>>>
                 for $DecoderName<$($typaram),*> {
                 fn specialized_decode(&mut self)
-                    -> Result<&'tcx ty::Slice<ty::ExistentialPredicate<'tcx>>, Self::Error> {
+                    -> Result<&'tcx ty::List<ty::ExistentialPredicate<'tcx>>, Self::Error> {
                     decode_existential_predicate_slice(self)
                 }
             }
@@ -415,4 +417,3 @@ macro_rules! implement_ty_decoder {
         }
     }
 }
-

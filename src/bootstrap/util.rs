@@ -92,10 +92,7 @@ pub fn push_exe_path(mut buf: PathBuf, components: &[&str]) -> PathBuf {
         file.push_str(".exe");
     }
 
-    for c in components {
-        buf.push(c);
-    }
-
+    buf.extend(components);
     buf.push(file);
 
     buf
@@ -140,7 +137,7 @@ pub fn symlink_dir(config: &Config, src: &Path, dest: &Path) -> io::Result<()> {
     //
     // Copied from std
     #[cfg(windows)]
-    #[allow(bad_style)]
+    #[allow(nonstandard_style)]
     fn symlink_dir_inner(target: &Path, junction: &Path) -> io::Result<()> {
         use std::ptr;
         use std::ffi::OsStr;

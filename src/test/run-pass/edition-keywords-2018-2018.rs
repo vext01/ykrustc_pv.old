@@ -8,10 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags: --edition=2018
+#![allow(unused_assignments)]
+// edition:2018
 // aux-build:edition-kw-macro-2018.rs
-
-#![feature(raw_identifiers)]
 
 #[macro_use]
 extern crate edition_kw_macro_2018;

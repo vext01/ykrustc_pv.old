@@ -11,7 +11,6 @@
 // compile-pass
 
 #![feature(crate_visibility_modifier)]
-#![feature(macro_vis_matcher)]
 
 #![allow(unused)]
 #![warn(unreachable_pub)]

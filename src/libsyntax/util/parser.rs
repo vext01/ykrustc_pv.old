@@ -11,12 +11,10 @@ use parse::token::{Token, BinOpToken};
 use symbol::keywords;
 use ast::{self, BinOpKind};
 
-use std::cmp::Ordering;
-
 /// Associative operator with precedence.
 ///
 /// This is the enum which specifies operator precedence and fixity to the parser.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Debug)]
 pub enum AssocOp {
     /// `+`
     Add,
@@ -70,7 +68,7 @@ pub enum AssocOp {
     Colon,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Debug)]
 pub enum Fixity {
     /// The operator is left-associative
     Left,
@@ -230,7 +228,7 @@ pub const PREC_POSTFIX: i8 = 60;
 pub const PREC_PAREN: i8 = 99;
 pub const PREC_FORCE_PAREN: i8 = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum ExprPrecedence {
     Closure,
     Break,
@@ -275,20 +273,9 @@ pub enum ExprPrecedence {
     Loop,
     Match,
     Block,
-    Catch,
+    TryBlock,
     Struct,
-}
-
-impl PartialOrd for ExprPrecedence {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.order().cmp(&other.order()))
-    }
-}
-
-impl Ord for ExprPrecedence {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.order().cmp(&other.order())
-    }
+    Async,
 }
 
 impl ExprPrecedence {
@@ -345,7 +332,8 @@ impl ExprPrecedence {
             ExprPrecedence::Loop |
             ExprPrecedence::Match |
             ExprPrecedence::Block |
-            ExprPrecedence::Catch |
+            ExprPrecedence::TryBlock |
+            ExprPrecedence::Async |
             ExprPrecedence::Struct => PREC_PAREN,
         }
     }

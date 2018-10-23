@@ -8,6 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-pass
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unions_with_drop_fields)]
+
 // Some traits can be derived for unions.
 
 #![feature(untagged_unions)]

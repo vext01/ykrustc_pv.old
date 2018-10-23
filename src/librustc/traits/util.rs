@@ -137,7 +137,7 @@ impl<'cx, 'gcx, 'tcx> Elaborator<'cx, 'gcx, 'tcx> {
                 let mut predicates: Vec<_> =
                     predicates.predicates
                               .iter()
-                              .map(|p| p.subst_supertrait(tcx, &data.to_poly_trait_ref()))
+                              .map(|(p, _)| p.subst_supertrait(tcx, &data.to_poly_trait_ref()))
                               .collect();
 
                 debug!("super_predicates: data={:?} predicates={:?}",
@@ -239,6 +239,10 @@ impl<'cx, 'gcx, 'tcx> Elaborator<'cx, 'gcx, 'tcx> {
 impl<'cx, 'gcx, 'tcx> Iterator for Elaborator<'cx, 'gcx, 'tcx> {
     type Item = ty::Predicate<'tcx>;
 
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.stack.len(), None)
+    }
+
     fn next(&mut self) -> Option<ty::Predicate<'tcx>> {
         // Extract next item from top-most stack frame, if any.
         let next_predicate = match self.stack.pop() {
@@ -307,7 +311,7 @@ impl<'cx, 'gcx, 'tcx> Iterator for SupertraitDefIds<'cx, 'gcx, 'tcx> {
         self.stack.extend(
             predicates.predicates
                       .iter()
-                      .filter_map(|p| p.to_opt_poly_trait_ref())
+                      .filter_map(|(p, _)| p.to_opt_poly_trait_ref())
                       .map(|t| t.def_id())
                       .filter(|&super_def_id| visited.insert(super_def_id)));
         Some(def_id)
@@ -342,8 +346,7 @@ impl<'tcx,I:Iterator<Item=ty::Predicate<'tcx>>> Iterator for FilterToTraits<I> {
                 Some(ty::Predicate::Trait(data)) => {
                     return Some(data.to_poly_trait_ref());
                 }
-                Some(_) => {
-                }
+                Some(_) => {}
             }
         }
     }
@@ -534,7 +537,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         match self.hir.as_local_node_id(node_item_def_id) {
             Some(node_id) => {
                 let item = self.hir.expect_item(node_id);
-                if let hir::ItemImpl(_, _, defaultness, ..) = item.node {
+                if let hir::ItemKind::Impl(_, _, defaultness, ..) = item.node {
                     defaultness.is_default()
                 } else {
                     false

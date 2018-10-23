@@ -8,7 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![allow(non_camel_case_types)]
+#![allow(dead_code)]
+#![allow(unreachable_code)]
+#![allow(unused_parens)]
 // compile-flags: -Z borrowck=compare
+
+#![recursion_limit = "128"]
 
 use std::cell::Cell;
 use std::mem::swap;
@@ -84,23 +90,26 @@ fn dots() {
                                .. .. .. .. .. .. .. .. .. .. .. ..));
 }
 
-fn you_eight() {
-    assert_eq!(8, {
-        macro_rules! u8 {
-            (u8) => {
-                mod u8 {
-                    pub fn u8<'u8>(u8: &'u8 u8) -> &'u8 u8 {
-                        "u8";
-                        u8
+fn u8(u8: u8) {
+    if u8 != 0u8 {
+        assert_eq!(8u8, {
+            macro_rules! u8 {
+                (u8) => {
+                    mod u8 {
+                        pub fn u8<'u8: 'u8 + 'u8>(u8: &'u8 u8) -> &'u8 u8 {
+                            "u8";
+                            u8
+                        }
                     }
-                }
-            };
-        }
+                };
+            }
 
-        u8!(u8);
-        let &u8: &u8 = u8::u8(&8u8);
-        u8
-    });
+            u8!(u8);
+            let &u8: &u8 = u8::u8(&8u8);
+            ::u8(0u8);
+            u8
+        });
+    }
 }
 
 fn fishy() {
@@ -118,6 +127,16 @@ fn special_characters() {
     assert!(!val);
 }
 
+fn punch_card() -> impl std::fmt::Debug {
+    ..=..=.. ..    .. .. .. ..    .. .. .. ..    .. ..=.. ..
+    ..=.. ..=..    .. .. .. ..    .. .. .. ..    ..=..=..=..
+    ..=.. ..=..    ..=.. ..=..    .. ..=..=..    .. ..=.. ..
+    ..=..=.. ..    ..=.. ..=..    ..=.. .. ..    .. ..=.. ..
+    ..=.. ..=..    ..=.. ..=..    .. ..=.. ..    .. ..=.. ..
+    ..=.. ..=..    ..=.. ..=..    .. .. ..=..    .. ..=.. ..
+    ..=.. ..=..    .. ..=..=..    ..=..=.. ..    .. ..=.. ..
+}
+
 pub fn main() {
     strange();
     funny();
@@ -128,8 +147,9 @@ pub fn main() {
     angrydome();
     evil_lincoln();
     dots();
-    you_eight();
+    u8(8u8);
     fishy();
     union();
     special_characters();
+    punch_card();
 }

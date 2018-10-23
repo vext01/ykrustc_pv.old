@@ -17,9 +17,39 @@ use std::collections::{LinkedList, VecDeque, BTreeMap, BTreeSet, HashMap, HashSe
 use std::rc::Rc;
 use std::sync::Arc;
 
-impl<
-    T: Encodable
-> Encodable for LinkedList<T> {
+use smallvec::{Array, SmallVec};
+
+impl<A> Encodable for SmallVec<A>
+    where A: Array,
+          A::Item: Encodable
+{
+    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+        s.emit_seq(self.len(), |s| {
+            for (i, e) in self.iter().enumerate() {
+                s.emit_seq_elt(i, |s| e.encode(s))?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<A> Decodable for SmallVec<A>
+    where A: Array,
+          A::Item: Decodable
+{
+    fn decode<D: Decoder>(d: &mut D) -> Result<SmallVec<A>, D::Error> {
+        d.read_seq(|d, len| {
+            let mut vec = SmallVec::with_capacity(len);
+            // FIXME(#48994) - could just be collected into a Result<SmallVec, D::Error>
+            for i in 0..len {
+                vec.push(d.read_seq_elt(i, |d| Decodable::decode(d))?);
+            }
+            Ok(vec)
+        })
+    }
+}
+
+impl<T: Encodable> Encodable for LinkedList<T> {
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
         s.emit_seq(self.len(), |s| {
             for (i, e) in self.iter().enumerate() {
@@ -65,10 +95,10 @@ impl<T:Decodable> Decodable for VecDeque<T> {
     }
 }
 
-impl<
-    K: Encodable + PartialEq + Ord,
-    V: Encodable + PartialEq
-> Encodable for BTreeMap<K, V> {
+impl<K, V> Encodable for BTreeMap<K, V>
+    where K: Encodable + PartialEq + Ord,
+          V: Encodable
+{
     fn encode<S: Encoder>(&self, e: &mut S) -> Result<(), S::Error> {
         e.emit_map(self.len(), |e| {
             let mut i = 0;
@@ -82,10 +112,10 @@ impl<
     }
 }
 
-impl<
-    K: Decodable + PartialEq + Ord,
-    V: Decodable + PartialEq
-> Decodable for BTreeMap<K, V> {
+impl<K, V> Decodable for BTreeMap<K, V>
+    where K: Decodable + PartialEq + Ord,
+          V: Decodable
+{
     fn decode<D: Decoder>(d: &mut D) -> Result<BTreeMap<K, V>, D::Error> {
         d.read_map(|d, len| {
             let mut map = BTreeMap::new();
@@ -99,9 +129,9 @@ impl<
     }
 }
 
-impl<
-    T: Encodable + PartialEq + Ord
-> Encodable for BTreeSet<T> {
+impl<T> Encodable for BTreeSet<T>
+    where T: Encodable + PartialEq + Ord
+{
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
         s.emit_seq(self.len(), |s| {
             let mut i = 0;
@@ -114,9 +144,9 @@ impl<
     }
 }
 
-impl<
-    T: Decodable + PartialEq + Ord
-> Decodable for BTreeSet<T> {
+impl<T> Decodable for BTreeSet<T>
+    where T: Decodable + PartialEq + Ord
+{
     fn decode<D: Decoder>(d: &mut D) -> Result<BTreeSet<T>, D::Error> {
         d.read_seq(|d, len| {
             let mut set = BTreeSet::new();

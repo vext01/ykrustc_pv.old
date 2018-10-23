@@ -71,15 +71,12 @@ struct ImplWfCheck<'a, 'tcx: 'a> {
 
 impl<'a, 'tcx> ItemLikeVisitor<'tcx> for ImplWfCheck<'a, 'tcx> {
     fn visit_item(&mut self, item: &'tcx hir::Item) {
-        match item.node {
-            hir::ItemImpl(.., ref impl_item_refs) => {
-                let impl_def_id = self.tcx.hir.local_def_id(item.id);
-                enforce_impl_params_are_constrained(self.tcx,
-                                                    impl_def_id,
-                                                    impl_item_refs);
-                enforce_impl_items_are_distinct(self.tcx, impl_item_refs);
-            }
-            _ => { }
+        if let hir::ItemKind::Impl(.., ref impl_item_refs) = item.node {
+            let impl_def_id = self.tcx.hir.local_def_id(item.id);
+            enforce_impl_params_are_constrained(self.tcx,
+                                                impl_def_id,
+                                                impl_item_refs);
+            enforce_impl_items_are_distinct(self.tcx, impl_item_refs);
         }
     }
 
@@ -100,7 +97,7 @@ fn enforce_impl_params_are_constrained<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     let mut input_parameters = ctp::parameters_for_impl(impl_self_ty, impl_trait_ref);
     ctp::identify_constrained_type_params(
-        tcx, &impl_predicates.predicates.as_slice(), impl_trait_ref, &mut input_parameters);
+        tcx, &impl_predicates, impl_trait_ref, &mut input_parameters);
 
     // Disallow unconstrained lifetimes, but only if they appear in assoc types.
     let lifetimes_in_associated_types: FxHashSet<_> = impl_item_refs.iter()
@@ -152,7 +149,7 @@ fn enforce_impl_params_are_constrained<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // }
     // ```
     //
-    // In a concession to backwards compatbility, we continue to
+    // In a concession to backwards compatibility, we continue to
     // permit those, so long as the lifetimes aren't used in
     // associated types. I believe this is sound, because lifetimes
     // used elsewhere are not projected back out.
@@ -182,16 +179,16 @@ fn enforce_impl_items_are_distinct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         let impl_item = tcx.hir.impl_item(impl_item_ref.id);
         let seen_items = match impl_item.node {
             hir::ImplItemKind::Type(_) => &mut seen_type_items,
-            _                    => &mut seen_value_items,
+            _                          => &mut seen_value_items,
         };
-        match seen_items.entry(impl_item.name) {
+        match seen_items.entry(impl_item.ident.modern()) {
             Occupied(entry) => {
                 let mut err = struct_span_err!(tcx.sess, impl_item.span, E0201,
                                                "duplicate definitions with name `{}`:",
-                                               impl_item.name);
+                                               impl_item.ident);
                 err.span_label(*entry.get(),
                                format!("previous definition of `{}` here",
-                                        impl_item.name));
+                                       impl_item.ident));
                 err.span_label(impl_item.span, "duplicate definition");
                 err.emit();
             }

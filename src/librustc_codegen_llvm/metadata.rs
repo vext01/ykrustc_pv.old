@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use rustc::util::common;
 use rustc::middle::cstore::MetadataLoader;
 use rustc_target::spec::Target;
 use llvm;
@@ -19,6 +18,7 @@ use rustc_data_structures::owning_ref::OwningRef;
 use std::path::Path;
 use std::ptr;
 use std::slice;
+use rustc_fs_util::path2cstr;
 
 pub use rustc_data_structures::sync::MetadataRef;
 
@@ -57,15 +57,13 @@ impl MetadataLoader for LlvmMetadataLoader {
                           filename: &Path)
                           -> Result<MetadataRef, String> {
         unsafe {
-            let buf = common::path2cstr(filename);
-            let mb = llvm::LLVMRustCreateMemoryBufferWithContentsOfFile(buf.as_ptr());
-            if mb as isize == 0 {
-                return Err(format!("error reading library: '{}'", filename.display()));
-            }
+            let buf = path2cstr(filename);
+            let mb = llvm::LLVMRustCreateMemoryBufferWithContentsOfFile(buf.as_ptr())
+                .ok_or_else(|| format!("error reading library: '{}'", filename.display()))?;
             let of = ObjectFile::new(mb)
                 .map(|of| OwningRef::new(box of))
                 .ok_or_else(|| format!("provided path not an object file: '{}'",
-                                        filename.display()))?;
+                                       filename.display()))?;
             let buf = of.try_map(|of| search_meta_section(of, target, filename))?;
             Ok(rustc_erase_owner!(buf))
         }
