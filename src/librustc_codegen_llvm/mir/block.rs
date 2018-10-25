@@ -366,9 +366,10 @@ impl FunctionCx<'a, 'll, 'tcx> {
             mir::TerminatorKind::Assert { ref cond, expected, ref msg, target, cleanup } => {
                 let cond = self.codegen_operand(&bx, cond).immediate();
 
-                // In upstream Rust, there was code here to merge blocks if the assertion has a
-                // statically known target. We disable this for Yorick because we want to keep the
-                // structure of the generated code as close to that of the MIR as possible.
+                // In upstream Rust, there was code here to supress codegen of, and branching to,
+                // an unreachable assertion fail block. We disable this for Yorick because we want
+                // to keep the structure of the generated code as close to that of the MIR as
+                // possible.
 
                 // Pass the condition through llvm.expect for branch hinting.
                 let expect = bx.cx.get_intrinsic(&"llvm.expect.i1");
