@@ -38,6 +38,8 @@ use rustc_privacy;
 use rustc_plugin::registry::Registry;
 use rustc_plugin as plugin;
 use rustc_passes::{self, ast_validation, hir_stats, loops, rvalue_promotion};
+use rustc_yk_sections::mir_cfg::emit_mir_cfg_section;
+use rustc::util::nodemap::DefIdSet;
 use super::Compilation;
 
 use serialize::json;
@@ -50,7 +52,7 @@ use std::io::{self, Write};
 use std::iter;
 use std::path::{Path, PathBuf};
 use rustc_data_structures::sync::{self, Lrc, Lock};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use syntax::{self, ast, attr, diagnostics, visit};
 use syntax::early_buffered_lints::BufferedEarlyLint;
 use syntax::ext::base::ExtCtxt;
@@ -325,7 +327,7 @@ pub fn compile_input(
                     tcx.print_debug_stats();
                 }
 
-                let ongoing_codegen = phase_4_codegen(&*codegen_backend, tcx, rx);
+                let (ongoing_codegen, def_ids) = phase_4_codegen(&*codegen_backend, tcx, rx);
 
                 if log_enabled!(::log::Level::Info) {
                     println!("Post-codegen");
@@ -337,6 +339,12 @@ pub fn compile_input(
                         sess.err(&format!("could not emit MIR: {}", e));
                         sess.abort_if_errors();
                     }
+                }
+
+                // Output Yorick debug sections into binary targets.
+                if sess.crate_types.borrow().contains(&config::CrateType::Executable) {
+                    tcx.sess.yk_link_objects.borrow_mut()
+                       .push(emit_mir_cfg_section(&tcx, &def_ids));
                 }
 
                 Ok((outputs.clone(), ongoing_codegen, tcx.dep_graph.clone()))
@@ -1361,19 +1369,20 @@ pub fn phase_4_codegen<'a, 'tcx>(
     codegen_backend: &dyn CodegenBackend,
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     rx: mpsc::Receiver<Box<dyn Any + Send>>,
-) -> Box<dyn Any> {
+) -> (Box<dyn Any>, Arc<DefIdSet>) {
     time(tcx.sess, "resolving dependency formats", || {
         ::rustc::middle::dependency_format::calculate(tcx)
     });
 
     tcx.sess.profiler(|p| p.start_activity(ProfileCategory::Codegen));
-    let codegen = time(tcx.sess, "codegen", move || codegen_backend.codegen_crate(tcx, rx));
+    let (codegen, def_ids) =
+        time(tcx.sess, "codegen", move || codegen_backend.codegen_crate(tcx, rx));
     tcx.sess.profiler(|p| p.end_activity(ProfileCategory::Codegen));
     if tcx.sess.profile_queries() {
         profile::dump(&tcx.sess, "profile_queries".to_string())
     }
 
-    codegen
+    (codegen, def_ids)
 }
 
 fn escape_dep_filename(filename: &FileName) -> String {
