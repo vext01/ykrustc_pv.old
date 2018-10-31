@@ -1,0 +1,10 @@
+# Config file for continuous integration.
+
+[rust]
+# Use threads.
+codegen-units = 0
+
+[target.x86_64-unknown-linux-gnu]
+# Hsiangkai's LLVM at 4d9f26638007efe1c0dd8ccd689bad808df5a772
+# See README_YORICK.md for more on this.
+llvm-config = "/opt/llvm-hsiangkai/bin/llvm-config"
