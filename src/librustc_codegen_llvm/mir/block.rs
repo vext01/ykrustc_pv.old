@@ -54,7 +54,7 @@ impl FunctionCx<'a, 'll, 'tcx> {
 
         // Insert a DWARF label at the start of each non-empty block.
         // Yorick uses this at runtime to map virtual addresses to MIR blocks.
-        if self.cx.has_debug()  {
+        if self.has_debug() {
             let di_bldr = DIB(self.cx);
 
             // Make an appropriate name for the label.

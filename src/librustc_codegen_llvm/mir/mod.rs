@@ -126,6 +126,13 @@ impl FunctionCx<'a, 'll, 'tcx> {
         debuginfo::set_source_location(&self.debug_context, bx, scope, span);
     }
 
+    pub fn has_debug(&self) -> bool {
+        match self.debug_context {
+            FunctionDebugContext::RegularContext(_) => true,
+            _ => false,
+        }
+    }
+
     pub fn debug_loc(&mut self, source_info: mir::SourceInfo) -> (Option<&'ll DIScope>, Span) {
         // Bail out if debug info emission is not enabled.
         match self.debug_context {

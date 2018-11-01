@@ -46,6 +46,11 @@ const SECTION_VERSION: u16 = 0;
 
 /// Serialises the control flow for the given `DefId`s into a ELF object file and returns a handle for linking.
 pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, def_ids: &DefIdSet) -> YkExtraLinkObject {
+    // XXX
+    for i in tcx.crates().iter() {
+	eprintln!("0x{} -> {}", tcx.crate_hash(*i).to_string(), tcx.crate_name(*i));
+    }
+
     // First serialise the CFG into a plain binary file.
     let mut template = std::env::temp_dir();
     template.push(MIR_CFG_TEMPLATE);

@@ -315,9 +315,9 @@ impl<'a, 'tcx> CodegenCx<'a, 'tcx> {
         }
     }
 
-    pub fn has_debug(&self) -> bool {
-        self.dbg_cx.is_some()
-    }
+    //pub fn has_debug(&self) -> bool {
+    //    self.dbg_cx.is_some()
+    //}
 }
 
 impl<'b, 'tcx> CodegenCx<'b, 'tcx> {
