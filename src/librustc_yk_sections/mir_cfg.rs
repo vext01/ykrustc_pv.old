@@ -52,8 +52,10 @@ const MIR_CFG_SECTION_NAME: &'static str = ".yk_mir_cfg";
 const MIR_CFG_TEMPLATE: &'static str = ".ykcfg.XXXXXXXX";
 const SECTION_VERSION: u16 = 0;
 
-/// Serialises the control flow for the given `DefId`s into a ELF object file and returns a handle for linking.
-pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, def_ids: &DefIdSet) -> YkExtraLinkObject {
+/// Serialises the control flow for the given `DefId`s into a ELF object file and returns a handle
+/// for linking.
+pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>,
+                                            def_ids: &DefIdSet) -> YkExtraLinkObject {
     // First serialise the CFG into a plain binary file.
     let mut template = std::env::temp_dir();
     template.push(MIR_CFG_TEMPLATE);
@@ -144,7 +146,8 @@ fn process_mir(fh: &mut TempFile, tcx: &TyCtxt, def_id: &DefId, mir: &Mir) {
                         write_rec_header(fh, tcx, CALL_NO_CLEANUP, def_id, bb);
                     }
 
-                    fh.write_u64::<NativeEndian>(tcx.crate_hash(target_def_id.krate).as_u64()).unwrap();
+                    fh.write_u64::<NativeEndian>(tcx.crate_hash(
+                        target_def_id.krate).as_u64()).unwrap();
                     fh.write_u32::<NativeEndian>(target_def_id.index.as_raw_u32()).unwrap();
 
                     if let Some(cleanup_bb) = opt_cleanup_bb {
