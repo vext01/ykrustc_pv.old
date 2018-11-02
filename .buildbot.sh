@@ -6,4 +6,4 @@
 
 # XXX Enable compiler tests once we have addressed:
 # https://github.com/softdevteam/ykrustc/issues/10
-RUST_BACKTRACE=1 ./x.py build --stage 1 src/libtest
+RUST_BACKTRACE=1 ./x.py build --config .buildbot.toml --stage 1 src/libtest
