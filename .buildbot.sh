@@ -4,6 +4,11 @@
 
 ./x.py clean  # We don't clone afresh to save time and bandwidth.
 
-# XXX Enable compiler tests once we have addressed:
-# https://github.com/softdevteam/ykrustc/issues/10
-RUST_BACKTRACE=1 ./x.py build --config .buildbot.toml --stage 1 src/libtest
+# Note that the gdb must be Python enabled.
+#
+# We are running a subset of tests for now since the gdb compile tests are
+# currently failing due to out of data upstream code:
+# https://github.com/softdevteam/ykrustc/pull/14#issuecomment-440608570
+PATH=/opt/gdb-8.2/bin:${PATH} RUST_BACKTRACE=1 \
+    ./x.py test --config .buildbot.toml \
+    src/test/ui src/test/compile-fail src/test/run-pass

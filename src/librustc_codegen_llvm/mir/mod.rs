@@ -11,7 +11,9 @@
 use common::{C_i32, C_null};
 use libc::c_uint;
 use llvm::{self, BasicBlock};
-use llvm::debuginfo::{DIScope, DISubprogram};
+use llvm::debuginfo::DIScope;
+#[cfg(yk_hwt)]
+use llvm::DISubprogram;
 use rustc::ty::{self, Ty, TypeFoldable, UpvarSubsts};
 use rustc::ty::layout::{LayoutOf, TyLayout};
 use rustc::mir::{self, Mir};
@@ -117,6 +119,7 @@ impl FunctionCx<'a, 'll, 'tcx> {
         )
     }
 
+    #[cfg(yk_hwt)]
     pub fn fn_metadata(&self, span: Span) -> &DISubprogram {
         self.debug_context.get_ref(span).fn_metadata
     }
@@ -126,6 +129,7 @@ impl FunctionCx<'a, 'll, 'tcx> {
         debuginfo::set_source_location(&self.debug_context, bx, scope, span);
     }
 
+    #[cfg(yk_hwt)]
     pub fn has_debug(&self) -> bool {
         match self.debug_context {
             FunctionDebugContext::RegularContext(_) => true,

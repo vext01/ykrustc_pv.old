@@ -3,8 +3,8 @@ status = [
   "buildbot/buildbot-build-script"
 ]
 
-# Allow two hours for builds.
-timeout_sec = 7200
+# Allow eight hours for builds + tests.
+timeout_sec = 28800
 
 # Have bors delete auto-merged branches
 delete_merged_branches = true
