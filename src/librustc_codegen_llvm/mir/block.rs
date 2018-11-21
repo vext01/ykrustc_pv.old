@@ -8,16 +8,20 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use llvm::{self, BasicBlock, LLVMGetFirstInstruction,
-           LLVMPositionBuilderBefore, LLVMPositionBuilderAtEnd,
+use llvm::{self, BasicBlock};
+#[cfg(yk_hwt)]
+use llvm::{LLVMGetFirstInstruction, LLVMPositionBuilderBefore, LLVMPositionBuilderAtEnd,
            LLVMRustAddYkBlockLabel, LLVMRustAddYkBlockLabelAtEnd};
+#[cfg(yk_hwt)]
 use std::ffi::CString;
-
+#[cfg(yk_hwt)]
 use debuginfo::DIB;
+#[cfg(yk_hwt)]
+use rustc::mir::Location;
 use rustc::middle::lang_items;
 use rustc::ty::{self, Ty, TypeFoldable};
 use rustc::ty::layout::{self, LayoutOf};
-use rustc::mir::{self, Location};
+use rustc::mir;
 use rustc::mir::interpret::EvalErrorKind;
 use abi::{Abi, ArgType, ArgTypeExt, FnType, FnTypeExt, LlvmType, PassMode};
 use base;
@@ -50,41 +54,47 @@ impl FunctionCx<'a, 'll, 'tcx> {
             bx = self.codegen_statement(bx, statement);
         }
 
-        // Insert a DWARF label at the start of each block.
-        // Yorick uses this at runtime to map virtual addresses to MIR blocks.
-        if self.has_debug() {
-            let di_bldr = DIB(self.cx);
+        #[cfg(yk_hwt)] {
+            // Preliminary support for hardware tracing, where we insert a DWARF label (DILabel) at
+            // the start of each block. We plan to use these locations at runtime to know where we
+            // are in the MIR. Currently it is disabled, as we were unable to get it through the
+            // LLVM verifier when the compiler is built with both debug info and optimisation
+            // enabled: `mismatched subprogram between llvm.dbg.label label and !dbg attachment`.
+            if self.has_debug() {
+                let di_bldr = DIB(self.cx);
 
-            // Make a name for the label that uniquely identifies where in the MIR we are.
-            // We do this using a "crate hash" and a `DefId`. It might be tempting to use the crate
-            // number, but this wouldn't serve as a unique ID, as crate numbers are only unique to
-            // any given compilation session.
-            let did = self.instance.def.def_id();
-            let k_hash = bx.tcx().crate_hash(did.krate).as_u64();
-            let lbl_name = CString::new(
-                format!("__YK_LOC_{}_{}_{}", k_hash, did.index.as_raw_u32(), bb.index())).unwrap();
+                // Make a name for the label that uniquely identifies where in the MIR we are. We
+                // do this using a "crate hash" and a `DefId`. It might be tempting to use the
+                // crate number, but this wouldn't serve as a unique ID, as crate numbers are only
+                // unique to any given compilation session.
+                let did = self.instance.def.def_id();
+                let k_hash = bx.tcx().crate_hash(did.krate).as_u64();
+                let lbl_name = CString::new(
+                    format!("__YK_LOC_{}_{}_{}", k_hash, did.index.as_raw_u32(),
+                            bb.index())).unwrap();
 
-            // Get the sub_program.
-            let loc = Location{block: bb, statement_index: 0};
-            let source_info = self.mir.source_info(loc);
-            let (_, span) = self.debug_loc(*source_info);
-            let di_sp = self.fn_metadata(span);
+                // Get the sub_program.
+                let loc = Location{block: bb, statement_index: 0};
+                let source_info = self.mir.source_info(loc);
+                let (_, span) = self.debug_loc(*source_info);
+                let di_sp = self.fn_metadata(span);
 
-            match unsafe { LLVMGetFirstInstruction(bx.llbb()) } {
-                Some(instr) => {
-                    // The block is non-empty, so put a label on the first instruction.
-                    unsafe {
-                        LLVMPositionBuilderBefore(bx.llbuilder, instr);
-                        LLVMRustAddYkBlockLabel(bx.llbuilder, di_bldr, di_sp, instr,
-                                                lbl_name.as_ptr());
-                        LLVMPositionBuilderAtEnd(bx.llbuilder, bx.llbb());
-                    }
-                },
-                None => {
-                    // The block is empty. Append a label to the block.
-                    unsafe {
-                        LLVMRustAddYkBlockLabelAtEnd(bx.llbuilder, di_bldr, di_sp, bx.llbb(),
-                                                     lbl_name.as_ptr());
+                match unsafe { LLVMGetFirstInstruction(bx.llbb()) } {
+                    Some(instr) => {
+                        // The block is non-empty, so put a label on the first instruction.
+                        unsafe {
+                            LLVMPositionBuilderBefore(bx.llbuilder, instr);
+                            LLVMRustAddYkBlockLabel(bx.llbuilder, di_bldr, di_sp, instr,
+                                                    lbl_name.as_ptr());
+                            LLVMPositionBuilderAtEnd(bx.llbuilder, bx.llbb());
+                        }
+                    },
+                    None => {
+                        // The block is empty. Append a label to the block.
+                        unsafe {
+                            LLVMRustAddYkBlockLabelAtEnd(bx.llbuilder, di_bldr, di_sp, bx.llbb(),
+                                                         lbl_name.as_ptr());
+                        }
                     }
                 }
             }
