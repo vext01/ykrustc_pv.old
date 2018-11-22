@@ -109,7 +109,7 @@ impl<'a, 'b, 'cl> Visitor<'a> for UnusedImportCheckVisitor<'a, 'b, 'cl> {
                 self.item_span
             };
 
-            if items.len() == 0 {
+            if items.is_empty() {
                 self.unused_imports
                     .entry(self.base_id)
                     .or_default()
@@ -144,7 +144,7 @@ pub fn check_crate(resolver: &mut Resolver, krate: &ast::Crate) {
                     }
                 }
             }
-            ImportDirectiveSubclass::ExternCrate(_) => {
+            ImportDirectiveSubclass::ExternCrate { .. } => {
                 resolver.maybe_unused_extern_crates.push((directive.id, directive.span));
             }
             ImportDirectiveSubclass::MacroUse => {
@@ -162,7 +162,7 @@ pub fn check_crate(resolver: &mut Resolver, krate: &ast::Crate) {
 
     let mut visitor = UnusedImportCheckVisitor {
         resolver,
-        unused_imports: NodeMap(),
+        unused_imports: Default::default(),
         base_id: ast::DUMMY_NODE_ID,
         item_span: DUMMY_SP,
     };
@@ -170,7 +170,7 @@ pub fn check_crate(resolver: &mut Resolver, krate: &ast::Crate) {
 
     for (id, spans) in &visitor.unused_imports {
         let len = spans.len();
-        let mut spans = spans.values().map(|s| *s).collect::<Vec<Span>>();
+        let mut spans = spans.values().cloned().collect::<Vec<Span>>();
         spans.sort();
         let ms = MultiSpan::from_spans(spans.clone());
         let mut span_snippets = spans.iter()
@@ -183,7 +183,7 @@ pub fn check_crate(resolver: &mut Resolver, krate: &ast::Crate) {
         span_snippets.sort();
         let msg = format!("unused import{}{}",
                           if len > 1 { "s" } else { "" },
-                          if span_snippets.len() > 0 {
+                          if !span_snippets.is_empty() {
                               format!(": {}", span_snippets.join(", "))
                           } else {
                               String::new()

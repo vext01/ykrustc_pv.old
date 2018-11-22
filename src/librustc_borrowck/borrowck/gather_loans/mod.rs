@@ -363,7 +363,6 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
 
                     ty::ReStatic => self.item_ub,
 
-                    ty::ReCanonical(_) |
                     ty::ReEmpty |
                     ty::ReClosureBound(..) |
                     ty::ReLateBound(..) |
@@ -454,8 +453,8 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
                     }
                     None
                 }
-                LpUpvar(ty::UpvarId{ var_id, closure_expr_id: _ }) => {
-                    self.bccx.used_mut_nodes.borrow_mut().insert(var_id);
+                LpUpvar(ty::UpvarId{ var_path: ty::UpvarPath { hir_id }, closure_expr_id: _ }) => {
+                    self.bccx.used_mut_nodes.borrow_mut().insert(hir_id);
                     None
                 }
                 LpExtend(ref base, mc::McInherited, LpDeref(pointer_kind)) |

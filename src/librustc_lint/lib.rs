@@ -40,6 +40,7 @@ extern crate log;
 extern crate rustc_mir;
 extern crate rustc_target;
 extern crate syntax_pos;
+extern crate rustc_data_structures;
 
 use rustc::lint;
 use rustc::lint::{LateContext, LateLintPass, LintPass, LintArray};
@@ -144,7 +145,6 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
         UnusedAllocation: UnusedAllocation,
         MissingCopyImplementations: MissingCopyImplementations,
         UnstableFeatures: UnstableFeatures,
-        UnconditionalRecursion: UnconditionalRecursion,
         InvalidNoMangleItems: InvalidNoMangleItems,
         PluginAsLibrary: PluginAsLibrary,
         MutableTransmutes: MutableTransmutes,
@@ -310,17 +310,12 @@ pub fn register_builtins(store: &mut lint::LintStore, sess: Option<&Session>) {
         },
         FutureIncompatibleInfo {
             id: LintId::of(ABSOLUTE_PATHS_NOT_STARTING_WITH_CRATE),
-            reference: "issue TBD",
+            reference: "issue #53130 <https://github.com/rust-lang/rust/issues/53130>",
             edition: Some(Edition::Edition2018),
         },
         FutureIncompatibleInfo {
             id: LintId::of(WHERE_CLAUSES_OBJECT_SAFETY),
             reference: "issue #51443 <https://github.com/rust-lang/rust/issues/51443>",
-            edition: None,
-        },
-        FutureIncompatibleInfo {
-            id: LintId::of(DUPLICATE_ASSOCIATED_TYPE_BINDINGS),
-            reference: "issue #50589 <https://github.com/rust-lang/rust/issues/50589>",
             edition: None,
         },
         FutureIncompatibleInfo {

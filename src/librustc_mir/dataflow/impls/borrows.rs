@@ -77,7 +77,7 @@ fn precompute_borrows_out_of_scope<'tcx>(
     // `visited` once they are added to `stack`, before they are actually
     // processed, because this avoids the need to look them up again on
     // completion.
-    let mut visited = FxHashMap();
+    let mut visited = FxHashMap::default();
     visited.insert(location.block, location.statement_index);
 
     let mut stack = vec![];
@@ -162,7 +162,7 @@ impl<'a, 'gcx, 'tcx> Borrows<'a, 'gcx, 'tcx> {
             }
         });
 
-        let mut borrows_out_of_scope_at_location = FxHashMap();
+        let mut borrows_out_of_scope_at_location = FxHashMap::default();
         for (borrow_index, borrow_data) in borrow_set.borrows.iter_enumerated() {
             let borrow_region = borrow_data.region.to_region_vid();
             let location = borrow_set.borrows[borrow_index].reserve_location;
@@ -184,7 +184,6 @@ impl<'a, 'gcx, 'tcx> Borrows<'a, 'gcx, 'tcx> {
     }
 
     crate fn borrows(&self) -> &IndexVec<BorrowIndex, BorrowData<'tcx>> { &self.borrow_set.borrows }
-    pub fn scope_tree(&self) -> &Lrc<region::ScopeTree> { &self.scope_tree }
 
     pub fn location(&self, idx: BorrowIndex) -> &Location {
         &self.borrow_set.borrows[idx].reserve_location
@@ -339,7 +338,8 @@ impl<'a, 'gcx, 'tcx> BitDenotation for Borrows<'a, 'gcx, 'tcx> {
             mir::StatementKind::FakeRead(..) |
             mir::StatementKind::SetDiscriminant { .. } |
             mir::StatementKind::StorageLive(..) |
-            mir::StatementKind::Validate(..) |
+            mir::StatementKind::Retag { .. } |
+            mir::StatementKind::EscapeToRaw { .. } |
             mir::StatementKind::AscribeUserType(..) |
             mir::StatementKind::Nop => {}
 

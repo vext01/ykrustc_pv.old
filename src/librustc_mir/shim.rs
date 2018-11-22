@@ -13,6 +13,7 @@ use rustc::hir::def_id::DefId;
 use rustc::infer;
 use rustc::mir::*;
 use rustc::ty::{self, Ty, TyCtxt, GenericParamDefKind};
+use rustc::ty::layout::VariantIdx;
 use rustc::ty::subst::{Subst, Substs};
 use rustc::ty::query::Providers;
 
@@ -43,6 +44,15 @@ fn make_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let mut result = match instance {
         ty::InstanceDef::Item(..) =>
             bug!("item {:?} passed to make_shim", instance),
+        ty::InstanceDef::VtableShim(def_id) => {
+            build_call_shim(
+                tcx,
+                def_id,
+                Adjustment::DerefMove,
+                CallKind::Direct(def_id),
+                None,
+            )
+        }
         ty::InstanceDef::FnPtrShim(def_id, ty) => {
             let trait_ = tcx.trait_of_item(def_id).unwrap();
             let adjustment = match tcx.lang_items().fn_trait_kind(trait_) {
@@ -128,6 +138,7 @@ fn make_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 enum Adjustment {
     Identity,
     Deref,
+    DerefMove,
     RefMut,
 }
 
@@ -142,7 +153,7 @@ fn temp_decl(mutability: Mutability, ty: Ty, span: Span) -> LocalDecl {
     LocalDecl {
         mutability,
         ty,
-        user_ty: None,
+        user_ty: UserTypeProjections::none(),
         name: None,
         source_info,
         visibility_scope: source_info.scope,
@@ -186,7 +197,7 @@ fn build_drop_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let source_info = SourceInfo { span, scope: OUTERMOST_SOURCE_SCOPE };
 
     let return_block = BasicBlock::new(1);
-    let mut blocks = IndexVec::new();
+    let mut blocks = IndexVec::with_capacity(2);
     let block = |blocks: &mut IndexVec<_, _>, kind| {
         blocks.push(BasicBlockData {
             statements: vec![],
@@ -212,6 +223,15 @@ fn build_drop_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     );
 
     if let Some(..) = ty {
+        // The first argument (index 0), but add 1 for the return value.
+        let dropee_ptr = Place::Local(Local::new(1+0));
+        if tcx.sess.opts.debugging_opts.mir_emit_retag {
+            // We use raw ptr operations, better prepare the alias tracking for that
+            mir.basic_blocks_mut()[START_BLOCK].statements.insert(0, Statement {
+                source_info,
+                kind: StatementKind::EscapeToRaw(Operand::Copy(dropee_ptr.clone())),
+            })
+        }
         let patch = {
             let param_env = tcx.param_env(def_id).with_reveal_all();
             let mut elaborator = DropShimElaborator {
@@ -220,7 +240,7 @@ fn build_drop_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 tcx,
                 param_env
             };
-            let dropee = Place::Local(Local::new(1+0)).deref();
+            let dropee = dropee_ptr.deref();
             let resume_block = elaborator.patch.resume_block();
             elaborate_drops::elaborate_drop(
                 &mut elaborator,
@@ -281,7 +301,7 @@ impl<'a, 'tcx> DropElaborator<'a, 'tcx> for DropShimElaborator<'a, 'tcx> {
     fn deref_subpath(&self, _path: Self::Path) -> Option<Self::Path> {
         None
     }
-    fn downcast_subpath(&self, _path: Self::Path, _variant: usize) -> Option<Self::Path> {
+    fn downcast_subpath(&self, _path: Self::Path, _variant: VariantIdx) -> Option<Self::Path> {
         Some(())
     }
     fn array_subpath(&self, _path: Self::Path, _index: u32, _size: u32) -> Option<Self::Path> {
@@ -547,7 +567,7 @@ impl<'a, 'tcx> CloneShimBuilder<'a, 'tcx> {
         // `dest[i] = Clone::clone(src[beg])`;
         // Goto #3 if ok, #5 if unwinding happens.
         let dest_field = dest.clone().index(beg);
-        let src_field = src.clone().index(beg);
+        let src_field = src.index(beg);
         self.make_clone_call(dest_field, src_field, ty, BasicBlock::new(3),
                              BasicBlock::new(5));
 
@@ -701,6 +721,14 @@ fn build_call_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let rcvr = match rcvr_adjustment {
         Adjustment::Identity => Operand::Move(rcvr_l),
         Adjustment::Deref => Operand::Copy(rcvr_l.deref()),
+        Adjustment::DerefMove => {
+            // fn(Self, ...) -> fn(*mut Self, ...)
+            let arg_ty = local_decls[rcvr_arg].ty;
+            assert!(arg_ty.is_self());
+            local_decls[rcvr_arg].ty = tcx.mk_mut_ptr(arg_ty);
+
+            Operand::Move(rcvr_l.deref())
+        }
         Adjustment::RefMut => {
             // let rcvr = &mut rcvr;
             let ref_rcvr = local_decls.push(temp_decl(
@@ -750,7 +778,8 @@ fn build_call_shim<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         }));
     }
 
-    let mut blocks = IndexVec::new();
+    let n_blocks = if let Adjustment::RefMut = rcvr_adjustment { 5 } else { 2 };
+    let mut blocks = IndexVec::with_capacity(n_blocks);
     let block = |blocks: &mut IndexVec<_, _>, statements, kind, is_cleanup| {
         blocks.push(BasicBlockData {
             statements,
@@ -826,7 +855,9 @@ pub fn build_adt_ctor<'a, 'gcx, 'tcx>(infcx: &infer::InferCtxt<'a, 'gcx, 'tcx>,
     let param_env = gcx.param_env(def_id);
 
     // Normalize the sig.
-    let sig = gcx.fn_sig(def_id).no_late_bound_regions().expect("LBR in ADT constructor signature");
+    let sig = gcx.fn_sig(def_id)
+        .no_bound_vars()
+        .expect("LBR in ADT constructor signature");
     let sig = gcx.normalize_erasing_regions(param_env, sig);
 
     let (adt_def, substs) = match sig.output().sty {
@@ -846,7 +877,7 @@ pub fn build_adt_ctor<'a, 'gcx, 'tcx>(infcx: &infer::InferCtxt<'a, 'gcx, 'tcx>,
     let variant_no = if adt_def.is_enum() {
         adt_def.variant_index_with_id(def_id)
     } else {
-        0
+        VariantIdx::new(0)
     };
 
     // return = ADT(arg0, arg1, ...); return

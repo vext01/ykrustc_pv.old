@@ -23,7 +23,7 @@ use hir::def_id::DefId;
 use infer::SuppressRegionErrors;
 use infer::outlives::env::OutlivesEnvironment;
 use middle::region;
-use mir::interpret::ConstEvalErr;
+use mir::interpret::ErrorHandled;
 use ty::subst::Substs;
 use ty::{self, AdtKind, List, Ty, TyCtxt, GenericParamDefKind, ToPredicate};
 use ty::error::{ExpectedFound, TypeError};
@@ -48,13 +48,10 @@ pub use self::on_unimplemented::{OnUnimplementedDirective, OnUnimplementedNote};
 pub use self::select::{EvaluationCache, SelectionContext, SelectionCache};
 pub use self::select::{EvaluationResult, IntercrateAmbiguityCause, OverflowError};
 pub use self::specialize::{OverlapError, specialization_graph, translate_substs};
-pub use self::specialize::{SpecializesCache, find_associated_item};
+pub use self::specialize::find_associated_item;
 pub use self::engine::{TraitEngine, TraitEngineExt};
-pub use self::util::elaborate_predicates;
-pub use self::util::supertraits;
-pub use self::util::Supertraits;
-pub use self::util::supertrait_def_ids;
-pub use self::util::SupertraitDefIds;
+pub use self::util::{elaborate_predicates, elaborate_trait_ref, elaborate_trait_refs};
+pub use self::util::{supertraits, supertrait_def_ids, Supertraits, SupertraitDefIds};
 pub use self::util::transitive_bounds;
 
 #[allow(dead_code)]
@@ -278,6 +275,8 @@ pub type TraitObligations<'tcx> = Vec<TraitObligation<'tcx>>;
 /// * `DomainGoal`
 /// * `Goal`
 /// * `Clause`
+/// * `Environment`
+/// * `InEnvironment`
 /// are used for representing the trait system in the form of
 /// logic programming clauses. They are part of the interface
 /// for the chalk SLG solver.
@@ -335,6 +334,14 @@ impl<'tcx> DomainGoal<'tcx> {
     pub fn into_goal(self) -> GoalKind<'tcx> {
         GoalKind::DomainGoal(self)
     }
+
+    pub fn into_program_clause(self) -> ProgramClause<'tcx> {
+        ProgramClause {
+            goal: self,
+            hypotheses: ty::List::empty(),
+            category: ProgramClauseCategory::Other,
+        }
+    }
 }
 
 impl<'tcx> GoalKind<'tcx> {
@@ -342,7 +349,7 @@ impl<'tcx> GoalKind<'tcx> {
         domain_goal: PolyDomainGoal<'tcx>,
         tcx: TyCtxt<'a, 'tcx, 'tcx>,
     ) -> GoalKind<'tcx> {
-        match domain_goal.no_late_bound_regions() {
+        match domain_goal.no_bound_vars() {
             Some(p) => p.into_goal(),
             None => GoalKind::Quantified(
                 QuantifierKind::Universal,
@@ -358,6 +365,15 @@ impl<'tcx> GoalKind<'tcx> {
 pub enum Clause<'tcx> {
     Implies(ProgramClause<'tcx>),
     ForAll(ty::Binder<ProgramClause<'tcx>>),
+}
+
+impl Clause<'tcx> {
+    pub fn category(self) -> ProgramClauseCategory {
+        match self {
+            Clause::Implies(clause) => clause.category,
+            Clause::ForAll(clause) => clause.skip_binder().category,
+        }
+    }
 }
 
 /// Multiple clauses.
@@ -376,6 +392,38 @@ pub struct ProgramClause<'tcx> {
 
     /// ...if we can prove these hypotheses (there may be no hypotheses at all):
     pub hypotheses: Goals<'tcx>,
+
+    /// Useful for filtering clauses.
+    pub category: ProgramClauseCategory,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum ProgramClauseCategory {
+    ImpliedBound,
+    WellFormed,
+    Other,
+}
+
+/// A set of clauses that we assume to be true.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Environment<'tcx> {
+    pub clauses: Clauses<'tcx>,
+}
+
+impl Environment<'tcx> {
+    pub fn with<G>(self, goal: G) -> InEnvironment<'tcx, G> {
+        InEnvironment {
+            environment: self,
+            goal,
+        }
+    }
+}
+
+/// Something (usually a goal), along with an environment.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct InEnvironment<'tcx, G> {
+    pub environment: Environment<'tcx>,
+    pub goal: G,
 }
 
 pub type Selection<'tcx> = Vtable<'tcx, PredicateObligation<'tcx>>;
@@ -387,7 +435,7 @@ pub enum SelectionError<'tcx> {
                                 ty::PolyTraitRef<'tcx>,
                                 ty::error::TypeError<'tcx>),
     TraitNotObjectSafe(DefId),
-    ConstEvalFailure(Lrc<ConstEvalErr<'tcx>>),
+    ConstEvalFailure(ErrorHandled),
     Overflow,
 }
 
@@ -483,8 +531,11 @@ pub enum Vtable<'tcx, N> {
     /// Same as above, but for a fn pointer type with the given signature.
     VtableFnPointer(VtableFnPointerData<'tcx, N>),
 
-    /// Vtable automatically generated for a generator
+    /// Vtable automatically generated for a generator.
     VtableGenerator(VtableGeneratorData<'tcx, N>),
+
+    /// Vtable for a trait alias.
+    VtableTraitAlias(VtableTraitAliasData<'tcx, N>),
 }
 
 /// Identifies a particular impl in the source, along with a set of
@@ -552,6 +603,13 @@ pub struct VtableObjectData<'tcx, N> {
 pub struct VtableFnPointerData<'tcx, N> {
     pub fn_ty: Ty<'tcx>,
     pub nested: Vec<N>
+}
+
+#[derive(Clone, PartialEq, Eq, RustcEncodable, RustcDecodable)]
+pub struct VtableTraitAliasData<'tcx, N> {
+    pub alias_def_id: DefId,
+    pub substs: &'tcx Substs<'tcx>,
+    pub nested: Vec<N>,
 }
 
 /// Creates predicate obligations from the generic bounds.
@@ -642,7 +700,12 @@ fn do_normalize_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                      predicates: Vec<ty::Predicate<'tcx>>)
                                      -> Result<Vec<ty::Predicate<'tcx>>, ErrorReported>
 {
-    debug!("do_normalize_predicates({:?})", predicates);
+    debug!(
+        "do_normalize_predicates(predicates={:?}, region_context={:?}, cause={:?})",
+        predicates,
+        region_context,
+        cause,
+    );
     let span = cause.span;
     tcx.infer_ctxt().enter(|infcx| {
         // FIXME. We should really... do something with these region
@@ -1016,6 +1079,7 @@ impl<'tcx, N> Vtable<'tcx, N> {
             VtableGenerator(c) => c.nested,
             VtableObject(d) => d.nested,
             VtableFnPointer(d) => d.nested,
+            VtableTraitAlias(d) => d.nested,
         }
     }
 
@@ -1039,20 +1103,25 @@ impl<'tcx, N> Vtable<'tcx, N> {
                 trait_def_id: d.trait_def_id,
                 nested: d.nested.into_iter().map(f).collect(),
             }),
-            VtableFnPointer(p) => VtableFnPointer(VtableFnPointerData {
-                fn_ty: p.fn_ty,
-                nested: p.nested.into_iter().map(f).collect(),
+            VtableClosure(c) => VtableClosure(VtableClosureData {
+                closure_def_id: c.closure_def_id,
+                substs: c.substs,
+                nested: c.nested.into_iter().map(f).collect(),
             }),
             VtableGenerator(c) => VtableGenerator(VtableGeneratorData {
                 generator_def_id: c.generator_def_id,
                 substs: c.substs,
                 nested: c.nested.into_iter().map(f).collect(),
             }),
-            VtableClosure(c) => VtableClosure(VtableClosureData {
-                closure_def_id: c.closure_def_id,
-                substs: c.substs,
-                nested: c.nested.into_iter().map(f).collect(),
-            })
+            VtableFnPointer(p) => VtableFnPointer(VtableFnPointerData {
+                fn_ty: p.fn_ty,
+                nested: p.nested.into_iter().map(f).collect(),
+            }),
+            VtableTraitAlias(d) => VtableTraitAlias(VtableTraitAliasData {
+                alias_def_id: d.alias_def_id,
+                substs: d.substs,
+                nested: d.nested.into_iter().map(f).collect(),
+            }),
         }
     }
 }

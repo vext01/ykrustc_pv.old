@@ -31,6 +31,7 @@ use rustc::middle::stability;
 use syntax::ast;
 use syntax::util::lev_distance::{lev_distance, find_best_match_for_name};
 use syntax_pos::{Span, symbol::Symbol};
+use std::iter;
 use std::mem;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -396,7 +397,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
             return_type,
             inherent_candidates: Vec::new(),
             extension_candidates: Vec::new(),
-            impl_dups: FxHashSet(),
+            impl_dups: FxHashSet::default(),
             steps: steps,
             static_candidates: Vec::new(),
             allow_similar_names: false,
@@ -627,7 +628,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
         // itself. Hence, a `&self` method will wind up with an
         // argument type like `&Trait`.
         let trait_ref = principal.with_self_ty(self.tcx, self_ty);
-        self.elaborate_bounds(&[trait_ref], |this, new_trait_ref, item| {
+        self.elaborate_bounds(iter::once(trait_ref), |this, new_trait_ref, item| {
             let new_trait_ref = this.erase_late_bound_regions(&new_trait_ref);
 
             let (xform_self_ty, xform_ret_ty) =
@@ -645,7 +646,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
                                                param_ty: ty::ParamTy) {
         // FIXME -- Do we want to commit to this behavior for param bounds?
 
-        let bounds: Vec<_> = self.param_env
+        let bounds = self.param_env
             .caller_bounds
             .iter()
             .filter_map(|predicate| {
@@ -667,10 +668,9 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
                     ty::Predicate::TypeOutlives(..) |
                     ty::Predicate::ConstEvaluatable(..) => None,
                 }
-            })
-            .collect();
+            });
 
-        self.elaborate_bounds(&bounds, |this, poly_trait_ref, item| {
+        self.elaborate_bounds(bounds, |this, poly_trait_ref, item| {
             let trait_ref = this.erase_late_bound_regions(&poly_trait_ref);
 
             let (xform_self_ty, xform_ret_ty) =
@@ -693,15 +693,16 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
 
     // Do a search through a list of bounds, using a callback to actually
     // create the candidates.
-    fn elaborate_bounds<F>(&mut self, bounds: &[ty::PolyTraitRef<'tcx>], mut mk_cand: F)
+    fn elaborate_bounds<F>(&mut self,
+                           bounds: impl Iterator<Item = ty::PolyTraitRef<'tcx>>,
+                           mut mk_cand: F)
         where F: for<'b> FnMut(&mut ProbeContext<'b, 'gcx, 'tcx>,
                                ty::PolyTraitRef<'tcx>,
                                ty::AssociatedItem)
     {
-        debug!("elaborate_bounds(bounds={:?})", bounds);
-
         let tcx = self.tcx;
         for bound_trait_ref in traits::transitive_bounds(tcx, bounds) {
+            debug!("elaborate_bounds(bound_trait_ref={:?})", bound_trait_ref);
             for item in self.impl_or_trait_item(bound_trait_ref.def_id()) {
                 if !self.has_applicable_self(&item) {
                     self.record_static_candidate(TraitSource(bound_trait_ref.def_id()));
@@ -718,7 +719,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
         if expr_id == ast::DUMMY_NODE_ID {
             return Ok(())
         }
-        let mut duplicates = FxHashSet();
+        let mut duplicates = FxHashSet::default();
         let expr_hir_id = self.tcx.hir.node_to_hir_id(expr_id);
         let opt_applicable_traits = self.tcx.in_scope_traits(expr_hir_id);
         if let Some(applicable_traits) = opt_applicable_traits {
@@ -735,7 +736,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
     }
 
     fn assemble_extension_candidates_for_all_traits(&mut self) -> Result<(), MethodError<'tcx>> {
-        let mut duplicates = FxHashSet();
+        let mut duplicates = FxHashSet::default();
         for trait_info in suggest::all_traits(self.tcx) {
             if duplicates.insert(trait_info.def_id) {
                 self.assemble_extension_candidates_for_trait(None, trait_info.def_id)?;
@@ -754,8 +755,11 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
                 self.probe(|_| {
                     let substs = self.fresh_substs_for_item(self.span, method.def_id);
                     let fty = fty.subst(self.tcx, substs);
-                    let (fty, _) = self.replace_late_bound_regions_with_fresh_var(
-                        self.span, infer::FnCall, &fty);
+                    let (fty, _) = self.replace_bound_vars_with_fresh_vars(
+                        self.span,
+                        infer::FnCall,
+                        &fty
+                    );
 
                     if let Some(self_ty) = self_ty {
                         if self.at(&ObligationCause::dummy(), self.param_env)
@@ -800,7 +804,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
     }
 
     fn candidate_method_names(&self) -> Vec<ast::Ident> {
-        let mut set = FxHashSet();
+        let mut set = FxHashSet::default();
         let mut names: Vec<_> = self.inherent_candidates
             .iter()
             .chain(&self.extension_candidates)
@@ -831,7 +835,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
         }
 
         let static_candidates = mem::replace(&mut self.static_candidates, vec![]);
-        let private_candidate = mem::replace(&mut self.private_candidate, None);
+        let private_candidate = self.private_candidate.take();
         let unsatisfied_predicates = mem::replace(&mut self.unsatisfied_predicates, vec![]);
 
         // things failed, so lets look at all traits, for diagnostic purposes now:
@@ -1157,7 +1161,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
 
                     // Convert the bounds into obligations.
                     let impl_obligations = traits::predicates_for_generics(
-                        cause.clone(), self.param_env, &impl_bounds);
+                        cause, self.param_env, &impl_bounds);
 
                     debug!("impl_obligations={:?}", impl_obligations);
                     impl_obligations.into_iter()
@@ -1175,7 +1179,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
                 TraitCandidate(trait_ref) => {
                     let predicate = trait_ref.to_predicate();
                     let obligation =
-                        traits::Obligation::new(cause.clone(), self.param_env, predicate);
+                        traits::Obligation::new(cause, self.param_env, predicate);
                     if !self.predicate_may_hold(&obligation) {
                         if self.probe(|_| self.select_trait_candidate(trait_ref).is_err()) {
                             // This candidate's primary obligation doesn't even
@@ -1373,7 +1377,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
                fn_sig,
                substs);
 
-        assert!(!substs.has_escaping_regions());
+        assert!(!substs.has_escaping_bound_vars());
 
         // It is possible for type parameters or early-bound lifetimes
         // to appear in the signature of `self`. The substitutions we
@@ -1436,7 +1440,7 @@ impl<'a, 'gcx, 'tcx> ProbeContext<'a, 'gcx, 'tcx> {
     ///
     /// 1. Because the numbers of the region variables would otherwise be fairly unique to this
     ///    particular method call, it winds up creating fewer types overall, which helps for memory
-    ///    usage. (Admittedly, this is a rather small effect, though measureable.)
+    ///    usage. (Admittedly, this is a rather small effect, though measurable.)
     ///
     /// 2. It makes it easier to deal with higher-ranked trait bounds, because we can replace any
     ///    late-bound regions with 'static. Otherwise, if we were going to replace late-bound

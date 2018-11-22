@@ -468,8 +468,9 @@ pub fn noop_fold_usize<T: Folder>(i: usize, _: &mut T) -> usize {
 
 pub fn noop_fold_path<T: Folder>(Path { segments, span }: Path, fld: &mut T) -> Path {
     Path {
-        segments: segments.move_map(|PathSegment { ident, args }| PathSegment {
+        segments: segments.move_map(|PathSegment { ident, id, args }| PathSegment {
             ident: fld.fold_ident(ident),
+            id: fld.new_id(id),
             args: args.map(|args| args.map(|args| fld.fold_generic_args(args))),
         }),
         span: fld.new_span(span)
@@ -944,7 +945,7 @@ pub fn noop_fold_item_kind<T: Folder>(i: ItemKind, folder: &mut T) -> ItemKind {
         ItemKind::Enum(enum_definition, generics) => {
             let generics = folder.fold_generics(generics);
             let variants = enum_definition.variants.move_map(|x| folder.fold_variant(x));
-            ItemKind::Enum(ast::EnumDef { variants: variants }, generics)
+            ItemKind::Enum(ast::EnumDef { variants }, generics)
         }
         ItemKind::Struct(struct_def, generics) => {
             let generics = folder.fold_generics(generics);
@@ -965,7 +966,7 @@ pub fn noop_fold_item_kind<T: Folder>(i: ItemKind, folder: &mut T) -> ItemKind {
             polarity,
             defaultness,
             folder.fold_generics(generics),
-            ifce.map(|trait_ref| folder.fold_trait_ref(trait_ref.clone())),
+            ifce.map(|trait_ref| folder.fold_trait_ref(trait_ref)),
             folder.fold_ty(ty),
             impl_items.move_flat_map(|item| folder.fold_impl_item(item)),
         ),
@@ -1234,6 +1235,7 @@ pub fn noop_fold_expr<T: Folder>(Expr {id, node, span, attrs}: Expr, folder: &mu
                 ExprKind::MethodCall(
                     PathSegment {
                         ident: folder.fold_ident(seg.ident),
+                        id: folder.new_id(seg.id),
                         args: seg.args.map(|args| {
                             args.map(|args| folder.fold_generic_args(args))
                         }),

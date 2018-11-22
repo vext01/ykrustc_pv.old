@@ -134,6 +134,7 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             "rustc_peek" => (1, vec![param(0)], param(0)),
             "init" => (1, Vec::new(), param(0)),
             "uninit" => (1, Vec::new(), param(0)),
+            "forget" => (1, vec![param(0)], tcx.mk_unit()),
             "transmute" => (2, vec![ param(0) ], param(1)),
             "move_val_init" => {
                 (1,
@@ -292,7 +293,8 @@ pub fn check_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
             "unchecked_div" | "unchecked_rem" | "exact_div" =>
                 (1, vec![param(0), param(0)], param(0)),
-            "unchecked_shl" | "unchecked_shr" =>
+            "unchecked_shl" | "unchecked_shr" |
+            "rotate_left" | "rotate_right" =>
                 (1, vec![param(0), param(0)], param(0)),
 
             "overflowing_add" | "overflowing_sub" | "overflowing_mul" =>
@@ -416,10 +418,10 @@ pub fn check_platform_intrinsic_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                         return
                     }
 
-                    let mut structural_to_nomimal = FxHashMap();
+                    let mut structural_to_nomimal = FxHashMap::default();
 
                     let sig = tcx.fn_sig(def_id);
-                    let sig = sig.no_late_bound_regions().unwrap();
+                    let sig = sig.no_bound_vars().unwrap();
                     if intr.inputs.len() != sig.inputs().len() {
                         span_err!(tcx.sess, it.span, E0444,
                                   "platform-specific intrinsic has invalid number of \

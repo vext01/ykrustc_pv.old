@@ -9,6 +9,7 @@
 // except according to those terms.
 
 #![feature(const_transmute)]
+#![allow(const_err)] // make sure we cannot allow away the errors tested here
 
 use std::mem;
 
@@ -16,13 +17,13 @@ use std::mem;
 enum Bar {}
 
 const BAD_BAD_BAD: Bar = unsafe { mem::transmute(()) };
-//~^ ERROR this constant likely exhibits undefined behavior
+//~^ ERROR it is undefined behavior to use this value
 
 const BAD_BAD_REF: &Bar = unsafe { mem::transmute(1usize) };
-//~^ ERROR this constant likely exhibits undefined behavior
+//~^ ERROR it is undefined behavior to use this value
 
 const BAD_BAD_ARRAY: [Bar; 1] = unsafe { mem::transmute(()) };
-//~^ ERROR this constant likely exhibits undefined behavior
+//~^ ERROR it is undefined behavior to use this value
 
 fn main() {
 }

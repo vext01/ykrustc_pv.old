@@ -124,6 +124,7 @@
 //! ```
 
 #![stable(feature = "rust1", since = "1.0.0")]
+#![allow(deprecated)] // for mpsc_select
 
 // A description of how Rust's channel implementation works
 //
@@ -931,7 +932,7 @@ impl<T> fmt::Debug for Sender<T> {
 
 impl<T> SyncSender<T> {
     fn new(inner: Arc<sync::Packet<T>>) -> SyncSender<T> {
-        SyncSender { inner: inner }
+        SyncSender { inner }
     }
 
     /// Sends a value on this synchronous channel.

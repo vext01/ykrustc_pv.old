@@ -67,7 +67,7 @@ RUN ./build-gcc.sh
 COPY dist-x86_64-linux/build-python.sh /tmp/
 RUN ./build-python.sh
 
-# Now build LLVM+Clang 6, afterwards configuring further compilations to use the
+# Now build LLVM+Clang 7, afterwards configuring further compilations to use the
 # clang/clang++ compilers.
 COPY dist-x86_64-linux/build-clang.sh /tmp/
 RUN ./build-clang.sh
@@ -83,6 +83,11 @@ RUN ./build-git.sh
 COPY dist-x86_64-linux/build-headers.sh /tmp/
 RUN ./build-headers.sh
 
+# OpenSSL requires a more recent version of perl
+# with so we install newer ones here
+COPY dist-x86_64-linux/build-perl.sh /tmp/
+RUN ./build-perl.sh
+
 COPY scripts/sccache.sh /scripts/
 RUN sh /scripts/sccache.sh
 
@@ -96,7 +101,8 @@ ENV RUST_CONFIGURE_ARGS \
       --set target.x86_64-unknown-linux-gnu.linker=clang \
       --set target.x86_64-unknown-linux-gnu.ar=/rustroot/bin/llvm-ar \
       --set target.x86_64-unknown-linux-gnu.ranlib=/rustroot/bin/llvm-ranlib \
-      --set llvm.thin-lto=true
+      --set llvm.thin-lto=true \
+      --set rust.jemalloc
 ENV SCRIPT python2.7 ../x.py dist --host $HOSTS --target $HOSTS
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang
 

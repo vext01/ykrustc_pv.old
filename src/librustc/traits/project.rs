@@ -19,10 +19,7 @@ use super::PredicateObligation;
 use super::Selection;
 use super::SelectionContext;
 use super::SelectionError;
-use super::VtableClosureData;
-use super::VtableGeneratorData;
-use super::VtableFnPointerData;
-use super::VtableImplData;
+use super::{VtableImplData, VtableClosureData, VtableGeneratorData, VtableFnPointerData};
 use super::util;
 
 use hir::def_id::DefId;
@@ -269,7 +266,7 @@ fn project_and_unify_type<'cx, 'gcx, 'tcx>(
         },
         Err(err) => {
             debug!("project_and_unify_type: equating types encountered error {:?}", err);
-            Err(MismatchedProjectionTypes { err: err })
+            Err(MismatchedProjectionTypes { err })
         }
     }
 }
@@ -340,7 +337,7 @@ impl<'a, 'b, 'gcx, 'tcx> AssociatedTypeNormalizer<'a, 'b, 'gcx, 'tcx> {
         let value = self.selcx.infcx().resolve_type_vars_if_possible(value);
 
         if !value.has_projections() {
-            value.clone()
+            value
         } else {
             value.fold_with(self)
         }
@@ -366,7 +363,7 @@ impl<'a, 'b, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for AssociatedTypeNormalizer<'a,
 
         let ty = ty.super_fold_with(self);
         match ty.sty {
-            ty::Opaque(def_id, substs) if !substs.has_escaping_regions() => { // (*)
+            ty::Opaque(def_id, substs) if !substs.has_escaping_bound_vars() => { // (*)
                 // Only normalize `impl Trait` after type-checking, usually in codegen.
                 match self.param_env.reveal {
                     Reveal::UserFacing => ty,
@@ -393,7 +390,7 @@ impl<'a, 'b, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for AssociatedTypeNormalizer<'a,
                 }
             }
 
-            ty::Projection(ref data) if !data.has_escaping_regions() => { // (*)
+            ty::Projection(ref data) if !data.has_escaping_bound_vars() => { // (*)
 
                 // (*) This is kind of hacky -- we need to be able to
                 // handle normalization within binders because
@@ -594,7 +591,7 @@ fn opt_normalize_projection_type<'a, 'b, 'gcx, 'tcx>(
 
             // But for now, let's classify this as an overflow:
             let recursion_limit = *selcx.tcx().sess.recursion_limit.get();
-            let obligation = Obligation::with_depth(cause.clone(),
+            let obligation = Obligation::with_depth(cause,
                                                     recursion_limit,
                                                     param_env,
                                                     projection_ty);
@@ -888,7 +885,7 @@ fn project_type<'cx, 'gcx, 'tcx>(
     let recursion_limit = *selcx.tcx().sess.recursion_limit.get();
     if obligation.recursion_depth >= recursion_limit {
         debug!("project: overflow!");
-        selcx.infcx().report_overflow_error(&obligation, true);
+        return Err(ProjectionTyError::TraitSelectionError(SelectionError::Overflow));
     }
 
     let obligation_trait_ref = &obligation.predicate.trait_ref(selcx.tcx());
@@ -1073,7 +1070,8 @@ fn assemble_candidates_from_impls<'cx, 'gcx, 'tcx>(
             super::VtableClosure(_) |
             super::VtableGenerator(_) |
             super::VtableFnPointer(_) |
-            super::VtableObject(_) => {
+            super::VtableObject(_) |
+            super::VtableTraitAlias(_) => {
                 debug!("assemble_candidates_from_impls: vtable={:?}",
                        vtable);
                 true
@@ -1235,7 +1233,8 @@ fn confirm_select_candidate<'cx, 'gcx, 'tcx>(
             confirm_object_candidate(selcx, obligation, obligation_trait_ref),
         super::VtableAutoImpl(..) |
         super::VtableParam(..) |
-        super::VtableBuiltin(..) =>
+        super::VtableBuiltin(..) |
+        super::VtableTraitAlias(..) =>
             // we don't create Select candidates with this kind of resolution
             span_bug!(
                 obligation.cause.span,
@@ -1486,7 +1485,7 @@ fn confirm_impl_candidate<'cx, 'gcx, 'tcx>(
     impl_vtable: VtableImplData<'tcx, PredicateObligation<'tcx>>)
     -> Progress<'tcx>
 {
-    let VtableImplData { substs, nested, impl_def_id } = impl_vtable;
+    let VtableImplData { impl_def_id, substs, nested } = impl_vtable;
 
     let tcx = selcx.tcx();
     let param_env = obligation.param_env;
@@ -1601,6 +1600,7 @@ fn assoc_ty_def<'cx, 'gcx, 'tcx>(
 /// FIXME: we probably also want some sort of cross-infcx cache here to
 /// reduce the amount of duplication. Let's see what we get with the Chalk
 /// reforms.
+#[derive(Default)]
 pub struct ProjectionCache<'tcx> {
     map: SnapshotMap<ProjectionCacheKey<'tcx>, ProjectionCacheEntry<'tcx>>,
 }
@@ -1618,7 +1618,7 @@ impl<'cx, 'gcx, 'tcx> ProjectionCacheKey<'tcx> {
         let infcx = selcx.infcx();
         // We don't do cross-snapshot caching of obligations with escaping regions,
         // so there's no cache key to use
-        predicate.no_late_bound_regions()
+        predicate.no_bound_vars()
             .map(|predicate| ProjectionCacheKey {
                 // We don't attempt to match up with a specific type-variable state
                 // from a specific call to `opt_normalize_projection_type` - if
@@ -1643,12 +1643,6 @@ pub struct ProjectionCacheSnapshot {
 }
 
 impl<'tcx> ProjectionCache<'tcx> {
-    pub fn new() -> Self {
-        ProjectionCache {
-            map: SnapshotMap::new()
-        }
-    }
-
     pub fn clear(&mut self) {
         self.map.clear();
     }

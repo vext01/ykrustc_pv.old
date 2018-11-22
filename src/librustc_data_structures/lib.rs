@@ -21,7 +21,6 @@
       html_root_url = "https://doc.rust-lang.org/nightly/")]
 
 #![feature(in_band_lifetimes)]
-#![feature(impl_header_lifetime_elision)]
 #![feature(unboxed_closures)]
 #![feature(fn_traits)]
 #![feature(unsize)]
@@ -58,6 +57,7 @@ extern crate rustc_cratesio_shim;
 
 pub use rustc_serialize::hex::ToHex;
 
+pub mod macros;
 pub mod svh;
 pub mod base_n;
 pub mod bit_set;

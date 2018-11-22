@@ -233,7 +233,7 @@ pub use self::local::{LocalKey, AccessError};
 ///
 /// You may want to use [`spawn`] instead of [`thread::spawn`], when you want
 /// to recover from a failure to launch a thread, indeed the free function will
-/// panick where the `Builder` method will return a [`io::Result`].
+/// panic where the `Builder` method will return a [`io::Result`].
 ///
 /// # Examples
 ///
@@ -387,6 +387,74 @@ impl Builder {
     pub fn spawn<F, T>(self, f: F) -> io::Result<JoinHandle<T>> where
         F: FnOnce() -> T, F: Send + 'static, T: Send + 'static
     {
+        unsafe { self.spawn_unchecked(f) }
+    }
+
+    /// Spawns a new thread without any lifetime restrictions by taking ownership
+    /// of the `Builder`, and returns an [`io::Result`] to its [`JoinHandle`].
+    ///
+    /// The spawned thread may outlive the caller (unless the caller thread
+    /// is the main thread; the whole process is terminated when the main
+    /// thread finishes). The join handle can be used to block on
+    /// termination of the child thread, including recovering its panics.
+    ///
+    /// This method is identical to [`thread::Builder::spawn`][`Builder::spawn`],
+    /// except for the relaxed lifetime bounds, which render it unsafe.
+    /// For a more complete documentation see [`thread::spawn`][`spawn`].
+    ///
+    /// # Errors
+    ///
+    /// Unlike the [`spawn`] free function, this method yields an
+    /// [`io::Result`] to capture any failure to create the thread at
+    /// the OS level.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a thread name was set and it contained null bytes.
+    ///
+    /// # Safety
+    ///
+    /// The caller has to ensure that no references in the supplied thread closure
+    /// or its return type can outlive the spawned thread's lifetime. This can be
+    /// guaranteed in two ways:
+    ///
+    /// - ensure that [`join`][`JoinHandle::join`] is called before any referenced
+    /// data is dropped
+    /// - use only types with `'static` lifetime bounds, i.e. those with no or only
+    /// `'static` references (both [`thread::Builder::spawn`][`Builder::spawn`]
+    /// and [`thread::spawn`][`spawn`] enforce this property statically)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(thread_spawn_unchecked)]
+    /// use std::thread;
+    ///
+    /// let builder = thread::Builder::new();
+    ///
+    /// let x = 1;
+    /// let thread_x = &x;
+    ///
+    /// let handler = unsafe {
+    ///     builder.spawn_unchecked(move || {
+    ///         println!("x = {}", *thread_x);
+    ///     }).unwrap()
+    /// };
+    ///
+    /// // caller has to ensure `join()` is called, otherwise
+    /// // it is possible to access freed memory if `x` gets
+    /// // dropped before the thread closure is executed!
+    /// handler.join().unwrap();
+    /// ```
+    ///
+    /// [`spawn`]: ../../std/thread/fn.spawn.html
+    /// [`Builder::spawn`]: ../../std/thread/struct.Builder.html#method.spawn
+    /// [`io::Result`]: ../../std/io/type.Result.html
+    /// [`JoinHandle`]: ../../std/thread/struct.JoinHandle.html
+    #[unstable(feature = "thread_spawn_unchecked", issue = "55132")]
+    pub unsafe fn spawn_unchecked<F, T>(self, f: F) -> io::Result<JoinHandle<T>> where
+        F: FnOnce() -> T, F: Send, T: Send
+    {
         let Builder { name, stack_size } = self;
 
         let stack_size = stack_size.unwrap_or_else(thread::min_stack);
@@ -402,22 +470,19 @@ impl Builder {
             if let Some(name) = their_thread.cname() {
                 imp::Thread::set_name(name);
             }
-            unsafe {
-                thread_info::set(imp::guard::current(), their_thread);
-                #[cfg(feature = "backtrace")]
-                let try_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                    ::sys_common::backtrace::__rust_begin_short_backtrace(f)
-                }));
-                #[cfg(not(feature = "backtrace"))]
-                let try_result = panic::catch_unwind(panic::AssertUnwindSafe(f));
-                *their_packet.get() = Some(try_result);
-            }
+
+            thread_info::set(imp::guard::current(), their_thread);
+            #[cfg(feature = "backtrace")]
+            let try_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                ::sys_common::backtrace::__rust_begin_short_backtrace(f)
+            }));
+            #[cfg(not(feature = "backtrace"))]
+            let try_result = panic::catch_unwind(panic::AssertUnwindSafe(f));
+            *their_packet.get() = Some(try_result);
         };
 
         Ok(JoinHandle(JoinInner {
-            native: unsafe {
-                Some(imp::Thread::new(stack_size, Box::new(main))?)
-            },
+            native: Some(imp::Thread::new(stack_size, Box::new(main))?),
             thread: my_thread,
             packet: Packet(my_packet),
         }))
@@ -650,15 +715,17 @@ pub fn panicking() -> bool {
     panicking::panicking()
 }
 
-/// Puts the current thread to sleep for the specified amount of time.
+/// Puts the current thread to sleep for at least the specified amount of time.
 ///
 /// The thread may sleep longer than the duration specified due to scheduling
-/// specifics or platform-dependent functionality.
+/// specifics or platform-dependent functionality. It will never sleep less.
 ///
 /// # Platform-specific behavior
 ///
-/// On Unix platforms this function will not return early due to a
-/// signal being received or a spurious wakeup.
+/// On Unix platforms, the underlying syscall may be interrupted by a
+/// spurious wakeup or signal handler. To ensure the sleep occurs for at least
+/// the specified duration, this function may invoke that system call multiple
+/// times.
 ///
 /// # Examples
 ///
@@ -674,17 +741,19 @@ pub fn sleep_ms(ms: u32) {
     sleep(Duration::from_millis(ms as u64))
 }
 
-/// Puts the current thread to sleep for the specified amount of time.
+/// Puts the current thread to sleep for at least the specified amount of time.
 ///
 /// The thread may sleep longer than the duration specified due to scheduling
-/// specifics or platform-dependent functionality.
+/// specifics or platform-dependent functionality. It will never sleep less.
 ///
 /// # Platform-specific behavior
 ///
-/// On Unix platforms this function will not return early due to a
-/// signal being received or a spurious wakeup. Platforms which do not support
-/// nanosecond precision for sleeping will have `dur` rounded up to the nearest
-/// granularity of time they can sleep for.
+/// On Unix platforms, the underlying syscall may be interrupted by a
+/// spurious wakeup or signal handler. To ensure the sleep occurs for at least
+/// the specified duration, this function may invoke that system call multiple
+/// times.
+/// Platforms which do not support nanosecond precision for sleeping will
+/// have `dur` rounded up to the nearest granularity of time they can sleep for.
 ///
 /// # Examples
 ///
@@ -1080,8 +1149,18 @@ impl Thread {
             _ => panic!("inconsistent state in unpark"),
         }
 
-        // Coordinate wakeup through the mutex and a condvar notification
-        let _lock = self.inner.lock.lock().unwrap();
+        // There is a period between when the parked thread sets `state` to
+        // `PARKED` (or last checked `state` in the case of a spurious wake
+        // up) and when it actually waits on `cvar`. If we were to notify
+        // during this period it would be ignored and then when the parked
+        // thread went to sleep it would never wake up. Fortunately, it has
+        // `lock` locked at this stage so we can acquire `lock` to wait until
+        // it is ready to receive the notification.
+        //
+        // Releasing `lock` before the call to `notify_one` means that when the
+        // parked thread wakes it doesn't get woken only to have to wait for us
+        // to release `lock`.
+        drop(self.inner.lock.lock().unwrap());
         self.inner.cvar.notify_one()
     }
 

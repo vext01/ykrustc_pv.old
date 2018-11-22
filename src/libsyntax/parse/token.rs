@@ -79,14 +79,14 @@ pub enum Lit {
 }
 
 impl Lit {
-    crate fn short_name(&self) -> &'static str {
+    crate fn literal_name(&self) -> &'static str {
         match *self {
-            Byte(_) => "byte",
-            Char(_) => "char",
-            Integer(_) => "integer",
-            Float(_) => "float",
-            Str_(_) | StrRaw(..) => "string",
-            ByteStr(_) | ByteStrRaw(..) => "byte string"
+            Byte(_) => "byte literal",
+            Char(_) => "char literal",
+            Integer(_) => "integer literal",
+            Float(_) => "float literal",
+            Str_(_) | StrRaw(..) => "string literal",
+            ByteStr(_) | ByteStrRaw(..) => "byte string literal"
         }
     }
 
@@ -570,8 +570,9 @@ impl Token {
         //
         // Instead the "probably equal" check here is "does each token
         // recursively have the same discriminant?" We basically don't look at
-        // the token values here and assume that such fine grained modifications
-        // of token streams doesn't happen.
+        // the token values here and assume that such fine grained token stream
+        // modifications, including adding/removing typically non-semantic
+        // tokens such as extra braces and commas, don't happen.
         if let Some(tokens) = tokens {
             if tokens.probably_equal_for_proc_macro(&tokens_for_real) {
                 return tokens

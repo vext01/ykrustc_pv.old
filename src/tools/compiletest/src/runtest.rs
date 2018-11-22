@@ -11,8 +11,8 @@
 use common::CompareMode;
 use common::{expected_output_path, UI_EXTENSIONS, UI_FIXED, UI_STDERR, UI_STDOUT};
 use common::{output_base_dir, output_base_name, output_testname_unique};
-use common::{Codegen, CodegenUnits, DebugInfoGdb, DebugInfoLldb, Rustdoc};
-use common::{CompileFail, ParseFail, Pretty, RunFail, RunPass, RunPassValgrind};
+use common::{Codegen, CodegenUnits, DebugInfoBoth, DebugInfoGdb, DebugInfoLldb, Rustdoc};
+use common::{CompileFail, Pretty, RunFail, RunPass, RunPassValgrind};
 use common::{Config, TestPaths};
 use common::{Incremental, MirOpt, RunMake, Ui};
 use diff;
@@ -225,19 +225,20 @@ pub fn run(config: Config, testpaths: &TestPaths, revision: Option<&str>) {
 pub fn compute_stamp_hash(config: &Config) -> String {
     let mut hash = DefaultHasher::new();
     config.stage_id.hash(&mut hash);
-    match config.mode {
-        DebugInfoGdb => match config.gdb {
+
+    if config.mode == DebugInfoGdb || config.mode == DebugInfoBoth {
+        match config.gdb {
             None => env::var_os("PATH").hash(&mut hash),
             Some(ref s) if s.is_empty() => env::var_os("PATH").hash(&mut hash),
             Some(ref s) => s.hash(&mut hash),
-        },
-        DebugInfoLldb => {
-            env::var_os("PATH").hash(&mut hash);
-            env::var_os("PYTHONPATH").hash(&mut hash);
-        },
+        };
+    }
 
-        _ => {},
-    };
+    if config.mode == DebugInfoLldb || config.mode == DebugInfoBoth {
+        env::var_os("PATH").hash(&mut hash);
+        env::var_os("PYTHONPATH").hash(&mut hash);
+    }
+
     format!("{:x}", hash.finish())
 }
 
@@ -264,10 +265,14 @@ impl<'test> TestCx<'test> {
     /// revisions, exactly once, with revision == None).
     fn run_revision(&self) {
         match self.config.mode {
-            CompileFail | ParseFail => self.run_cfail_test(),
+            CompileFail => self.run_cfail_test(),
             RunFail => self.run_rfail_test(),
             RunPassValgrind => self.run_valgrind_test(),
             Pretty => self.run_pretty_test(),
+            DebugInfoBoth => {
+                self.run_debuginfo_gdb_test();
+                self.run_debuginfo_lldb_test();
+            },
             DebugInfoGdb => self.run_debuginfo_gdb_test(),
             DebugInfoLldb => self.run_debuginfo_lldb_test(),
             Codegen => self.run_codegen_test(),
@@ -291,7 +296,7 @@ impl<'test> TestCx<'test> {
 
     fn should_compile_successfully(&self) -> bool {
         match self.config.mode {
-            ParseFail | CompileFail => self.props.compile_pass,
+            CompileFail => self.props.compile_pass,
             RunPass => true,
             Ui => self.props.compile_pass,
             Incremental => {
@@ -640,6 +645,7 @@ impl<'test> TestCx<'test> {
         let config = Config {
             target_rustcflags: self.cleanup_debug_info_options(&self.config.target_rustcflags),
             host_rustcflags: self.cleanup_debug_info_options(&self.config.host_rustcflags),
+            mode: DebugInfoGdb,
             ..self.config.clone()
         };
 
@@ -910,6 +916,7 @@ impl<'test> TestCx<'test> {
         let config = Config {
             target_rustcflags: self.cleanup_debug_info_options(&self.config.target_rustcflags),
             host_rustcflags: self.cleanup_debug_info_options(&self.config.host_rustcflags),
+            mode: DebugInfoLldb,
             ..self.config.clone()
         };
 
@@ -1734,7 +1741,7 @@ impl<'test> TestCx<'test> {
         }
 
         match self.config.mode {
-            CompileFail | ParseFail | Incremental => {
+            CompileFail | Incremental => {
                 // If we are extracting and matching errors in the new
                 // fashion, then you want JSON mode. Old-skool error
                 // patterns still match the raw compiler output.
@@ -1774,7 +1781,7 @@ impl<'test> TestCx<'test> {
 
                 rustc.arg(dir_opt);
             }
-            RunFail | RunPassValgrind | Pretty | DebugInfoGdb | DebugInfoLldb
+            RunFail | RunPassValgrind | Pretty | DebugInfoBoth | DebugInfoGdb | DebugInfoLldb
             | Codegen | Rustdoc | RunMake | CodegenUnits => {
                 // do not use JSON output
             }
@@ -1863,11 +1870,9 @@ impl<'test> TestCx<'test> {
             } else {
                 self.fatal("no NodeJS binary found (--nodejs)");
             }
-        }
-
-        // If this is otherwise wasm , then run tests under nodejs with our
+        // If this is otherwise wasm, then run tests under nodejs with our
         // shim
-        if self.config.target.contains("wasm32") {
+        } else if self.config.target.contains("wasm32") {
             if let Some(ref p) = self.config.nodejs {
                 args.push(p.clone());
             } else {

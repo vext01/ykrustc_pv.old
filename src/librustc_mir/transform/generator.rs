@@ -64,6 +64,7 @@ use rustc::hir::def_id::DefId;
 use rustc::mir::*;
 use rustc::mir::visit::{PlaceContext, Visitor, MutVisitor};
 use rustc::ty::{self, TyCtxt, AdtDef, Ty};
+use rustc::ty::layout::VariantIdx;
 use rustc::ty::subst::Substs;
 use util::dump_mir;
 use util::liveness::{self, IdentityMap};
@@ -158,7 +159,7 @@ struct TransformVisitor<'a, 'tcx: 'a> {
 
 impl<'a, 'tcx> TransformVisitor<'a, 'tcx> {
     // Make a GeneratorState rvalue
-    fn make_state(&self, idx: usize, val: Operand<'tcx>) -> Rvalue<'tcx> {
+    fn make_state(&self, idx: VariantIdx, val: Operand<'tcx>) -> Rvalue<'tcx> {
         let adt = AggregateKind::Adt(self.state_adt_ref, idx, self.state_substs, None, None);
         Rvalue::Aggregate(box adt, vec![val])
     }
@@ -229,11 +230,11 @@ impl<'a, 'tcx> MutVisitor<'tcx> for TransformVisitor<'a, 'tcx> {
         });
 
         let ret_val = match data.terminator().kind {
-            TerminatorKind::Return => Some((1,
+            TerminatorKind::Return => Some((VariantIdx::new(1),
                 None,
                 Operand::Move(Place::Local(self.new_ret_local)),
                 None)),
-            TerminatorKind::Yield { ref value, resume, drop } => Some((0,
+            TerminatorKind::Yield { ref value, resume, drop } => Some((VariantIdx::new(0),
                 Some(resume),
                 value.clone(),
                 drop)),
@@ -303,7 +304,7 @@ fn replace_result_variable<'tcx>(
     let new_ret = LocalDecl {
         mutability: Mutability::Mut,
         ty: ret_ty,
-        user_ty: None,
+        user_ty: UserTypeProjections::none(),
         name: None,
         source_info,
         visibility_scope: source_info.scope,
@@ -658,7 +659,7 @@ fn create_generator_drop_shim<'a, 'tcx>(
     mir.local_decls[RETURN_PLACE] = LocalDecl {
         mutability: Mutability::Mut,
         ty: tcx.mk_unit(),
-        user_ty: None,
+        user_ty: UserTypeProjections::none(),
         name: None,
         source_info,
         visibility_scope: source_info.scope,
@@ -676,7 +677,7 @@ fn create_generator_drop_shim<'a, 'tcx>(
             ty: gen_ty,
             mutbl: hir::Mutability::MutMutable,
         }),
-        user_ty: None,
+        user_ty: UserTypeProjections::none(),
         name: None,
         source_info,
         visibility_scope: source_info.scope,
@@ -684,6 +685,13 @@ fn create_generator_drop_shim<'a, 'tcx>(
         is_block_tail: None,
         is_user_variable: None,
     };
+    if tcx.sess.opts.debugging_opts.mir_emit_retag {
+        // Alias tracking must know we changed the type
+        mir.basic_blocks_mut()[START_BLOCK].statements.insert(0, Statement {
+            source_info,
+            kind: StatementKind::EscapeToRaw(Operand::Copy(Place::Local(self_arg()))),
+        })
+    }
 
     no_landing_pads(tcx, &mut mir);
 

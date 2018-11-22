@@ -95,6 +95,7 @@ pub struct Config {
     // rust codegen options
     pub rust_optimize: bool,
     pub rust_codegen_units: Option<u32>,
+    pub rust_codegen_units_std: Option<u32>,
     pub rust_debug_assertions: bool,
     pub rust_debuginfo: bool,
     pub rust_debuginfo_lines: bool,
@@ -115,6 +116,7 @@ pub struct Config {
     pub hosts: Vec<Interned<String>>,
     pub targets: Vec<Interned<String>>,
     pub local_rebuild: bool,
+    pub jemalloc: bool,
 
     // dist misc
     pub dist_sign_folder: Option<PathBuf>,
@@ -122,8 +124,6 @@ pub struct Config {
     pub dist_gpg_password_file: Option<PathBuf>,
 
     // libstd features
-    pub debug_jemalloc: bool,
-    pub use_jemalloc: bool,
     pub backtrace: bool, // support for RUST_BACKTRACE
     pub wasm_syscall: bool,
 
@@ -149,7 +149,7 @@ pub struct Config {
     pub nodejs: Option<PathBuf>,
     pub gdb: Option<PathBuf>,
     pub python: Option<PathBuf>,
-    pub openssl_static: bool,
+    pub cargo_native_static: bool,
     pub configure_args: Vec<String>,
 
     // These are either the stage0 downloaded binaries or the locally installed ones.
@@ -165,7 +165,6 @@ pub struct Target {
     pub llvm_config: Option<PathBuf>,
     /// Some(path to FileCheck) if one was specified.
     pub llvm_filecheck: Option<PathBuf>,
-    pub jemalloc: Option<PathBuf>,
     pub cc: Option<PathBuf>,
     pub cxx: Option<PathBuf>,
     pub ar: Option<PathBuf>,
@@ -221,7 +220,7 @@ struct Build {
     verbose: Option<usize>,
     sanitizers: Option<bool>,
     profiler: Option<bool>,
-    openssl_static: Option<bool>,
+    cargo_native_static: Option<bool>,
     configure_args: Option<Vec<String>>,
     local_rebuild: Option<bool>,
     print_step_timings: Option<bool>,
@@ -262,7 +261,7 @@ struct Llvm {
     link_jobs: Option<u32>,
     link_shared: Option<bool>,
     version_suffix: Option<String>,
-    clang_cl: Option<String>
+    clang_cl: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -294,14 +293,13 @@ impl Default for StringOrBool {
 struct Rust {
     optimize: Option<bool>,
     codegen_units: Option<u32>,
+    codegen_units_std: Option<u32>,
     debug_assertions: Option<bool>,
     debuginfo: Option<bool>,
     debuginfo_lines: Option<bool>,
     debuginfo_only_std: Option<bool>,
     debuginfo_tools: Option<bool>,
     experimental_parallel_queries: Option<bool>,
-    debug_jemalloc: Option<bool>,
-    use_jemalloc: Option<bool>,
     backtrace: Option<bool>,
     default_linker: Option<String>,
     channel: Option<String>,
@@ -327,6 +325,7 @@ struct Rust {
     backtrace_on_ice: Option<bool>,
     verify_llvm_ir: Option<bool>,
     remap_debuginfo: Option<bool>,
+    jemalloc: Option<bool>,
 }
 
 /// TOML representation of how each build target is configured.
@@ -335,7 +334,6 @@ struct Rust {
 struct TomlTarget {
     llvm_config: Option<String>,
     llvm_filecheck: Option<String>,
-    jemalloc: Option<String>,
     cc: Option<String>,
     cxx: Option<String>,
     ar: Option<String>,
@@ -361,7 +359,6 @@ impl Config {
         config.llvm_enabled = true;
         config.llvm_optimize = true;
         config.llvm_version_check = true;
-        config.use_jemalloc = true;
         config.backtrace = true;
         config.rust_optimize = true;
         config.rust_optimize_tests = true;
@@ -430,7 +427,7 @@ impl Config {
             }
         }).unwrap_or_else(|| TomlConfig::default());
 
-        let build = toml.build.clone().unwrap_or(Build::default());
+        let build = toml.build.clone().unwrap_or_default();
         // set by bootstrap.py
         config.hosts.push(config.build.clone());
         for host in build.host.iter() {
@@ -474,7 +471,7 @@ impl Config {
         set(&mut config.verbose, build.verbose);
         set(&mut config.sanitizers, build.sanitizers);
         set(&mut config.profiler, build.profiler);
-        set(&mut config.openssl_static, build.openssl_static);
+        set(&mut config.cargo_native_static, build.cargo_native_static);
         set(&mut config.configure_args, build.configure_args);
         set(&mut config.local_rebuild, build.local_rebuild);
         set(&mut config.print_step_timings, build.print_step_timings);
@@ -497,7 +494,6 @@ impl Config {
         let mut debuginfo_only_std = None;
         let mut debuginfo_tools = None;
         let mut debug = None;
-        let mut debug_jemalloc = None;
         let mut debuginfo = None;
         let mut debug_assertions = None;
         let mut optimize = None;
@@ -524,7 +520,7 @@ impl Config {
             set(&mut config.llvm_link_shared, llvm.link_shared);
             config.llvm_targets = llvm.targets.clone();
             config.llvm_experimental_targets = llvm.experimental_targets.clone()
-                .unwrap_or("WebAssembly;RISCV".to_string());
+                .unwrap_or_else(|| "WebAssembly;RISCV".to_string());
             config.llvm_link_jobs = llvm.link_jobs;
             config.llvm_version_suffix = llvm.version_suffix.clone();
             config.llvm_clang_cl = llvm.clang_cl.clone();
@@ -539,12 +535,11 @@ impl Config {
             debuginfo_tools = rust.debuginfo_tools;
             optimize = rust.optimize;
             ignore_git = rust.ignore_git;
-            debug_jemalloc = rust.debug_jemalloc;
             set(&mut config.rust_optimize_tests, rust.optimize_tests);
             set(&mut config.rust_debuginfo_tests, rust.debuginfo_tests);
             set(&mut config.codegen_tests, rust.codegen_tests);
             set(&mut config.rust_rpath, rust.rpath);
-            set(&mut config.use_jemalloc, rust.use_jemalloc);
+            set(&mut config.jemalloc, rust.jemalloc);
             set(&mut config.backtrace, rust.backtrace);
             set(&mut config.channel, rust.channel.clone());
             set(&mut config.rust_dist_src, rust.dist_src);
@@ -580,6 +575,8 @@ impl Config {
                 Some(n) => config.rust_codegen_units = Some(n),
                 None => {}
             }
+
+            config.rust_codegen_units_std = rust.codegen_units_std;
         }
 
         if let Some(ref t) = toml.target {
@@ -591,9 +588,6 @@ impl Config {
                 }
                 if let Some(ref s) = cfg.llvm_filecheck {
                     target.llvm_filecheck = Some(config.src.join(s));
-                }
-                if let Some(ref s) = cfg.jemalloc {
-                    target.jemalloc = Some(config.src.join(s));
                 }
                 if let Some(ref s) = cfg.android_ndk {
                     target.ndk = Some(config.src.join(s));
@@ -640,7 +634,6 @@ impl Config {
         config.rust_debuginfo_tools = debuginfo_tools.unwrap_or(false);
 
         let default = debug == Some(true);
-        config.debug_jemalloc = debug_jemalloc.unwrap_or(default);
         config.rust_debuginfo = debuginfo.unwrap_or(default);
         config.rust_debug_assertions = debug_assertions.unwrap_or(default);
 

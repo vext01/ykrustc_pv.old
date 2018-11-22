@@ -9,7 +9,7 @@
 // except according to those terms.
 
 //! Some facilities for tracking how codegen-units are reused during incremental
-//! compilition. This is used for incremental compiliation tests and debug
+//! compilation. This is used for incremental compilation tests and debug
 //! output.
 
 use session::Session;
@@ -51,8 +51,8 @@ pub struct CguReuseTracker {
 impl CguReuseTracker {
     pub fn new() -> CguReuseTracker {
         let data = TrackerData {
-            actual_reuse: FxHashMap(),
-            expected_reuse: FxHashMap(),
+            actual_reuse: Default::default(),
+            expected_reuse: Default::default(),
         };
 
         CguReuseTracker {

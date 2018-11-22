@@ -16,7 +16,7 @@
 
 /// The entry point for panic of Rust threads.
 ///
-/// This allows a program to to terminate immediately and provide feedback
+/// This allows a program to terminate immediately and provide feedback
 /// to the caller of the program. `panic!` should be used when a program reaches
 /// an unrecoverable problem.
 ///
@@ -399,6 +399,8 @@ macro_rules! await {
 /// For more information about select, see the `std::sync::mpsc::Select` structure.
 #[macro_export]
 #[unstable(feature = "mpsc_select", issue = "27800")]
+#[rustc_deprecated(since = "1.32.0",
+                   reason = "channel selection will be removed in a future release")]
 macro_rules! select {
     (
         $($name:pat = $rx:ident.$meth:ident() => $code:expr),+

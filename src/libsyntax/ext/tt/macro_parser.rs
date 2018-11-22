@@ -107,12 +107,12 @@ use std::rc::Rc;
 /// Either a sequence of token trees or a single one. This is used as the representation of the
 /// sequence of tokens that make up a matcher.
 #[derive(Clone)]
-enum TokenTreeOrTokenTreeSlice<'a> {
+enum TokenTreeOrTokenTreeSlice<'tt> {
     Tt(TokenTree),
-    TtSeq(&'a [TokenTree]),
+    TtSeq(&'tt [TokenTree]),
 }
 
-impl<'a> TokenTreeOrTokenTreeSlice<'a> {
+impl<'tt> TokenTreeOrTokenTreeSlice<'tt> {
     /// Returns the number of constituent top-level token trees of `self` (top-level in that it
     /// will not recursively descend into subtrees).
     fn len(&self) -> usize {
@@ -122,7 +122,7 @@ impl<'a> TokenTreeOrTokenTreeSlice<'a> {
         }
     }
 
-    /// The the `index`-th token tree of `self`.
+    /// The `index`-th token tree of `self`.
     fn get_tt(&self, index: usize) -> TokenTree {
         match *self {
             TtSeq(ref v) => v[index].clone(),
@@ -136,21 +136,41 @@ impl<'a> TokenTreeOrTokenTreeSlice<'a> {
 /// This is used by `inner_parse_loop` to keep track of delimited submatchers that we have
 /// descended into.
 #[derive(Clone)]
-struct MatcherTtFrame<'a> {
+struct MatcherTtFrame<'tt> {
     /// The "parent" matcher that we are descending into.
-    elts: TokenTreeOrTokenTreeSlice<'a>,
+    elts: TokenTreeOrTokenTreeSlice<'tt>,
     /// The position of the "dot" in `elts` at the time we descended.
     idx: usize,
 }
 
-/// Represents a single "position" (aka "matcher position", aka "item"), as described in the module
-/// documentation.
+type NamedMatchVec = SmallVec<[NamedMatch; 4]>;
+
+/// Represents a single "position" (aka "matcher position", aka "item"), as
+/// described in the module documentation.
+///
+/// Here:
+///
+/// - `'root` represents the lifetime of the stack slot that holds the root
+///   `MatcherPos`. As described in `MatcherPosHandle`, the root `MatcherPos`
+///   structure is stored on the stack, but subsequent instances are put into
+///   the heap.
+/// - `'tt` represents the lifetime of the token trees that this matcher
+///   position refers to.
+///
+/// It is important to distinguish these two lifetimes because we have a
+/// `SmallVec<TokenTreeOrTokenTreeSlice<'tt>>` below, and the destructor of
+/// that is considered to possibly access the data from its elements (it lacks
+/// a `#[may_dangle]` attribute). As a result, the compiler needs to know that
+/// all the elements in that `SmallVec` strictly outlive the root stack slot
+/// lifetime. By separating `'tt` from `'root`, we can show that.
 #[derive(Clone)]
-struct MatcherPos<'a> {
+struct MatcherPos<'root, 'tt: 'root> {
     /// The token or sequence of tokens that make up the matcher
-    top_elts: TokenTreeOrTokenTreeSlice<'a>,
+    top_elts: TokenTreeOrTokenTreeSlice<'tt>,
+
     /// The position of the "dot" in this matcher
     idx: usize,
+
     /// The first span of source source that the beginning of this matcher corresponds to. In other
     /// words, the token in the source whose span is `sp_open` is matched against the first token of
     /// the matcher.
@@ -168,7 +188,7 @@ struct MatcherPos<'a> {
     /// all bound matches from the submatcher into the shared top-level `matches` vector. If `sep`
     /// and `up` are `Some`, then `matches` is _not_ the shared top-level list. Instead, if one
     /// wants the shared `matches`, one should use `up.matches`.
-    matches: Vec<Rc<Vec<NamedMatch>>>,
+    matches: Box<[Rc<NamedMatchVec>]>,
     /// The position in `matches` corresponding to the first metavar in this matcher's sequence of
     /// token trees. In other words, the first metavar in the first token of `top_elts` corresponds
     /// to `matches[match_lo]`.
@@ -180,26 +200,31 @@ struct MatcherPos<'a> {
     /// in this matcher.
     match_hi: usize,
 
-    // Specifically used if we are matching a repetition. If we aren't both should be `None`.
+    // The following fields are used if we are matching a repetition. If we aren't, they should be
+    // `None`.
+
     /// The KleeneOp of this sequence if we are in a repetition.
     seq_op: Option<quoted::KleeneOp>,
-    /// The separator if we are in a repetition
+
+    /// The separator if we are in a repetition.
     sep: Option<Token>,
+
     /// The "parent" matcher position if we are in a repetition. That is, the matcher position just
     /// before we enter the sequence.
-    up: Option<MatcherPosHandle<'a>>,
+    up: Option<MatcherPosHandle<'root, 'tt>>,
 
-    // Specifically used to "unzip" token trees. By "unzip", we mean to unwrap the delimiters from
-    // a delimited token tree (e.g. something wrapped in `(` `)`) or to get the contents of a doc
-    // comment...
+    /// Specifically used to "unzip" token trees. By "unzip", we mean to unwrap the delimiters from
+    /// a delimited token tree (e.g. something wrapped in `(` `)`) or to get the contents of a doc
+    /// comment...
+    ///
     /// When matching against matchers with nested delimited submatchers (e.g. `pat ( pat ( .. )
     /// pat ) pat`), we need to keep track of the matchers we are descending into. This stack does
     /// that where the bottom of the stack is the outermost matcher.
-    // Also, throughout the comments, this "descent" is often referred to as "unzipping"...
-    stack: Vec<MatcherTtFrame<'a>>,
+    /// Also, throughout the comments, this "descent" is often referred to as "unzipping"...
+    stack: SmallVec<[MatcherTtFrame<'tt>; 1]>,
 }
 
-impl<'a> MatcherPos<'a> {
+impl<'root, 'tt> MatcherPos<'root, 'tt> {
     /// Add `m` as a named match for the `idx`-th metavar.
     fn push_match(&mut self, idx: usize, m: NamedMatch) {
         let matches = Rc::make_mut(&mut self.matches[idx]);
@@ -216,12 +241,12 @@ impl<'a> MatcherPos<'a> {
 // Therefore, the initial MatcherPos is always allocated on the stack,
 // subsequent ones (of which there aren't that many) are allocated on the heap,
 // and this type is used to encapsulate both cases.
-enum MatcherPosHandle<'a> {
-    Ref(&'a mut MatcherPos<'a>),
-    Box(Box<MatcherPos<'a>>),
+enum MatcherPosHandle<'root, 'tt: 'root> {
+    Ref(&'root mut MatcherPos<'root, 'tt>),
+    Box(Box<MatcherPos<'root, 'tt>>),
 }
 
-impl<'a> Clone for MatcherPosHandle<'a> {
+impl<'root, 'tt> Clone for MatcherPosHandle<'root, 'tt> {
     // This always produces a new Box.
     fn clone(&self) -> Self {
         MatcherPosHandle::Box(match *self {
@@ -231,8 +256,8 @@ impl<'a> Clone for MatcherPosHandle<'a> {
     }
 }
 
-impl<'a> Deref for MatcherPosHandle<'a> {
-    type Target = MatcherPos<'a>;
+impl<'root, 'tt> Deref for MatcherPosHandle<'root, 'tt> {
+    type Target = MatcherPos<'root, 'tt>;
     fn deref(&self) -> &Self::Target {
         match *self {
             MatcherPosHandle::Ref(ref r) => r,
@@ -241,8 +266,8 @@ impl<'a> Deref for MatcherPosHandle<'a> {
     }
 }
 
-impl<'a> DerefMut for MatcherPosHandle<'a> {
-    fn deref_mut(&mut self) -> &mut MatcherPos<'a> {
+impl<'root, 'tt> DerefMut for MatcherPosHandle<'root, 'tt> {
+    fn deref_mut(&mut self) -> &mut MatcherPos<'root, 'tt> {
         match *self {
             MatcherPosHandle::Ref(ref mut r) => r,
             MatcherPosHandle::Box(ref mut b) => b,
@@ -278,14 +303,19 @@ pub fn count_names(ms: &[TokenTree]) -> usize {
     })
 }
 
-/// Initialize `len` empty shared `Vec`s to be used to store matches of metavars.
-fn create_matches(len: usize) -> Vec<Rc<Vec<NamedMatch>>> {
-    (0..len).into_iter().map(|_| Rc::new(Vec::new())).collect()
+/// `len` `Vec`s (initially shared and empty) that will store matches of metavars.
+fn create_matches(len: usize) -> Box<[Rc<NamedMatchVec>]> {
+    if len == 0 {
+        vec![]
+    } else {
+        let empty_matches = Rc::new(SmallVec::new());
+        vec![empty_matches.clone(); len]
+    }.into_boxed_slice()
 }
 
 /// Generate the top-level matcher position in which the "dot" is before the first token of the
 /// matcher `ms` and we are going to start matching at the span `open` in the source.
-fn initial_matcher_pos(ms: &[TokenTree], open: Span) -> MatcherPos {
+fn initial_matcher_pos<'root, 'tt>(ms: &'tt [TokenTree], open: Span) -> MatcherPos<'root, 'tt> {
     let match_idx_hi = count_names(ms);
     let matches = create_matches(match_idx_hi);
     MatcherPos {
@@ -305,7 +335,7 @@ fn initial_matcher_pos(ms: &[TokenTree], open: Span) -> MatcherPos {
         match_hi: match_idx_hi,
 
         // Haven't descended into any delimiters, so empty stack
-        stack: vec![],
+        stack: smallvec![],
 
         // Haven't descended into any sequences, so both of these are `None`.
         seq_op: None,
@@ -332,7 +362,7 @@ fn initial_matcher_pos(ms: &[TokenTree], open: Span) -> MatcherPos {
 /// token tree it was derived from.
 #[derive(Debug, Clone)]
 pub enum NamedMatch {
-    MatchedSeq(Rc<Vec<NamedMatch>>, DelimSpan),
+    MatchedSeq(Rc<NamedMatchVec>, DelimSpan),
     MatchedNonterminal(Rc<Nonterminal>),
 }
 
@@ -438,12 +468,12 @@ fn token_name_eq(t1: &Token, t2: &Token) -> bool {
 /// # Returns
 ///
 /// A `ParseResult`. Note that matches are kept track of through the items generated.
-fn inner_parse_loop<'a>(
+fn inner_parse_loop<'root, 'tt>(
     sess: &ParseSess,
-    cur_items: &mut SmallVec<[MatcherPosHandle<'a>; 1]>,
-    next_items: &mut Vec<MatcherPosHandle<'a>>,
-    eof_items: &mut SmallVec<[MatcherPosHandle<'a>; 1]>,
-    bb_items: &mut SmallVec<[MatcherPosHandle<'a>; 1]>,
+    cur_items: &mut SmallVec<[MatcherPosHandle<'root, 'tt>; 1]>,
+    next_items: &mut Vec<MatcherPosHandle<'root, 'tt>>,
+    eof_items: &mut SmallVec<[MatcherPosHandle<'root, 'tt>; 1]>,
+    bb_items: &mut SmallVec<[MatcherPosHandle<'root, 'tt>; 1]>,
     token: &Token,
     span: syntax_pos::Span,
 ) -> ParseResult<()> {
@@ -540,14 +570,14 @@ fn inner_parse_loop<'a>(
                         new_item.match_cur += seq.num_captures;
                         new_item.idx += 1;
                         for idx in item.match_cur..item.match_cur + seq.num_captures {
-                            new_item.push_match(idx, MatchedSeq(Rc::new(vec![]), sp));
+                            new_item.push_match(idx, MatchedSeq(Rc::new(smallvec![]), sp));
                         }
                         cur_items.push(new_item);
                     }
 
                     let matches = create_matches(item.matches.len());
                     cur_items.push(MatcherPosHandle::Box(Box::new(MatcherPos {
-                        stack: vec![],
+                        stack: smallvec![],
                         sep: seq.separator.clone(),
                         seq_op: Some(seq.op),
                         idx: 0,
@@ -881,7 +911,7 @@ fn parse_nt<'a>(p: &mut Parser<'a>, sp: Span, name: &str) -> Nonterminal {
                 FatalError.raise();
             }
         },
-        "pat" => token::NtPat(panictry!(p.parse_pat())),
+        "pat" => token::NtPat(panictry!(p.parse_pat(None))),
         "expr" => token::NtExpr(panictry!(p.parse_expr())),
         "literal" => token::NtLiteral(panictry!(p.parse_literal_maybe_minus())),
         "ty" => token::NtTy(panictry!(p.parse_ty())),

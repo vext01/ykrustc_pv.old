@@ -14,6 +14,7 @@ use rustc::mir::*;
 use rustc::middle::lang_items;
 use rustc::traits::Reveal;
 use rustc::ty::{self, Ty, TyCtxt};
+use rustc::ty::layout::VariantIdx;
 use rustc::ty::subst::Substs;
 use rustc::ty::util::IntTypeExt;
 use rustc_data_structures::indexed_vec::Idx;
@@ -94,7 +95,7 @@ pub trait DropElaborator<'a, 'tcx: 'a> : fmt::Debug {
 
     fn field_subpath(&self, path: Self::Path, field: Field) -> Option<Self::Path>;
     fn deref_subpath(&self, path: Self::Path) -> Option<Self::Path>;
-    fn downcast_subpath(&self, path: Self::Path, variant: usize) -> Option<Self::Path>;
+    fn downcast_subpath(&self, path: Self::Path, variant: VariantIdx) -> Option<Self::Path>;
     fn array_subpath(&self, path: Self::Path, index: u32, size: u32) -> Option<Self::Path>;
 }
 
@@ -392,7 +393,7 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
             let fields = self.move_paths_for_fields(
                 self.place,
                 self.path,
-                &adt.variants[0],
+                &adt.variants[VariantIdx::new(0)],
                 substs
             );
             self.drop_ladder(fields, succ, unwind)
@@ -416,7 +417,7 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
 
         let mut have_otherwise = false;
 
-        for (variant_index, discr) in adt.discriminants(self.tcx()).enumerate() {
+        for (variant_index, discr) in adt.discriminants(self.tcx()) {
             let subpath = self.elaborator.downcast_subpath(
                 self.path, variant_index);
             if let Some(variant_path) = subpath {
@@ -753,11 +754,11 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
                 self.place.clone()
             )));
             drop_block_stmts.push(self.assign(&cur, Rvalue::Cast(
-                CastKind::Misc, Operand::Move(tmp.clone()), iter_ty
+                CastKind::Misc, Operand::Move(tmp), iter_ty
             )));
             drop_block_stmts.push(self.assign(&length_or_end,
                 Rvalue::BinaryOp(BinOp::Offset,
-                     Operand::Copy(cur.clone()), Operand::Move(length.clone())
+                     Operand::Copy(cur), Operand::Move(length)
             )));
         } else {
             // index = 0 (length already pushed)
@@ -894,7 +895,7 @@ impl<'l, 'b, 'tcx, D> DropCtxt<'l, 'b, 'tcx, D>
         let tcx = self.tcx();
         let unit_temp = Place::Local(self.new_temp(tcx.mk_unit()));
         let free_func = tcx.require_lang_item(lang_items::BoxFreeFnLangItem);
-        let args = adt.variants[0].fields.iter().enumerate().map(|(i, f)| {
+        let args = adt.variants[VariantIdx::new(0)].fields.iter().enumerate().map(|(i, f)| {
             let field = Field::new(i);
             let field_ty = f.ty(self.tcx(), substs);
             Operand::Move(self.place.clone().field(field, field_ty))

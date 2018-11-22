@@ -9,15 +9,14 @@
 // except according to those terms.
 
 use infer::InferCtxt;
-use mir::interpret::GlobalId;
+use mir::interpret::{GlobalId, ErrorHandled};
 use ty::{self, Ty, TypeFoldable, ToPolyTraitRef, ToPredicate};
 use ty::error::ExpectedFound;
-use rustc_data_structures::obligation_forest::{Error, ForestObligation, ObligationForest};
-use rustc_data_structures::obligation_forest::{ObligationProcessor, ProcessResult};
+use rustc_data_structures::obligation_forest::{DoCompleted, Error, ForestObligation};
+use rustc_data_structures::obligation_forest::{ObligationForest, ObligationProcessor};
+use rustc_data_structures::obligation_forest::{ProcessResult};
 use std::marker::PhantomData;
 use hir::def_id::DefId;
-use mir::interpret::ConstEvalErr;
-use mir::interpret::EvalErrorKind;
 
 use super::CodeAmbiguity;
 use super::CodeProjectionError;
@@ -100,7 +99,7 @@ impl<'a, 'gcx, 'tcx> FulfillmentContext<'tcx> {
             let outcome = self.predicates.process_obligations(&mut FulfillProcessor {
                 selcx,
                 register_region_obligations: self.register_region_obligations
-            });
+            }, DoCompleted::No);
             debug!("select: outcome={:#?}", outcome);
 
             // FIXME: if we kept the original cache key, we could mark projection
@@ -145,7 +144,7 @@ impl<'tcx> TraitEngine<'tcx> for FulfillmentContext<'tcx> {
         debug!("normalize_projection_type(projection_ty={:?})",
                projection_ty);
 
-        debug_assert!(!projection_ty.has_escaping_regions());
+        debug_assert!(!projection_ty.has_escaping_bound_vars());
 
         // FIXME(#20304) -- cache
 
@@ -351,15 +350,15 @@ impl<'a, 'b, 'gcx, 'tcx> ObligationProcessor for FulfillProcessor<'a, 'b, 'gcx, 
             }
 
             ty::Predicate::TypeOutlives(ref binder) => {
-                // Check if there are higher-ranked regions.
-                match binder.no_late_bound_regions() {
+                // Check if there are higher-ranked vars.
+                match binder.no_bound_vars() {
                     // If there are, inspect the underlying type further.
                     None => {
                         // Convert from `Binder<OutlivesPredicate<Ty, Region>>` to `Binder<Ty>`.
                         let binder = binder.map_bound_ref(|pred| pred.0);
 
-                        // Check if the type has any bound regions.
-                        match binder.no_late_bound_regions() {
+                        // Check if the type has any bound vars.
+                        match binder.no_bound_vars() {
                             // If so, this obligation is an error (for now). Eventually we should be
                             // able to support additional cases here, like `for<'a> &'a str: 'a`.
                             // NOTE: this is duplicate-implemented between here and fulfillment.
@@ -495,13 +494,9 @@ impl<'a, 'b, 'gcx, 'tcx> ObligationProcessor for FulfillProcessor<'a, 'b, 'gcx, 
                                             CodeSelectionError(ConstEvalFailure(err)))
                                     }
                                 } else {
-                                    ProcessResult::Error(
-                                        CodeSelectionError(ConstEvalFailure(ConstEvalErr {
-                                            span: obligation.cause.span,
-                                            error: EvalErrorKind::TooGeneric.into(),
-                                            stacktrace: vec![],
-                                        }.into()))
-                                    )
+                                    ProcessResult::Error(CodeSelectionError(
+                                        ConstEvalFailure(ErrorHandled::TooGeneric)
+                                    ))
                                 }
                             },
                             None => {

@@ -79,8 +79,8 @@ def _download(path, url, probably_big, verbose, exception):
     # see http://serverfault.com/questions/301128/how-to-download
     if sys.platform == 'win32':
         run(["PowerShell.exe", "/nologo", "-Command",
-             "(New-Object System.Net.WebClient)"
-             ".DownloadFile('{}', '{}')".format(url, path)],
+             "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;",
+             "(New-Object System.Net.WebClient).DownloadFile('{}', '{}')".format(url, path)],
             verbose=verbose,
             exception=exception)
     else:
@@ -594,7 +594,7 @@ class RustBuild(object):
         return ''
 
     def bootstrap_binary(self):
-        """Return the path of the boostrap binary
+        """Return the path of the bootstrap binary
 
         >>> rb = RustBuild()
         >>> rb.build_dir = "build"
@@ -632,6 +632,9 @@ class RustBuild(object):
             target_features += ["-crt-static"]
         if target_features:
             env["RUSTFLAGS"] += "-C target-feature=" + (",".join(target_features)) + " "
+        target_linker = self.get_toml("linker", build_section)
+        if target_linker is not None:
+            env["RUSTFLAGS"] += "-C linker=" + target_linker + " "
 
         env["PATH"] = os.path.join(self.bin_root(), "bin") + \
             os.pathsep + env["PATH"]
@@ -711,11 +714,6 @@ class RustBuild(object):
             if module.endswith("llvm-emscripten"):
                 backends = self.get_toml('codegen-backends')
                 if backends is None or not 'emscripten' in backends:
-                    continue
-            if module.endswith("jemalloc"):
-                if self.get_toml('use-jemalloc') == 'false':
-                    continue
-                if self.get_toml('jemalloc'):
                     continue
             if module.endswith("lld"):
                 config = self.get_toml('lld')

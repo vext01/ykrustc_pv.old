@@ -672,6 +672,9 @@ extern "rust-intrinsic" {
     ///
     /// More specifically, this is the offset in bytes between successive
     /// items of the same type, including alignment padding.
+    ///
+    /// The stabilized version of this intrinsic is
+    /// [`std::mem::size_of`](../../std/mem/fn.size_of.html).
     pub fn size_of<T>() -> usize;
 
     /// Moves a value to an uninitialized memory location.
@@ -713,6 +716,10 @@ extern "rust-intrinsic" {
     /// undropped. In the general case one must use `ptr::write` to
     /// initialize memory previous set to the result of `uninit`.
     pub fn uninit<T>() -> T;
+
+    /// Moves a value out of scope without running drop glue.
+    #[cfg(not(stage0))]
+    pub fn forget<T: ?Sized>(_: T);
 
     /// Reinterprets the bits of a value of one type as another type.
     ///
@@ -1025,7 +1032,7 @@ extern "rust-intrinsic" {
     ///         // to avoid problems in case something further down panics.
     ///         src.set_len(0);
     ///
-    ///         // The two regions cannot overlap becuase mutable references do
+    ///         // The two regions cannot overlap because mutable references do
     ///         // not alias, and two different vectors cannot own the same
     ///         // memory.
     ///         ptr::copy_nonoverlapping(src_ptr, dst_ptr, src_len);
@@ -1464,6 +1471,20 @@ extern "rust-intrinsic" {
     /// Performs an unchecked right shift, resulting in undefined behavior when
     /// y < 0 or y >= N, where N is the width of T in bits.
     pub fn unchecked_shr<T>(x: T, y: T) -> T;
+
+    /// Performs rotate left.
+    /// The stabilized versions of this intrinsic are available on the integer
+    /// primitives via the `rotate_left` method. For example,
+    /// [`std::u32::rotate_left`](../../std/primitive.u32.html#method.rotate_left)
+    #[cfg(not(stage0))]
+    pub fn rotate_left<T>(x: T, y: T) -> T;
+
+    /// Performs rotate right.
+    /// The stabilized versions of this intrinsic are available on the integer
+    /// primitives via the `rotate_right` method. For example,
+    /// [`std::u32::rotate_right`](../../std/primitive.u32.html#method.rotate_right)
+    #[cfg(not(stage0))]
+    pub fn rotate_right<T>(x: T, y: T) -> T;
 
     /// Returns (a + b) mod 2<sup>N</sup>, where N is the width of T in bits.
     /// The stabilized versions of this intrinsic are available on the integer

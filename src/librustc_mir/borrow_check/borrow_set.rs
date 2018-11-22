@@ -12,14 +12,15 @@ use borrow_check::place_ext::PlaceExt;
 use dataflow::indexes::BorrowIndex;
 use dataflow::move_paths::MoveData;
 use rustc::mir::traversal;
-use rustc::mir::visit::{PlaceContext, Visitor};
+use rustc::mir::visit::{
+    PlaceContext, Visitor, NonUseContext, MutatingUseContext, NonMutatingUseContext
+};
 use rustc::mir::{self, Location, Mir, Place, Local};
 use rustc::ty::{Region, TyCtxt};
 use rustc::util::nodemap::{FxHashMap, FxHashSet};
 use rustc_data_structures::indexed_vec::IndexVec;
 use rustc_data_structures::bit_set::BitSet;
 use std::fmt;
-use std::hash::Hash;
 use std::ops::Index;
 
 crate struct BorrowSet<'tcx> {
@@ -92,12 +93,12 @@ impl<'tcx> fmt::Display for BorrowData<'tcx> {
             mir::BorrowKind::Mut { .. } => "mut ",
         };
         let region = self.region.to_string();
-        let region = if region.len() > 0 {
-            format!("{} ", region)
+        let separator = if !region.is_empty() {
+            " "
         } else {
-            region
+            ""
         };
-        write!(w, "&{}{}{:?}", region, kind, self.borrowed_place)
+        write!(w, "&{}{}{}{:?}", region, separator, kind, self.borrowed_place)
     }
 }
 
@@ -116,7 +117,7 @@ impl LocalsStateAtExit {
 
         impl<'tcx> Visitor<'tcx> for HasStorageDead {
             fn visit_local(&mut self, local: &Local, ctx: PlaceContext<'tcx>, _: Location) {
-                if ctx == PlaceContext::StorageDead {
+                if ctx == PlaceContext::NonUse(NonUseContext::StorageDead) {
                     self.0.insert(*local);
                 }
             }
@@ -151,11 +152,11 @@ impl<'tcx> BorrowSet<'tcx> {
             tcx,
             mir,
             idx_vec: IndexVec::new(),
-            location_map: FxHashMap(),
-            activation_map: FxHashMap(),
-            region_map: FxHashMap(),
-            local_map: FxHashMap(),
-            pending_activations: FxHashMap(),
+            location_map: Default::default(),
+            activation_map: Default::default(),
+            region_map: Default::default(),
+            local_map: Default::default(),
+            pending_activations: Default::default(),
             locals_state_at_exit:
                 LocalsStateAtExit::build(locals_are_invalidated_at_exit, mir, move_data),
         };
@@ -231,21 +232,13 @@ impl<'a, 'gcx, 'tcx> Visitor<'tcx> for GatherBorrows<'a, 'gcx, 'tcx> {
 
             self.insert_as_pending_if_two_phase(location, &assigned_place, region, kind, idx);
 
-            insert(&mut self.region_map, &region, idx);
+            self.region_map.entry(region).or_default().insert(idx);
             if let Some(local) = borrowed_place.root_local() {
-                insert(&mut self.local_map, &local, idx);
+                self.local_map.entry(local).or_default().insert(idx);
             }
         }
 
-        return self.super_assign(block, assigned_place, rvalue, location);
-
-        fn insert<'a, K, V>(map: &'a mut FxHashMap<K, FxHashSet<V>>, k: &K, v: V)
-        where
-            K: Clone + Eq + Hash,
-            V: Eq + Hash,
-        {
-            map.entry(k.clone()).or_insert(FxHashSet()).insert(v);
-        }
+        self.super_assign(block, assigned_place, rvalue, location)
     }
 
     fn visit_place(
@@ -261,57 +254,54 @@ impl<'a, 'gcx, 'tcx> Visitor<'tcx> for GatherBorrows<'a, 'gcx, 'tcx> {
             // ... check whether we (earlier) saw a 2-phase borrow like
             //
             //     TMP = &mut place
-            match self.pending_activations.get(temp) {
-                Some(&borrow_index) => {
-                    let borrow_data = &mut self.idx_vec[borrow_index];
+            if let Some(&borrow_index) = self.pending_activations.get(temp) {
+                let borrow_data = &mut self.idx_vec[borrow_index];
 
-                    // Watch out: the use of TMP in the borrow itself
-                    // doesn't count as an activation. =)
-                    if borrow_data.reserve_location == location && context == PlaceContext::Store {
-                        return;
-                    }
-
-                    if let TwoPhaseActivation::ActivatedAt(other_location) =
-                            borrow_data.activation_location {
-                        span_bug!(
-                            self.mir.source_info(location).span,
-                            "found two uses for 2-phase borrow temporary {:?}: \
-                             {:?} and {:?}",
-                            temp,
-                            location,
-                            other_location,
-                        );
-                    }
-
-                    // Otherwise, this is the unique later use
-                    // that we expect.
-                    borrow_data.activation_location = match context {
-                        // The use of TMP in a shared borrow does not
-                        // count as an actual activation.
-                        PlaceContext::Borrow { kind: mir::BorrowKind::Shared, .. }
-                        | PlaceContext::Borrow { kind: mir::BorrowKind::Shallow, .. } => {
-                            TwoPhaseActivation::NotActivated
-                        }
-                        _ => {
-                            // Double check: This borrow is indeed a two-phase borrow (that is,
-                            // we are 'transitioning' from `NotActivated` to `ActivatedAt`) and
-                            // we've not found any other activations (checked above).
-                            assert_eq!(
-                                borrow_data.activation_location,
-                                TwoPhaseActivation::NotActivated,
-                                "never found an activation for this borrow!",
-                            );
-
-                            self.activation_map
-                                .entry(location)
-                                .or_default()
-                                .push(borrow_index);
-                            TwoPhaseActivation::ActivatedAt(location)
-                        }
-                    };
+                // Watch out: the use of TMP in the borrow itself
+                // doesn't count as an activation. =)
+                if borrow_data.reserve_location == location &&
+                    context == PlaceContext::MutatingUse(MutatingUseContext::Store)
+                {
+                    return;
                 }
 
-                None => {}
+                if let TwoPhaseActivation::ActivatedAt(other_location) =
+                        borrow_data.activation_location {
+                    span_bug!(
+                        self.mir.source_info(location).span,
+                        "found two uses for 2-phase borrow temporary {:?}: \
+                         {:?} and {:?}",
+                        temp,
+                        location,
+                        other_location,
+                    );
+                }
+
+                // Otherwise, this is the unique later use
+                // that we expect.
+                borrow_data.activation_location = match context {
+                    // The use of TMP in a shared borrow does not
+                    // count as an actual activation.
+                    PlaceContext::NonMutatingUse(NonMutatingUseContext::SharedBorrow(..)) |
+                    PlaceContext::NonMutatingUse(NonMutatingUseContext::ShallowBorrow(..)) =>
+                        TwoPhaseActivation::NotActivated,
+                    _ => {
+                        // Double check: This borrow is indeed a two-phase borrow (that is,
+                        // we are 'transitioning' from `NotActivated` to `ActivatedAt`) and
+                        // we've not found any other activations (checked above).
+                        assert_eq!(
+                            borrow_data.activation_location,
+                            TwoPhaseActivation::NotActivated,
+                            "never found an activation for this borrow!",
+                        );
+
+                        self.activation_map
+                            .entry(location)
+                            .or_default()
+                            .push(borrow_index);
+                        TwoPhaseActivation::ActivatedAt(location)
+                    }
+                };
             }
         }
     }

@@ -22,7 +22,6 @@ use rustc::hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
 use rustc::hir;
 use rustc::hir::itemlikevisit::ItemLikeVisitor;
 use rustc::ty::{self, CrateInherentImpls, TyCtxt};
-use rustc::util::nodemap::DefIdMap;
 
 use rustc_data_structures::sync::Lrc;
 use syntax::ast;
@@ -31,18 +30,16 @@ use syntax_pos::Span;
 /// On-demand query: yields a map containing all types mapped to their inherent impls.
 pub fn crate_inherent_impls<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                       crate_num: CrateNum)
-                                      -> CrateInherentImpls {
+                                      -> Lrc<CrateInherentImpls> {
     assert_eq!(crate_num, LOCAL_CRATE);
 
     let krate = tcx.hir.krate();
     let mut collect = InherentCollect {
         tcx,
-        impls_map: CrateInherentImpls {
-            inherent_impls: DefIdMap()
-        }
+        impls_map: Default::default(),
     };
     krate.visit_all_item_likes(&mut collect);
-    collect.impls_map
+    Lrc::new(collect.impls_map)
 }
 
 /// On-demand query: yields a vector of the inherent impls for a specific type.

@@ -16,7 +16,7 @@ use ty::subst::{self, Subst};
 use ty::{BrAnon, BrEnv, BrFresh, BrNamed};
 use ty::{Bool, Char, Adt};
 use ty::{Error, Str, Array, Slice, Float, FnDef, FnPtr};
-use ty::{Param, RawPtr, Ref, Never, Tuple};
+use ty::{Param, Bound, RawPtr, Ref, Never, Tuple};
 use ty::{Closure, Generator, GeneratorWitness, Foreign, Projection, Opaque};
 use ty::{UnnormalizedProjection, Dynamic, Int, Uint, Infer};
 use ty::{self, RegionVid, Ty, TyCtxt, TypeFoldable, GenericParamCount, GenericParamDefKind};
@@ -182,7 +182,7 @@ impl PrintContext {
     fn prepare_late_bound_region_info<'tcx, T>(&mut self, value: &ty::Binder<T>)
     where T: TypeFoldable<'tcx>
     {
-        let mut collector = LateBoundRegionNameCollector(FxHashSet());
+        let mut collector = LateBoundRegionNameCollector(Default::default());
         value.visit_with(&mut collector);
         self.used_region_names = Some(collector.0);
         self.region_index = 0;
@@ -251,25 +251,17 @@ impl PrintContext {
     fn parameterized<F: fmt::Write>(&mut self,
                                     f: &mut F,
                                     substs: &subst::Substs<'_>,
-                                    mut did: DefId,
+                                    did: DefId,
                                     projections: &[ty::ProjectionPredicate<'_>])
                                     -> fmt::Result {
         let key = ty::tls::with(|tcx| tcx.def_key(did));
-        let mut item_name = if let Some(name) = key.disambiguated_data.data.get_opt_name() {
-            Some(name)
-        } else {
-            did.index = key.parent.unwrap_or_else(
-                || bug!("finding type for {:?}, encountered def-id {:?} with no parent",
-                        did, did));
-            self.parameterized(f, substs, did, projections)?;
-            return write!(f, "::{}", key.disambiguated_data.data.as_interned_str());
-        };
 
         let verbose = self.is_verbose;
         let mut num_supplied_defaults = 0;
         let mut has_self = false;
         let mut own_counts: GenericParamCount = Default::default();
         let mut is_value_path = false;
+        let mut item_name = Some(key.disambiguated_data.data.as_interned_str());
         let fn_trait_kind = ty::tls::with(|tcx| {
             // Unfortunately, some kinds of items (e.g., closures) don't have
             // generics. So walk back up the find the closest parent that DOES
@@ -282,6 +274,7 @@ impl PrintContext {
                     DefPathData::AssocTypeInImpl(_) |
                     DefPathData::AssocExistentialInImpl(_) |
                     DefPathData::Trait(_) |
+                    DefPathData::Impl |
                     DefPathData::TypeNs(_) => {
                         break;
                     }
@@ -292,7 +285,6 @@ impl PrintContext {
                     }
                     DefPathData::CrateRoot |
                     DefPathData::Misc |
-                    DefPathData::Impl |
                     DefPathData::Module(_) |
                     DefPathData::MacroDef(_) |
                     DefPathData::ClosureExpr |
@@ -686,8 +678,8 @@ impl<'tcx> fmt::Debug for ty::ClosureUpvar<'tcx> {
 impl fmt::Debug for ty::UpvarId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "UpvarId({:?};`{}`;{:?})",
-               self.var_id,
-               ty::tls::with(|tcx| tcx.hir.name(tcx.hir.hir_to_node_id(self.var_id))),
+               self.var_path.hir_id,
+               ty::tls::with(|tcx| tcx.hir.name(tcx.hir.hir_to_node_id(self.var_path.hir_id))),
                self.closure_expr_id)
     }
 }
@@ -798,9 +790,6 @@ define_print! {
                 ty::ReEarlyBound(ref data) => {
                     write!(f, "{}", data.name)
                 }
-                ty::ReCanonical(_) => {
-                    write!(f, "'_")
-                }
                 ty::ReLateBound(_, br) |
                 ty::ReFree(ty::FreeRegion { bound_region: br, .. }) |
                 ty::RePlaceholder(ty::Placeholder { name: br, .. }) => {
@@ -866,10 +855,6 @@ define_print! {
 
                 ty::ReVar(ref vid) => {
                     write!(f, "{:?}", vid)
-                }
-
-                ty::ReCanonical(c) => {
-                    write!(f, "'?{}", c.index())
                 }
 
                 ty::RePlaceholder(placeholder) => {
@@ -984,7 +969,6 @@ define_print! {
                     ty::TyVar(_) => write!(f, "_"),
                     ty::IntVar(_) => write!(f, "{}", "{integer}"),
                     ty::FloatVar(_) => write!(f, "{}", "{float}"),
-                    ty::CanonicalTy(_) => write!(f, "_"),
                     ty::FreshTy(v) => write!(f, "FreshTy({})", v),
                     ty::FreshIntTy(v) => write!(f, "FreshIntTy({})", v),
                     ty::FreshFloatTy(v) => write!(f, "FreshFloatTy({})", v)
@@ -996,7 +980,6 @@ define_print! {
                 ty::TyVar(ref v) => write!(f, "{:?}", v),
                 ty::IntVar(ref v) => write!(f, "{:?}", v),
                 ty::FloatVar(ref v) => write!(f, "{:?}", v),
-                ty::CanonicalTy(v) => write!(f, "?{:?}", v.index()),
                 ty::FreshTy(v) => write!(f, "FreshTy({:?})", v),
                 ty::FreshIntTy(v) => write!(f, "FreshIntTy({:?})", v),
                 ty::FreshFloatTy(v) => write!(f, "FreshFloatTy({:?})", v)
@@ -1127,6 +1110,19 @@ define_print! {
                 Infer(infer_ty) => write!(f, "{}", infer_ty),
                 Error => write!(f, "[type error]"),
                 Param(ref param_ty) => write!(f, "{}", param_ty),
+                Bound(bound_ty) => {
+                    match bound_ty.kind {
+                        ty::BoundTyKind::Anon => {
+                            if bound_ty.index == ty::INNERMOST {
+                                write!(f, "^{}", bound_ty.var.index())
+                            } else {
+                                write!(f, "^{}_{}", bound_ty.index.index(), bound_ty.var.index())
+                            }
+                        }
+
+                        ty::BoundTyKind::Param(p) => write!(f, "{}", p),
+                    }
+                }
                 Adt(def, substs) => cx.parameterized(f, substs, def.did, &[]),
                 Dynamic(data, r) => {
                     let r = r.print_to_string(cx);

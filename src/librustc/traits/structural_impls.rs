@@ -14,9 +14,11 @@ use traits;
 use traits::project::Normalized;
 use ty::fold::{TypeFoldable, TypeFolder, TypeVisitor};
 use ty::{self, Lift, TyCtxt};
+use syntax::symbol::InternedString;
 
 use std::fmt;
 use std::rc::Rc;
+use std::collections::{BTreeSet, BTreeMap};
 
 // structural impls for the structs in traits
 
@@ -62,6 +64,8 @@ impl<'tcx, N: fmt::Debug> fmt::Debug for traits::Vtable<'tcx, N> {
             super::VtableParam(ref n) => write!(f, "VtableParam({:?})", n),
 
             super::VtableBuiltin(ref d) => write!(f, "{:?}", d),
+
+            super::VtableTraitAlias(ref d) => write!(f, "{:?}", d),
         }
     }
 }
@@ -70,7 +74,7 @@ impl<'tcx, N: fmt::Debug> fmt::Debug for traits::VtableImplData<'tcx, N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "VtableImpl(impl_def_id={:?}, substs={:?}, nested={:?})",
+            "VtableImplData(impl_def_id={:?}, substs={:?}, nested={:?})",
             self.impl_def_id, self.substs, self.nested
         )
     }
@@ -80,7 +84,7 @@ impl<'tcx, N: fmt::Debug> fmt::Debug for traits::VtableGeneratorData<'tcx, N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "VtableGenerator(generator_def_id={:?}, substs={:?}, nested={:?})",
+            "VtableGeneratorData(generator_def_id={:?}, substs={:?}, nested={:?})",
             self.generator_def_id, self.substs, self.nested
         )
     }
@@ -90,7 +94,7 @@ impl<'tcx, N: fmt::Debug> fmt::Debug for traits::VtableClosureData<'tcx, N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "VtableClosure(closure_def_id={:?}, substs={:?}, nested={:?})",
+            "VtableClosureData(closure_def_id={:?}, substs={:?}, nested={:?})",
             self.closure_def_id, self.substs, self.nested
         )
     }
@@ -98,7 +102,7 @@ impl<'tcx, N: fmt::Debug> fmt::Debug for traits::VtableClosureData<'tcx, N> {
 
 impl<'tcx, N: fmt::Debug> fmt::Debug for traits::VtableBuiltinData<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "VtableBuiltin(nested={:?})", self.nested)
+        write!(f, "VtableBuiltinData(nested={:?})", self.nested)
     }
 }
 
@@ -116,7 +120,7 @@ impl<'tcx, N: fmt::Debug> fmt::Debug for traits::VtableObjectData<'tcx, N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "VtableObject(upcast={:?}, vtable_base={}, nested={:?})",
+            "VtableObjectData(upcast={:?}, vtable_base={}, nested={:?})",
             self.upcast_trait_ref, self.vtable_base, self.nested
         )
     }
@@ -126,8 +130,18 @@ impl<'tcx, N: fmt::Debug> fmt::Debug for traits::VtableFnPointerData<'tcx, N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "VtableFnPointer(fn_ty={:?}, nested={:?})",
+            "VtableFnPointerData(fn_ty={:?}, nested={:?})",
             self.fn_ty, self.nested
+        )
+    }
+}
+
+impl<'tcx, N: fmt::Debug> fmt::Debug for traits::VtableTraitAliasData<'tcx, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "VtableTraitAlias(alias_def_id={:?}, substs={:?}, nested={:?})",
+            self.alias_def_id, self.substs, self.nested
         )
     }
 }
@@ -157,6 +171,290 @@ impl<'tcx> fmt::Debug for traits::MismatchedProjectionTypes<'tcx> {
     }
 }
 
+impl<'tcx> fmt::Display for traits::WhereClause<'tcx> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use traits::WhereClause::*;
+
+        // Bypass ppaux because it does not print out anonymous regions.
+        fn write_region_name<'tcx>(
+            r: ty::Region<'tcx>,
+            fmt: &mut fmt::Formatter<'_>
+        ) -> fmt::Result {
+            match r {
+                ty::ReLateBound(index, br) => match br {
+                    ty::BoundRegion::BrNamed(_, name) => write!(fmt, "{}", name),
+                    ty::BoundRegion::BrAnon(var) => {
+                        if *index == ty::INNERMOST {
+                            write!(fmt, "'^{}", var)
+                        } else {
+                            write!(fmt, "'^{}_{}", index.index(), var)
+                        }
+                    }
+                    _ => write!(fmt, "'_"),
+                }
+
+                _ => write!(fmt, "{}", r),
+            }
+        }
+
+        match self {
+            Implemented(trait_ref) => write!(fmt, "Implemented({})", trait_ref),
+            ProjectionEq(projection) => write!(fmt, "ProjectionEq({})", projection),
+            RegionOutlives(predicate) => {
+                write!(fmt, "RegionOutlives({}: ", predicate.0)?;
+                write_region_name(predicate.1, fmt)?;
+                write!(fmt, ")")
+            }
+            TypeOutlives(predicate) => {
+                write!(fmt, "TypeOutlives({}: ", predicate.0)?;
+                write_region_name(predicate.1, fmt)?;
+                write!(fmt, ")")
+            }
+        }
+    }
+}
+
+impl<'tcx> fmt::Display for traits::WellFormed<'tcx> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use traits::WellFormed::*;
+
+        match self {
+            Trait(trait_ref) => write!(fmt, "WellFormed({})", trait_ref),
+            Ty(ty) => write!(fmt, "WellFormed({})", ty),
+        }
+    }
+}
+
+impl<'tcx> fmt::Display for traits::FromEnv<'tcx> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use traits::FromEnv::*;
+
+        match self {
+            Trait(trait_ref) => write!(fmt, "FromEnv({})", trait_ref),
+            Ty(ty) => write!(fmt, "FromEnv({})", ty),
+        }
+    }
+}
+
+impl<'tcx> fmt::Display for traits::DomainGoal<'tcx> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use traits::DomainGoal::*;
+
+        match self {
+            Holds(wc) => write!(fmt, "{}", wc),
+            WellFormed(wf) => write!(fmt, "{}", wf),
+            FromEnv(from_env) => write!(fmt, "{}", from_env),
+            Normalize(projection) => write!(
+                fmt,
+                "Normalize({} -> {})",
+                projection.projection_ty,
+                projection.ty
+            ),
+        }
+    }
+}
+
+impl fmt::Display for traits::QuantifierKind {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use traits::QuantifierKind::*;
+
+        match self {
+            Universal => write!(fmt, "forall"),
+            Existential => write!(fmt, "exists"),
+        }
+    }
+}
+
+/// Collect names for regions / types bound by a quantified goal / clause.
+/// This collector does not try to do anything clever like in ppaux, it's just used
+/// for debug output in tests anyway.
+struct BoundNamesCollector {
+    // Just sort by name because `BoundRegion::BrNamed` does not have a `BoundVar` index anyway.
+    regions: BTreeSet<InternedString>,
+
+    // Sort by `BoundVar` index, so usually this should be equivalent to the order given
+    // by the list of type parameters.
+    types: BTreeMap<u32, InternedString>,
+
+    binder_index: ty::DebruijnIndex,
+}
+
+impl BoundNamesCollector {
+    fn new() -> Self {
+        BoundNamesCollector {
+            regions: BTreeSet::new(),
+            types: BTreeMap::new(),
+            binder_index: ty::INNERMOST,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.regions.is_empty() && self.types.is_empty()
+    }
+
+    fn write_names(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut start = true;
+        for r in &self.regions {
+            if !start {
+                write!(fmt, ", ")?;
+            }
+            start = false;
+            write!(fmt, "{}", r)?;
+        }
+        for (_, t) in &self.types {
+            if !start {
+                write!(fmt, ", ")?;
+            }
+            start = false;
+            write!(fmt, "{}", t)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'tcx> TypeVisitor<'tcx> for BoundNamesCollector {
+    fn visit_binder<T: TypeFoldable<'tcx>>(&mut self, t: &ty::Binder<T>) -> bool {
+        self.binder_index.shift_in(1);
+        let result = t.super_visit_with(self);
+        self.binder_index.shift_out(1);
+        result
+    }
+
+    fn visit_ty(&mut self, t: ty::Ty<'tcx>) -> bool {
+        use syntax::symbol::Symbol;
+
+        match t.sty {
+            ty::Bound(bound_ty) if bound_ty.index == self.binder_index => {
+                self.types.insert(
+                    bound_ty.var.as_u32(),
+                    match bound_ty.kind {
+                        ty::BoundTyKind::Param(name) => name,
+                        ty::BoundTyKind::Anon => Symbol::intern(
+                            &format!("^{}", bound_ty.var.as_u32())
+                        ).as_interned_str(),
+                    }
+                );
+            }
+
+            _ => (),
+        };
+
+        t.super_visit_with(self)
+    }
+
+    fn visit_region(&mut self, r: ty::Region<'tcx>) -> bool {
+        use syntax::symbol::Symbol;
+
+        match r {
+            ty::ReLateBound(index, br) if *index == self.binder_index => {
+                match br {
+                    ty::BoundRegion::BrNamed(_, name) => {
+                        self.regions.insert(*name);
+                    }
+
+                    ty::BoundRegion::BrAnon(var) => {
+                        self.regions.insert(Symbol::intern(
+                            &format!("'^{}", var)
+                        ).as_interned_str());
+                    }
+
+                    _ => (),
+                }
+            }
+
+            _ => (),
+        };
+
+        r.super_visit_with(self)
+    }
+}
+
+impl<'tcx> fmt::Display for traits::Goal<'tcx> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use traits::GoalKind::*;
+
+        match self {
+            Implies(hypotheses, goal) => {
+                write!(fmt, "if (")?;
+                for (index, hyp) in hypotheses.iter().enumerate() {
+                    if index > 0 {
+                        write!(fmt, ", ")?;
+                    }
+                    write!(fmt, "{}", hyp)?;
+                }
+                write!(fmt, ") {{ {} }}", goal)
+            }
+            And(goal1, goal2) => write!(fmt, "({} && {})", goal1, goal2),
+            Not(goal) => write!(fmt, "not {{ {} }}", goal),
+            DomainGoal(goal) => write!(fmt, "{}", goal),
+            Quantified(qkind, goal) => {
+                let mut collector = BoundNamesCollector::new();
+                goal.skip_binder().visit_with(&mut collector);
+
+                if !collector.is_empty() {
+                    write!(fmt, "{}<", qkind)?;
+                    collector.write_names(fmt)?;
+                    write!(fmt, "> {{ ")?;
+                }
+
+                write!(fmt, "{}", goal.skip_binder())?;
+
+                if !collector.is_empty() {
+                    write!(fmt, " }}")?;
+                }
+
+                Ok(())
+            }
+            CannotProve => write!(fmt, "CannotProve"),
+        }
+    }
+}
+
+impl<'tcx> fmt::Display for traits::ProgramClause<'tcx> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let traits::ProgramClause { goal, hypotheses, .. } = self;
+        write!(fmt, "{}", goal)?;
+        if !hypotheses.is_empty() {
+            write!(fmt, " :- ")?;
+            for (index, condition) in hypotheses.iter().enumerate() {
+                if index > 0 {
+                    write!(fmt, ", ")?;
+                }
+                write!(fmt, "{}", condition)?;
+            }
+        }
+        write!(fmt, ".")
+    }
+}
+
+impl<'tcx> fmt::Display for traits::Clause<'tcx> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use traits::Clause::*;
+
+        match self {
+            Implies(clause) => write!(fmt, "{}", clause),
+            ForAll(clause) => {
+                let mut collector = BoundNamesCollector::new();
+                clause.skip_binder().visit_with(&mut collector);
+
+                if !collector.is_empty() {
+                    write!(fmt, "forall<")?;
+                    collector.write_names(fmt)?;
+                    write!(fmt, "> {{ ")?;
+                }
+
+                write!(fmt, "{}", clause.skip_binder())?;
+
+                if !collector.is_empty() {
+                    write!(fmt, " }}")?;
+                }
+
+                Ok(())
+            }
+        }
+    }
+}
+
 ///////////////////////////////////////////////////////////////////////////
 // Lift implementations
 
@@ -172,9 +470,7 @@ impl<'a, 'tcx> Lift<'tcx> for traits::SelectionError<'a> {
                 )
             }
             super::TraitNotObjectSafe(def_id) => Some(super::TraitNotObjectSafe(def_id)),
-            super::ConstEvalFailure(ref err) => tcx.lift(&**err).map(|err| super::ConstEvalFailure(
-                err.into(),
-            )),
+            super::ConstEvalFailure(err) => Some(super::ConstEvalFailure(err)),
             super::Overflow => Some(super::Overflow),
         }
     }
@@ -323,7 +619,103 @@ impl<'a, 'tcx> Lift<'tcx> for traits::Vtable<'a, ()> {
                     nested,
                 })
             ),
+            traits::VtableTraitAlias(traits::VtableTraitAliasData {
+                alias_def_id,
+                substs,
+                nested,
+            }) => tcx.lift(&substs).map(|substs|
+                traits::VtableTraitAlias(traits::VtableTraitAliasData {
+                    alias_def_id,
+                    substs,
+                    nested,
+                })
+            ),
         }
+    }
+}
+
+EnumLiftImpl! {
+    impl<'a, 'tcx> Lift<'tcx> for traits::WhereClause<'a> {
+        type Lifted = traits::WhereClause<'tcx>;
+        (traits::WhereClause::Implemented)(trait_ref),
+        (traits::WhereClause::ProjectionEq)(projection),
+        (traits::WhereClause::TypeOutlives)(ty_outlives),
+        (traits::WhereClause::RegionOutlives)(region_outlives),
+    }
+}
+
+EnumLiftImpl! {
+    impl<'a, 'tcx> Lift<'tcx> for traits::WellFormed<'a> {
+        type Lifted = traits::WellFormed<'tcx>;
+        (traits::WellFormed::Trait)(trait_ref),
+        (traits::WellFormed::Ty)(ty),
+    }
+}
+
+EnumLiftImpl! {
+    impl<'a, 'tcx> Lift<'tcx> for traits::FromEnv<'a> {
+        type Lifted = traits::FromEnv<'tcx>;
+        (traits::FromEnv::Trait)(trait_ref),
+        (traits::FromEnv::Ty)(ty),
+    }
+}
+
+EnumLiftImpl! {
+    impl<'a, 'tcx> Lift<'tcx> for traits::DomainGoal<'a> {
+        type Lifted = traits::DomainGoal<'tcx>;
+        (traits::DomainGoal::Holds)(wc),
+        (traits::DomainGoal::WellFormed)(wf),
+        (traits::DomainGoal::FromEnv)(from_env),
+        (traits::DomainGoal::Normalize)(projection),
+    }
+}
+
+EnumLiftImpl! {
+    impl<'a, 'tcx> Lift<'tcx> for traits::GoalKind<'a> {
+        type Lifted = traits::GoalKind<'tcx>;
+        (traits::GoalKind::Implies)(hypotheses, goal),
+        (traits::GoalKind::And)(goal1, goal2),
+        (traits::GoalKind::Not)(goal),
+        (traits::GoalKind::DomainGoal)(domain_goal),
+        (traits::GoalKind::Quantified)(kind, goal),
+        (traits::GoalKind::CannotProve),
+    }
+}
+
+impl<'a, 'tcx> Lift<'tcx> for traits::Environment<'a> {
+    type Lifted = traits::Environment<'tcx>;
+    fn lift_to_tcx<'b, 'gcx>(&self, tcx: TyCtxt<'b, 'gcx, 'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(&self.clauses).map(|clauses| {
+            traits::Environment {
+                clauses,
+            }
+        })
+    }
+}
+
+impl<'a, 'tcx, G: Lift<'tcx>> Lift<'tcx> for traits::InEnvironment<'a, G> {
+    type Lifted = traits::InEnvironment<'tcx, G::Lifted>;
+    fn lift_to_tcx<'b, 'gcx>(&self, tcx: TyCtxt<'b, 'gcx, 'tcx>) -> Option<Self::Lifted> {
+        tcx.lift(&self.environment).and_then(|environment| {
+            tcx.lift(&self.goal).map(|goal| {
+                traits::InEnvironment {
+                    environment,
+                    goal,
+                }
+            })
+        })
+    }
+}
+
+impl<'tcx, C> Lift<'tcx> for chalk_engine::ExClause<C>
+where
+    C: chalk_engine::context::Context + Clone,
+    C: traits::ExClauseLift<'tcx>,
+{
+    type Lifted = C::LiftedExClause;
+
+    fn lift_to_tcx<'a, 'gcx>(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Option<Self::Lifted> {
+        <C as traits::ExClauseLift>::lift_ex_clause_to_tcx(self, tcx)
     }
 }
 
@@ -388,6 +780,12 @@ BraceStructTypeFoldableImpl! {
     } where N: TypeFoldable<'tcx>
 }
 
+BraceStructTypeFoldableImpl! {
+    impl<'tcx, N> TypeFoldable<'tcx> for traits::VtableTraitAliasData<'tcx, N> {
+        alias_def_id, substs, nested
+    } where N: TypeFoldable<'tcx>
+}
+
 EnumTypeFoldableImpl! {
     impl<'tcx, N> TypeFoldable<'tcx> for traits::Vtable<'tcx, N> {
         (traits::VtableImpl)(a),
@@ -398,6 +796,7 @@ EnumTypeFoldableImpl! {
         (traits::VtableParam)(a),
         (traits::VtableBuiltin)(a),
         (traits::VtableObject)(a),
+        (traits::VtableTraitAlias)(a),
     } where N: TypeFoldable<'tcx>
 }
 
@@ -408,135 +807,8 @@ BraceStructTypeFoldableImpl! {
     } where T: TypeFoldable<'tcx>
 }
 
-impl<'tcx> fmt::Display for traits::WhereClause<'tcx> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use traits::WhereClause::*;
-
-        match self {
-            Implemented(trait_ref) => write!(fmt, "Implemented({})", trait_ref),
-            ProjectionEq(projection) => write!(fmt, "ProjectionEq({})", projection),
-            RegionOutlives(predicate) => write!(fmt, "RegionOutlives({})", predicate),
-            TypeOutlives(predicate) => write!(fmt, "TypeOutlives({})", predicate),
-        }
-    }
-}
-
-impl<'tcx> fmt::Display for traits::WellFormed<'tcx> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use traits::WellFormed::*;
-
-        match self {
-            Trait(trait_ref) => write!(fmt, "WellFormed({})", trait_ref),
-            Ty(ty) => write!(fmt, "WellFormed({})", ty),
-        }
-    }
-}
-
-impl<'tcx> fmt::Display for traits::FromEnv<'tcx> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use traits::FromEnv::*;
-
-        match self {
-            Trait(trait_ref) => write!(fmt, "FromEnv({})", trait_ref),
-            Ty(ty) => write!(fmt, "FromEnv({})", ty),
-        }
-    }
-}
-
-impl<'tcx> fmt::Display for traits::DomainGoal<'tcx> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use traits::DomainGoal::*;
-
-        match self {
-            Holds(wc) => write!(fmt, "{}", wc),
-            WellFormed(wf) => write!(fmt, "{}", wf),
-            FromEnv(from_env) => write!(fmt, "{}", from_env),
-            Normalize(projection) => write!(fmt, "Normalize({})", projection),
-        }
-    }
-}
-
-impl fmt::Display for traits::QuantifierKind {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use traits::QuantifierKind::*;
-
-        match self {
-            Universal => write!(fmt, "forall"),
-            Existential => write!(fmt, "exists"),
-        }
-    }
-}
-
-impl<'tcx> fmt::Display for traits::Goal<'tcx> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use traits::GoalKind::*;
-
-        match self {
-            Implies(hypotheses, goal) => {
-                write!(fmt, "if (")?;
-                for (index, hyp) in hypotheses.iter().enumerate() {
-                    if index > 0 {
-                        write!(fmt, ", ")?;
-                    }
-                    write!(fmt, "{}", hyp)?;
-                }
-                write!(fmt, ") {{ {} }}", goal)
-            }
-            And(goal1, goal2) => write!(fmt, "({} && {})", goal1, goal2),
-            Not(goal) => write!(fmt, "not {{ {} }}", goal),
-            DomainGoal(goal) => write!(fmt, "{}", goal),
-            Quantified(qkind, goal) => {
-                // FIXME: appropriate binder names
-                write!(fmt, "{}<> {{ {} }}", qkind, goal.skip_binder())
-            }
-            CannotProve => write!(fmt, "CannotProve"),
-        }
-    }
-}
-
-impl<'tcx> fmt::Display for traits::ProgramClause<'tcx> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let traits::ProgramClause { goal, hypotheses } = self;
-        write!(fmt, "{}", goal)?;
-        if !hypotheses.is_empty() {
-            write!(fmt, " :- ")?;
-            for (index, condition) in hypotheses.iter().enumerate() {
-                if index > 0 {
-                    write!(fmt, ", ")?;
-                }
-                write!(fmt, "{}", condition)?;
-            }
-        }
-        write!(fmt, ".")
-    }
-}
-
-impl<'tcx> fmt::Display for traits::Clause<'tcx> {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use traits::Clause::*;
-
-        match self {
-            Implies(clause) => write!(fmt, "{}", clause),
-            ForAll(clause) => {
-                // FIXME: appropriate binder names
-                write!(fmt, "forall<> {{ {} }}", clause.skip_binder())
-            }
-        }
-    }
-}
-
 EnumTypeFoldableImpl! {
     impl<'tcx> TypeFoldable<'tcx> for traits::WhereClause<'tcx> {
-        (traits::WhereClause::Implemented)(trait_ref),
-        (traits::WhereClause::ProjectionEq)(projection),
-        (traits::WhereClause::TypeOutlives)(ty_outlives),
-        (traits::WhereClause::RegionOutlives)(region_outlives),
-    }
-}
-
-EnumLiftImpl! {
-    impl<'a, 'tcx> Lift<'tcx> for traits::WhereClause<'a> {
-        type Lifted = traits::WhereClause<'tcx>;
         (traits::WhereClause::Implemented)(trait_ref),
         (traits::WhereClause::ProjectionEq)(projection),
         (traits::WhereClause::TypeOutlives)(ty_outlives),
@@ -551,14 +823,6 @@ EnumTypeFoldableImpl! {
     }
 }
 
-EnumLiftImpl! {
-    impl<'a, 'tcx> Lift<'tcx> for traits::WellFormed<'a> {
-        type Lifted = traits::WellFormed<'tcx>;
-        (traits::WellFormed::Trait)(trait_ref),
-        (traits::WellFormed::Ty)(ty),
-    }
-}
-
 EnumTypeFoldableImpl! {
     impl<'tcx> TypeFoldable<'tcx> for traits::FromEnv<'tcx> {
         (traits::FromEnv::Trait)(trait_ref),
@@ -566,26 +830,8 @@ EnumTypeFoldableImpl! {
     }
 }
 
-EnumLiftImpl! {
-    impl<'a, 'tcx> Lift<'tcx> for traits::FromEnv<'a> {
-        type Lifted = traits::FromEnv<'tcx>;
-        (traits::FromEnv::Trait)(trait_ref),
-        (traits::FromEnv::Ty)(ty),
-    }
-}
-
 EnumTypeFoldableImpl! {
     impl<'tcx> TypeFoldable<'tcx> for traits::DomainGoal<'tcx> {
-        (traits::DomainGoal::Holds)(wc),
-        (traits::DomainGoal::WellFormed)(wf),
-        (traits::DomainGoal::FromEnv)(from_env),
-        (traits::DomainGoal::Normalize)(projection),
-    }
-}
-
-EnumLiftImpl! {
-    impl<'a, 'tcx> Lift<'tcx> for traits::DomainGoal<'a> {
-        type Lifted = traits::DomainGoal<'tcx>;
         (traits::DomainGoal::Holds)(wc),
         (traits::DomainGoal::WellFormed)(wf),
         (traits::DomainGoal::FromEnv)(from_env),
@@ -604,18 +850,6 @@ EnumTypeFoldableImpl! {
         (traits::GoalKind::Not)(goal),
         (traits::GoalKind::DomainGoal)(domain_goal),
         (traits::GoalKind::Quantified)(qkind, goal),
-        (traits::GoalKind::CannotProve),
-    }
-}
-
-EnumLiftImpl! {
-    impl<'a, 'tcx> Lift<'tcx> for traits::GoalKind<'a> {
-        type Lifted = traits::GoalKind<'tcx>;
-        (traits::GoalKind::Implies)(hypotheses, goal),
-        (traits::GoalKind::And)(goal1, goal2),
-        (traits::GoalKind::Not)(goal),
-        (traits::GoalKind::DomainGoal)(domain_goal),
-        (traits::GoalKind::Quantified)(kind, goal),
         (traits::GoalKind::CannotProve),
     }
 }
@@ -647,8 +881,13 @@ impl<'tcx> TypeFoldable<'tcx> for traits::Goal<'tcx> {
 BraceStructTypeFoldableImpl! {
     impl<'tcx> TypeFoldable<'tcx> for traits::ProgramClause<'tcx> {
         goal,
-        hypotheses
+        hypotheses,
+        category,
     }
+}
+
+CloneTypeFoldableAndLiftImpls! {
+    traits::ProgramClauseCategory,
 }
 
 EnumTypeFoldableImpl! {
@@ -658,7 +897,18 @@ EnumTypeFoldableImpl! {
     }
 }
 
-impl<'tcx> TypeFoldable<'tcx> for &'tcx ty::List<traits::Clause<'tcx>> {
+BraceStructTypeFoldableImpl! {
+    impl<'tcx> TypeFoldable<'tcx> for traits::Environment<'tcx> { clauses }
+}
+
+BraceStructTypeFoldableImpl! {
+    impl<'tcx, G> TypeFoldable<'tcx> for traits::InEnvironment<'tcx, G> {
+        environment,
+        goal
+    } where G: TypeFoldable<'tcx>
+}
+
+impl<'tcx> TypeFoldable<'tcx> for traits::Clauses<'tcx> {
     fn super_fold_with<'gcx: 'tcx, F: TypeFolder<'gcx, 'tcx>>(&self, folder: &mut F) -> Self {
         let v = self.iter()
             .map(|t| t.fold_with(folder))
@@ -689,18 +939,6 @@ where
             self,
             visitor,
         )
-    }
-}
-
-impl<'tcx, C> Lift<'tcx> for chalk_engine::ExClause<C>
-where
-    C: chalk_engine::context::Context + Clone,
-    C: traits::ExClauseLift<'tcx>,
-{
-    type Lifted = C::LiftedExClause;
-
-    fn lift_to_tcx<'a, 'gcx>(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Option<Self::Lifted> {
-        <C as traits::ExClauseLift>::lift_ex_clause_to_tcx(self, tcx)
     }
 }
 

@@ -24,7 +24,8 @@ use std::ops::Range;
 
 use core::DocContext;
 use fold::DocFolder;
-use html::markdown::markdown_links;
+use html::markdown::{find_testable_code, markdown_links, ErrorCodes, LangString};
+
 use passes::Pass;
 
 pub const COLLECT_INTRA_DOC_LINKS: Pass =
@@ -56,6 +57,7 @@ enum PathKind {
 struct LinkCollector<'a, 'tcx: 'a, 'rcx: 'a, 'cstore: 'rcx> {
     cx: &'a DocContext<'a, 'tcx, 'rcx, 'cstore>,
     mod_ids: Vec<NodeId>,
+    is_nightly_build: bool,
 }
 
 impl<'a, 'tcx, 'rcx, 'cstore> LinkCollector<'a, 'tcx, 'rcx, 'cstore> {
@@ -63,6 +65,7 @@ impl<'a, 'tcx, 'rcx, 'cstore> LinkCollector<'a, 'tcx, 'rcx, 'cstore> {
         LinkCollector {
             cx,
             mod_ids: Vec::new(),
+            is_nightly_build: UnstableFeatures::from_environment().is_nightly_build(),
         }
     }
 
@@ -211,6 +214,43 @@ impl<'a, 'tcx, 'rcx, 'cstore> LinkCollector<'a, 'tcx, 'rcx, 'cstore> {
     }
 }
 
+fn look_for_tests<'a, 'tcx: 'a, 'rcx: 'a, 'cstore: 'rcx>(
+    cx: &'a DocContext<'a, 'tcx, 'rcx, 'cstore>,
+    dox: &str,
+    item: &Item,
+) {
+    if (item.is_mod() && cx.tcx.hir.as_local_node_id(item.def_id).is_none()) ||
+       cx.as_local_node_id(item.def_id).is_none() {
+        // If non-local, no need to check anything.
+        return;
+    }
+
+    struct Tests {
+        found_tests: usize,
+    }
+
+    impl ::test::Tester for Tests {
+        fn add_test(&mut self, _: String, _: LangString, _: usize) {
+            self.found_tests += 1;
+        }
+    }
+
+    let mut tests = Tests {
+        found_tests: 0,
+    };
+
+    if find_testable_code(&dox, &mut tests, ErrorCodes::No).is_ok() {
+        if tests.found_tests == 0 {
+            let mut diag = cx.tcx.struct_span_lint_node(
+                lint::builtin::MISSING_DOC_CODE_EXAMPLES,
+                NodeId::from_u32(0),
+                span_of_attrs(&item.attrs),
+                "Missing code example in this documentation");
+            diag.emit();
+        }
+    }
+}
+
 impl<'a, 'tcx, 'rcx, 'cstore> DocFolder for LinkCollector<'a, 'tcx, 'rcx, 'cstore> {
     fn fold_item(&mut self, mut item: Item) -> Option<Item> {
         let item_node_id = if item.is_mod() {
@@ -241,14 +281,14 @@ impl<'a, 'tcx, 'rcx, 'cstore> DocFolder for LinkCollector<'a, 'tcx, 'rcx, 'cstor
         let current_item = match item.inner {
             ModuleItem(..) => {
                 if item.attrs.inner_docs {
-                    if item_node_id.unwrap() != NodeId::new(0) {
+                    if item_node_id.unwrap() != NodeId::from_u32(0) {
                         item.name.clone()
                     } else {
                         None
                     }
                 } else {
                     match parent_node.or(self.mod_ids.last().cloned()) {
-                        Some(parent) if parent != NodeId::new(0) => {
+                        Some(parent) if parent != NodeId::from_u32(0) => {
                             //FIXME: can we pull the parent module's name from elsewhere?
                             Some(self.cx.tcx.hir.name(parent).to_string())
                         }
@@ -272,6 +312,12 @@ impl<'a, 'tcx, 'rcx, 'cstore> DocFolder for LinkCollector<'a, 'tcx, 'rcx, 'cstor
 
         let cx = self.cx;
         let dox = item.attrs.collapsed_doc_value().unwrap_or_else(String::new);
+
+        look_for_tests(&cx, &dox, &item);
+
+        if !self.is_nightly_build {
+            return None;
+        }
 
         for (ori_link, link_range) in markdown_links(&dox) {
             // bail early for real links
@@ -431,7 +477,7 @@ fn macro_resolve(cx: &DocContext, path_str: &str) -> Option<Def> {
     let mut resolver = cx.resolver.borrow_mut();
     let parent_scope = resolver.dummy_parent_scope();
     if let Ok(def) = resolver.resolve_macro_to_def_inner(&path, MacroKind::Bang,
-                                                         &parent_scope, false) {
+                                                         &parent_scope, false, false) {
         if let SyntaxExtension::DeclMacro { .. } = *resolver.get_macro(def) {
             return Some(def);
         }
@@ -481,7 +527,7 @@ fn resolution_failure(
                 doc_comment_padding +
                     // Each subsequent leading whitespace and `///`
                     code_dox.lines().skip(1).take(line_offset - 1).fold(0, |sum, line| {
-                        sum + doc_comment_padding + line.len() - line.trim().len()
+                        sum + doc_comment_padding + line.len() - line.trim_start().len()
                     })
             };
 
@@ -492,13 +538,13 @@ fn resolution_failure(
             );
 
             diag = cx.tcx.struct_span_lint_node(lint::builtin::INTRA_DOC_LINK_RESOLUTION_FAILURE,
-                                                NodeId::new(0),
+                                                NodeId::from_u32(0),
                                                 sp,
                                                 &msg);
             diag.span_label(sp, "cannot be resolved, ignoring");
         } else {
             diag = cx.tcx.struct_span_lint_node(lint::builtin::INTRA_DOC_LINK_RESOLUTION_FAILURE,
-                                                NodeId::new(0),
+                                                NodeId::from_u32(0),
                                                 sp,
                                                 &msg);
 
@@ -518,7 +564,7 @@ fn resolution_failure(
         diag
     } else {
         cx.tcx.struct_span_lint_node(lint::builtin::INTRA_DOC_LINK_RESOLUTION_FAILURE,
-                                     NodeId::new(0),
+                                     NodeId::from_u32(0),
                                      sp,
                                      &msg)
     };

@@ -86,7 +86,7 @@
 #![feature(box_syntax)]
 #![feature(cfg_target_has_atomic)]
 #![feature(coerce_unsized)]
-#![cfg_attr(stage0, feature(min_const_fn))]
+#![feature(dispatch_from_dyn)]
 #![feature(core_intrinsics)]
 #![feature(custom_attribute)]
 #![feature(dropck_eyepatch)]
@@ -115,11 +115,11 @@
 #![feature(unsize)]
 #![feature(allocator_internals)]
 #![feature(on_unimplemented)]
-#![feature(chunks_exact)]
 #![feature(rustc_const_unstable)]
 #![feature(const_vec_new)]
 #![feature(slice_partition_dedup)]
 #![feature(maybe_uninit)]
+#![feature(alloc_layout_extra)]
 
 // Allow testing this library
 

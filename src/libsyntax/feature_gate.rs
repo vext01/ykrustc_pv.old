@@ -349,7 +349,7 @@ declare_features! (
     (active, abi_thiscall, "1.19.0", None, None),
 
     // Allows a test to fail without failing the whole suite
-    (active, allow_fail, "1.19.0", Some(42219), None),
+    (active, allow_fail, "1.19.0", Some(46488), None),
 
     // Allows unsized tuple coercion.
     (active, unsized_tuple_coercion, "1.20.0", Some(42877), None),
@@ -376,7 +376,7 @@ declare_features! (
     (active, non_exhaustive, "1.22.0", Some(44109), None),
 
     // `crate` as visibility modifier, synonymous to `pub(crate)`
-    (active, crate_visibility_modifier, "1.23.0", Some(45388), None),
+    (active, crate_visibility_modifier, "1.23.0", Some(53120), None),
 
     // extern types
     (active, extern_types, "1.23.0", Some(43467), None),
@@ -391,13 +391,13 @@ declare_features! (
     (active, generic_associated_types, "1.23.0", Some(44265), None),
 
     // `extern` in paths
-    (active, extern_in_paths, "1.23.0", Some(44660), None),
+    (active, extern_in_paths, "1.23.0", Some(55600), None),
 
     // Use `?` as the Kleene "at most one" operator
     (active, macro_at_most_once_rep, "1.25.0", Some(48075), None),
 
     // Infer static outlives requirements; RFC 2093
-    (active, infer_static_outlives_requirements, "1.26.0", Some(44493), None),
+    (active, infer_static_outlives_requirements, "1.26.0", Some(54185), None),
 
     // Multiple patterns with `|` in `if let` and `while let`
     (active, if_while_or_patterns, "1.26.0", Some(48215), None),
@@ -448,9 +448,6 @@ declare_features! (
     // Integer match exhaustiveness checking
     (active, exhaustive_integer_patterns, "1.30.0", Some(50907), None),
 
-    // RFC 2070: #[panic_implementation] / #[panic_handler]
-    (active, panic_implementation, "1.28.0", Some(44489), None),
-
     // #[doc(keyword = "...")]
     (active, doc_keyword, "1.28.0", Some(51315), None),
 
@@ -462,12 +459,11 @@ declare_features! (
 
     (active, abi_amdgpu_kernel, "1.29.0", Some(51575), None),
 
-    // impl<I:Iterator> Iterator for &mut Iterator
-    // impl Debug for Foo<'_>
-    (active, impl_header_lifetime_elision, "1.30.0", Some(15872), Some(Edition::Edition2018)),
+    // Perma-unstable; added for testing E0705
+    (active, test_2018_feature, "1.31.0", Some(0), Some(Edition::Edition2018)),
 
     // Support for arbitrary delimited token streams in non-macro attributes
-    (active, unrestricted_attribute_tokens, "1.30.0", Some(44690), None),
+    (active, unrestricted_attribute_tokens, "1.30.0", Some(55208), None),
 
     // Allows `use x::y;` to resolve through `self::x`, not just `::x`
     (active, uniform_paths, "1.30.0", Some(53130), None),
@@ -502,6 +498,9 @@ declare_features! (
 
     // Allows `const _: TYPE = VALUE`
     (active, underscore_const_names, "1.31.0", Some(54912), None),
+
+    // `reason = ` in lint attributes and `expect` lint attribute
+    (active, lint_reasons, "1.31.0", Some(54503), None),
 );
 
 declare_features! (
@@ -536,6 +535,8 @@ declare_features! (
      Some("subsumed by `#![feature(proc_macro_hygiene)]`")),
     (removed, proc_macro_gen, "1.27.0", Some(54727), None,
      Some("subsumed by `#![feature(proc_macro_hygiene)]`")),
+    (removed, panic_implementation, "1.28.0", Some(44489), None,
+     Some("subsumed by `#[panic_handler]`")),
 );
 
 declare_features! (
@@ -684,6 +685,11 @@ declare_features! (
     (accepted, min_const_fn, "1.31.0", Some(53555), None),
     // Scoped lints
     (accepted, tool_lints, "1.31.0", Some(44690), None),
+    // impl<I:Iterator> Iterator for &mut Iterator
+    // impl Debug for Foo<'_>
+    (accepted, impl_header_lifetime_elision, "1.31.0", Some(15872), None),
+    // `extern crate foo as bar;` puts `bar` into extern prelude.
+    (accepted, extern_crate_item_prelude, "1.31.0", Some(55599), None),
 );
 
 // If you change this, please modify src/doc/unstable-book as well. You must
@@ -1152,16 +1158,6 @@ pub const BUILTIN_ATTRIBUTES: &'static [(&'static str, AttributeType, AttributeG
                                    "infer 'static lifetime requirements",
                                    cfg_fn!(infer_static_outlives_requirements))),
 
-    // RFC 2070 (deprecated attribute name)
-    ("panic_implementation",
-     Normal,
-     Gated(Stability::Deprecated("https://github.com/rust-lang/rust/issues/44489\
-                                  #issuecomment-415140224",
-                                 Some("replace this attribute with `#[panic_handler]`")),
-           "panic_implementation",
-           "this attribute was renamed to `panic_handler`",
-           cfg_fn!(panic_implementation))),
-
     // RFC 2070
     ("panic_handler", Normal, Ungated),
 
@@ -1586,6 +1582,7 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                 }
             }
 
+            ast::ItemKind::Static(..) |
             ast::ItemKind::Const(_,_) => {
                 if i.ident.name == "_" {
                     gate_feature_post!(&self, underscore_const_names, i.span,
@@ -1617,7 +1614,7 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
             }
 
             ast::ItemKind::Struct(..) => {
-                if let Some(attr) = attr::find_by_name(&i.attrs[..], "repr") {
+                for attr in attr::filter_by_name(&i.attrs[..], "repr") {
                     for item in attr.meta_item_list().unwrap_or_else(Vec::new) {
                         if item.check_name("simd") {
                             gate_feature_post!(&self, repr_simd, attr.span,
@@ -1627,17 +1624,11 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                             if name == "packed" {
                                 gate_feature_post!(&self, repr_packed, attr.span,
                                                    "the `#[repr(packed(n))]` attribute \
-                                                   is experimental");
+                                                    is experimental");
                             }
                         }
                     }
                 }
-            }
-
-            ast::ItemKind::TraitAlias(..) => {
-                gate_feature_post!(&self, trait_alias,
-                                   i.span,
-                                   "trait aliases are not yet fully implemented");
             }
 
             ast::ItemKind::Impl(_, polarity, defaultness, _, _, _, _) => {
@@ -1659,6 +1650,15 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                 gate_feature_post!(&self, optin_builtin_traits,
                                    i.span,
                                    "auto traits are experimental and possibly buggy");
+            }
+
+            ast::ItemKind::TraitAlias(..) => {
+                gate_feature_post!(
+                    &self,
+                    trait_alias,
+                    i.span,
+                    "trait aliases are experimental"
+                );
             }
 
             ast::ItemKind::MacroDef(ast::MacroDef { legacy: false, .. }) => {
@@ -1930,7 +1930,7 @@ pub fn get_features(span_handler: &Handler, krate_attrs: &[ast::Attribute],
     let incomplete_features = ["generic_associated_types"];
 
     let mut features = Features::new();
-    let mut edition_enabled_features = FxHashMap();
+    let mut edition_enabled_features = FxHashMap::default();
 
     for &edition in ALL_EDITIONS {
         if edition <= crate_edition {

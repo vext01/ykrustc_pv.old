@@ -13,13 +13,10 @@
 //! In a given program, the standard library has one “global” memory allocator
 //! that is used for example by `Box<T>` and `Vec<T>`.
 //!
-//! Currently the default global allocator is unspecified.
-//! The compiler may link to a version of [jemalloc] on some platforms,
-//! but this is not guaranteed.
-//! Libraries, however, like `cdylib`s and `staticlib`s are guaranteed
-//! to use the [`System`] by default.
+//! Currently the default global allocator is unspecified. Libraries, however,
+//! like `cdylib`s and `staticlib`s are guaranteed to use the [`System`] by
+//! default.
 //!
-//! [jemalloc]: https://github.com/jemalloc/jemalloc
 //! [`System`]: struct.System.html
 //!
 //! # The `#[global_allocator]` attribute
@@ -76,15 +73,101 @@
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 use core::{mem, ptr};
+use core::ptr::NonNull;
 use sys_common::util::dumb_print;
 
 #[stable(feature = "alloc_module", since = "1.28.0")]
 #[doc(inline)]
 pub use alloc_crate::alloc::*;
 
+/// The default memory allocator provided by the operating system.
+///
+/// This is based on `malloc` on Unix platforms and `HeapAlloc` on Windows,
+/// plus related functions.
+///
+/// This type implements the `GlobalAlloc` trait and Rust programs by default
+/// work as if they had this definition:
+///
+/// ```rust
+/// use std::alloc::System;
+///
+/// #[global_allocator]
+/// static A: System = System;
+///
+/// fn main() {
+///     let a = Box::new(4); // Allocates from the system allocator.
+///     println!("{}", a);
+/// }
+/// ```
+///
+/// You can also define your own wrapper around `System` if you'd like, such as
+/// keeping track of the number of all bytes allocated:
+///
+/// ```rust
+/// use std::alloc::{System, GlobalAlloc, Layout};
+/// use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering::SeqCst};
+///
+/// struct Counter;
+///
+/// static ALLOCATED: AtomicUsize = ATOMIC_USIZE_INIT;
+///
+/// unsafe impl GlobalAlloc for Counter {
+///     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+///         let ret = System.alloc(layout);
+///         if !ret.is_null() {
+///             ALLOCATED.fetch_add(layout.size(), SeqCst);
+///         }
+///         return ret
+///     }
+///
+///     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+///         System.dealloc(ptr, layout);
+///         ALLOCATED.fetch_sub(layout.size(), SeqCst);
+///     }
+/// }
+///
+/// #[global_allocator]
+/// static A: Counter = Counter;
+///
+/// fn main() {
+///     println!("allocated bytes before main: {}", ALLOCATED.load(SeqCst));
+/// }
+/// ```
+///
+/// It can also be used directly to allocate memory independently of whatever
+/// global allocator has been selected for a Rust program. For example if a Rust
+/// program opts in to using jemalloc as the global allocator, `System` will
+/// still allocate memory using `malloc` and `HeapAlloc`.
 #[stable(feature = "alloc_system_type", since = "1.28.0")]
-#[doc(inline)]
-pub use alloc_system::System;
+#[derive(Debug, Copy, Clone)]
+pub struct System;
+
+// The Alloc impl just forwards to the GlobalAlloc impl, which is in `std::sys::*::alloc`.
+#[unstable(feature = "allocator_api", issue = "32838")]
+unsafe impl Alloc for System {
+    #[inline]
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
+        NonNull::new(GlobalAlloc::alloc(self, layout)).ok_or(AllocErr)
+    }
+
+    #[inline]
+    unsafe fn alloc_zeroed(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
+        NonNull::new(GlobalAlloc::alloc_zeroed(self, layout)).ok_or(AllocErr)
+    }
+
+    #[inline]
+    unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        GlobalAlloc::dealloc(self, ptr.as_ptr(), layout)
+    }
+
+    #[inline]
+    unsafe fn realloc(&mut self,
+                      ptr: NonNull<u8>,
+                      layout: Layout,
+                      new_size: usize) -> Result<NonNull<u8>, AllocErr> {
+        NonNull::new(GlobalAlloc::realloc(self, ptr.as_ptr(), layout, new_size)).ok_or(AllocErr)
+    }
+}
 
 static HOOK: AtomicPtr<()> = AtomicPtr::new(ptr::null_mut());
 
@@ -144,6 +227,10 @@ pub fn rust_oom(layout: Layout) -> ! {
 #[unstable(feature = "alloc_internals", issue = "0")]
 pub mod __default_lib_allocator {
     use super::{System, Layout, GlobalAlloc};
+    // These magic symbol names are used as a fallback for implementing the
+    // `__rust_alloc` etc symbols (see `src/liballoc/alloc.rs) when there is
+    // no `#[global_allocator]` attribute.
+
     // for symbol names src/librustc/middle/allocator.rs
     // for signatures src/librustc_allocator/lib.rs
 

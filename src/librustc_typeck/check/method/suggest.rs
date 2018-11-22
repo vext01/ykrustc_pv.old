@@ -174,7 +174,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                               .map(|arg| print::to_string(print::NO_ANN,
                                                                           |s| s.print_expr(arg)))
                                               .collect::<Vec<_>>()
-                                              .join(", ")).unwrap_or("...".to_owned())));
+                                              .join(", ")).unwrap_or_else(|| "...".to_owned())));
                     }
                 }
             }
@@ -249,7 +249,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         match expr.node {
                             hir::ExprKind::Lit(ref lit) => { // numeric literal
                                 let snippet = tcx.sess.source_map().span_to_snippet(lit.span)
-                                    .unwrap_or("<numeric literal>".to_owned());
+                                    .unwrap_or_else(|_| "<numeric literal>".to_owned());
 
                                 err.span_suggestion_with_applicability(
                                                     lit.span,
@@ -521,7 +521,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     with_crate_prefix(|| self.tcx.item_path_str(*did)),
                     additional_newline
                 )
-            }).collect();
+            });
 
             err.span_suggestions_with_applicability(
                                                     span,
@@ -750,7 +750,7 @@ fn compute_all_traits<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Vec<DefId>
         });
 
         // Cross-crate:
-        let mut external_mods = FxHashSet();
+        let mut external_mods = FxHashSet::default();
         fn handle_external_def(tcx: TyCtxt,
                                traits: &mut Vec<DefId>,
                                external_mods: &mut FxHashSet<DefId>,

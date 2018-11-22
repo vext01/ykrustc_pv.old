@@ -43,7 +43,7 @@ impl<'tcx> fmt::Display for Discr<'tcx> {
         match self.ty.sty {
             ty::Int(ity) => {
                 let bits = ty::tls::with(|tcx| {
-                    Integer::from_attr(tcx, SignedInt(ity)).size().bits()
+                    Integer::from_attr(&tcx, SignedInt(ity)).size().bits()
                 });
                 let x = self.val as i128;
                 // sign extend the raw representation to be an i128
@@ -62,8 +62,8 @@ impl<'tcx> Discr<'tcx> {
     }
     pub fn checked_add<'a, 'gcx>(self, tcx: TyCtxt<'a, 'gcx, 'tcx>, n: u128) -> (Self, bool) {
         let (int, signed) = match self.ty.sty {
-            Int(ity) => (Integer::from_attr(tcx, SignedInt(ity)), true),
-            Uint(uty) => (Integer::from_attr(tcx, UnsignedInt(uty)), false),
+            Int(ity) => (Integer::from_attr(&tcx, SignedInt(ity)), true),
+            Uint(uty) => (Integer::from_attr(&tcx, UnsignedInt(uty)), false),
             _ => bug!("non integer discriminant"),
         };
 
@@ -363,7 +363,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                erased_self_ty,
                predicates);
 
-        assert!(!erased_self_ty.has_escaping_regions());
+        assert!(!erased_self_ty.has_escaping_bound_vars());
 
         traits::elaborate_predicates(self, predicates)
             .filter_map(|predicate| {
@@ -389,7 +389,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                         // construct such an object, but this seems
                         // correct even if that code changes).
                         let ty::OutlivesPredicate(ref t, ref r) = predicate.skip_binder();
-                        if t == &erased_self_ty && !r.has_escaping_regions() {
+                        if t == &erased_self_ty && !r.has_escaping_bound_vars() {
                             Some(*r)
                         } else {
                             None
@@ -527,7 +527,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         self.def_key(def_id).disambiguated_data.data == DefPathData::ClosureExpr
     }
 
-    /// True if `def_id` refers to a trait (e.g., `trait Foo { ... }`).
+    /// True if `def_id` refers to a trait (i.e., `trait Foo { ... }`).
     pub fn is_trait(self, def_id: DefId) -> bool {
         if let DefPathData::Trait(_) = self.def_key(def_id).disambiguated_data.data {
             true
@@ -846,7 +846,7 @@ impl<'a, 'tcx> ty::TyS<'tcx> {
         // contains a different, structurally recursive type, maintain a stack
         // of seen types and check recursion for each of them (issues #3008, #3779).
         let mut seen: Vec<Ty<'_>> = Vec::new();
-        let mut representable_cache = FxHashMap();
+        let mut representable_cache = FxHashMap::default();
         let r = is_type_structurally_recursive(
             tcx, sp, &mut seen, &mut representable_cache, self);
         debug!("is_type_representable: {:?} is {:?}", self, r);
@@ -951,7 +951,7 @@ fn needs_drop_raw<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
         // Can refer to a type which may drop.
         // FIXME(eddyb) check this against a ParamEnv.
-        ty::Dynamic(..) | ty::Projection(..) | ty::Param(_) |
+        ty::Dynamic(..) | ty::Projection(..) | ty::Param(_) | ty::Bound(..) |
         ty::Opaque(..) | ty::Infer(_) | ty::Error => true,
 
         ty::UnnormalizedProjection(..) => bug!("only used with chalk-engine"),

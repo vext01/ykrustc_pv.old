@@ -13,7 +13,7 @@ use constrained_type_params::{identify_constrained_type_params, Parameter};
 
 use hir::def_id::DefId;
 use rustc::traits::{self, ObligationCauseCode};
-use rustc::ty::{self, Lift, Ty, TyCtxt, GenericParamDefKind, TypeFoldable};
+use rustc::ty::{self, Lift, Ty, TyCtxt, TyKind, GenericParamDefKind, TypeFoldable};
 use rustc::ty::subst::{Subst, Substs};
 use rustc::ty::util::ExplicitSelf;
 use rustc::util::nodemap::{FxHashSet, FxHashMap};
@@ -28,9 +28,9 @@ use errors::{DiagnosticBuilder, DiagnosticId};
 use rustc::hir::intravisit::{self, Visitor, NestedVisitorMap};
 use rustc::hir;
 
-/// Helper type of a temporary returned by .for_item(...).
+/// Helper type of a temporary returned by `.for_item(...)`.
 /// Necessary because we can't write the following bound:
-/// F: for<'b, 'tcx> where 'gcx: 'tcx FnOnce(FnCtxt<'b, 'gcx, 'tcx>).
+/// `F: for<'b, 'tcx> where 'gcx: 'tcx FnOnce(FnCtxt<'b, 'gcx, 'tcx>)`.
 struct CheckWfFcxBuilder<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     inherited: super::InheritedBuilder<'a, 'gcx, 'tcx>,
     id: ast::NodeId,
@@ -118,12 +118,17 @@ pub fn check_item_well_formed<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: Def
         hir::ItemKind::Fn(..) => {
             check_item_fn(tcx, item);
         }
-        hir::ItemKind::Static(..) => {
-            check_item_type(tcx, item);
+        hir::ItemKind::Static(ref ty, ..) => {
+            check_item_type(tcx, item.id, ty.span, false);
         }
-        hir::ItemKind::Const(..) => {
-            check_item_type(tcx, item);
+        hir::ItemKind::Const(ref ty, ..) => {
+            check_item_type(tcx, item.id, ty.span, false);
         }
+        hir::ItemKind::ForeignMod(ref module) => for it in module.items.iter() {
+            if let hir::ForeignItemKind::Static(ref ty, ..) = it.node {
+                check_item_type(tcx, it.id, ty.span, true);
+            }
+        },
         hir::ItemKind::Struct(ref struct_def, ref ast_generics) => {
             check_type_defn(tcx, item, false, |fcx| {
                 vec![fcx.non_enum_variant(struct_def)]
@@ -146,6 +151,9 @@ pub fn check_item_well_formed<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: Def
             check_variances_for_type_defn(tcx, item, ast_generics);
         }
         hir::ItemKind::Trait(..) => {
+            check_trait(tcx, item);
+        }
+        hir::ItemKind::TraitAlias(..) => {
             check_trait(tcx, item);
         }
         _ => {}
@@ -178,6 +186,8 @@ fn check_associated_item<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                    item_id: ast::NodeId,
                                    span: Span,
                                    sig_if_method: Option<&hir::MethodSig>) {
+    debug!("check_associated_item: {:?}", item_id);
+
     let code = ObligationCauseCode::MiscObligation;
     for_id(tcx, item_id, span).with_fcx(|fcx, tcx| {
         let item = fcx.tcx.associated_item(fcx.tcx.hir.local_def_id(item_id));
@@ -303,6 +313,8 @@ fn check_type_defn<'a, 'tcx, F>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 }
 
 fn check_trait<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, item: &hir::Item) {
+    debug!("check_trait: {:?}", item.id);
+
     let trait_def_id = tcx.hir.local_def_id(item.id);
 
     let trait_def = tcx.trait_def(trait_def_id);
@@ -335,14 +347,33 @@ fn check_item_fn<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, item: &hir::Item) {
     })
 }
 
-fn check_item_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, item: &hir::Item) {
-    debug!("check_item_type: {:?}", item);
+fn check_item_type<'a, 'tcx>(
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    item_id: ast::NodeId,
+    ty_span: Span,
+    allow_foreign_ty: bool,
+) {
+    debug!("check_item_type: {:?}", item_id);
 
-    for_item(tcx, item).with_fcx(|fcx, _this| {
-        let ty = fcx.tcx.type_of(fcx.tcx.hir.local_def_id(item.id));
-        let item_ty = fcx.normalize_associated_types_in(item.span, &ty);
+    for_id(tcx, item_id, ty_span).with_fcx(|fcx, _this| {
+        let ty = fcx.tcx.type_of(fcx.tcx.hir.local_def_id(item_id));
+        let item_ty = fcx.normalize_associated_types_in(ty_span, &ty);
 
-        fcx.register_wf_obligation(item_ty, item.span, ObligationCauseCode::MiscObligation);
+        let mut forbid_unsized = true;
+        if allow_foreign_ty {
+            if let TyKind::Foreign(_) = tcx.struct_tail(item_ty).sty {
+                forbid_unsized = false;
+            }
+        }
+
+        fcx.register_wf_obligation(item_ty, ty_span, ObligationCauseCode::MiscObligation);
+        if forbid_unsized {
+            fcx.register_bound(
+                item_ty,
+                fcx.tcx.require_lang_item(lang_items::SizedTraitLangItem),
+                traits::ObligationCause::new(ty_span, fcx.body_id, traits::MiscObligation),
+            );
+        }
 
         vec![] // no implied bounds in a const etc
     });
@@ -461,6 +492,7 @@ fn check_where_clauses<'a, 'gcx, 'fcx, 'tcx>(
     });
     // Now we build the substituted predicates.
     let default_obligations = predicates.predicates.iter().flat_map(|&(pred, _)| {
+        #[derive(Default)]
         struct CountParams { params: FxHashSet<u32> }
         impl<'tcx> ty::fold::TypeVisitor<'tcx> for CountParams {
             fn visit_ty(&mut self, t: Ty<'tcx>) -> bool {
@@ -477,7 +509,7 @@ fn check_where_clauses<'a, 'gcx, 'fcx, 'tcx>(
                 true
             }
         }
-        let mut param_count = CountParams { params: FxHashSet() };
+        let mut param_count = CountParams::default();
         let has_region = pred.visit_with(&mut param_count);
         let substituted_pred = pred.subst(fcx.tcx, substs);
         // Don't check non-defaulted params, dependent defaults (including lifetimes)
@@ -592,7 +624,7 @@ fn check_existential_types<'a, 'fcx, 'gcx, 'tcx>(
                     let opaque_node_id = tcx.hir.as_local_node_id(def_id).unwrap();
                     if may_define_existential_type(tcx, fn_def_id, opaque_node_id) {
                         trace!("check_existential_types may define. Generics: {:#?}", generics);
-                        let mut seen: FxHashMap<_, Vec<_>> = FxHashMap();
+                        let mut seen: FxHashMap<_, Vec<_>> = FxHashMap::default();
                         for (subst, param) in substs.iter().zip(&generics.params) {
                             match subst.unpack() {
                                 ty::subst::UnpackedKind::Type(ty) => match ty.sty {
@@ -659,7 +691,7 @@ fn check_existential_types<'a, 'fcx, 'gcx, 'tcx>(
                     } // if may_define_existential_type
 
                     // now register the bounds on the parameters of the existential type
-                    // so the parameters given by the function need to fulfil them
+                    // so the parameters given by the function need to fulfill them
                     // ```rust
                     // existential type Foo<T: Bar>: 'static;
                     // fn foo<U>() -> Foo<U> { .. *}
@@ -816,7 +848,10 @@ fn check_variances_for_type_defn<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         }
 
         let param = &hir_generics.params[index];
-        report_bivariance(tcx, param.span, param.name.ident().name);
+        match param.name {
+            hir::ParamName::Error => { }
+            _ => report_bivariance(tcx, param.span, param.name.ident().name),
+        }
     }
 }
 
@@ -875,8 +910,8 @@ fn check_false_global_bounds<'a, 'gcx, 'tcx>(
 
     let def_id = fcx.tcx.hir.local_def_id(id);
     let predicates = fcx.tcx.predicates_of(def_id).predicates
-        .into_iter()
-        .map(|(p, _)| p)
+        .iter()
+        .map(|(p, _)| *p)
         .collect();
     // Check elaborated bounds
     let implied_obligations = traits::elaborate_predicates(fcx.tcx, predicates);
@@ -962,7 +997,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             AdtField { ty: field_ty, span: field.span }
         })
         .collect();
-        AdtVariant { fields: fields }
+        AdtVariant { fields }
     }
 
     fn enum_variants(&self, enum_def: &hir::EnumDef) -> Vec<AdtVariant<'tcx>> {
@@ -981,7 +1016,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             }
 
             None => {
-                // Inherent impl: take implied bounds from the self type.
+                // Inherent impl: take implied bounds from the `self` type.
                 let self_ty = self.tcx.type_of(impl_def_id);
                 let self_ty = self.normalize_associated_types_in(span, &self_ty);
                 vec![self_ty]

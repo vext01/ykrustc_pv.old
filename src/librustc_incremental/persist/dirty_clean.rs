@@ -160,7 +160,7 @@ const LABELS_FN_IN_TRAIT: &[&[&str]] = &[
     EXTRA_TRAIT,
 ];
 
-/// For generic cases like inline-assemply/mod/etc
+/// For generic cases like inline-assembly/mod/etc
 const LABELS_HIR_ONLY: &[&[&str]] = &[
     BASE_HIR,
 ];
@@ -226,7 +226,7 @@ pub fn check_dirty_clean_annotations<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
         let krate = tcx.hir.krate();
         let mut dirty_clean_visitor = DirtyCleanVisitor {
             tcx,
-            checked_attrs: FxHashSet(),
+            checked_attrs: Default::default(),
         };
         krate.visit_all_item_likes(&mut dirty_clean_visitor);
 

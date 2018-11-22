@@ -764,14 +764,15 @@ impl Command {
     ///
     /// ```should_panic
     /// use std::process::Command;
+    /// use std::io::{self, Write};
     /// let output = Command::new("/bin/cat")
     ///                      .arg("file.txt")
     ///                      .output()
     ///                      .expect("failed to execute process");
     ///
     /// println!("status: {}", output.status);
-    /// println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
-    /// println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+    /// io::stdout().write_all(&output.stdout).unwrap();
+    /// io::stderr().write_all(&output.stderr).unwrap();
     ///
     /// assert!(output.status.success());
     /// ```
@@ -951,6 +952,7 @@ impl Stdio {
     ///
     /// ```no_run
     /// use std::process::{Command, Stdio};
+    /// use std::io::{self, Write};
     ///
     /// let output = Command::new("rev")
     ///     .stdin(Stdio::inherit())
@@ -958,7 +960,8 @@ impl Stdio {
     ///     .output()
     ///     .expect("Failed to execute command");
     ///
-    /// println!("You piped in the reverse of: {}", String::from_utf8_lossy(&output.stdout));
+    /// print!("You piped in the reverse of: ");
+    /// io::stdout().write_all(&output.stdout).unwrap();
     /// ```
     #[stable(feature = "process", since = "1.0.0")]
     pub fn inherit() -> Stdio { Stdio(imp::Stdio::Inherit) }
@@ -1016,6 +1019,28 @@ impl fmt::Debug for Stdio {
 
 #[stable(feature = "stdio_from", since = "1.20.0")]
 impl From<ChildStdin> for Stdio {
+    /// Converts a `ChildStdin` into a `Stdio`
+    ///
+    /// # Examples
+    ///
+    /// `ChildStdin` will be converted to `Stdio` using `Stdio::from` under the hood.
+    ///
+    /// ```rust
+    /// use std::process::{Command, Stdio};
+    ///
+    /// let reverse = Command::new("rev")
+    ///     .stdin(Stdio::piped())
+    ///     .spawn()
+    ///     .expect("failed reverse command");
+    ///
+    /// let _echo = Command::new("echo")
+    ///     .arg("Hello, world!")
+    ///     .stdout(reverse.stdin.unwrap()) // Converted into a Stdio here
+    ///     .output()
+    ///     .expect("failed echo command");
+    ///
+    /// // "!dlrow ,olleH" echoed to console
+    /// ```
     fn from(child: ChildStdin) -> Stdio {
         Stdio::from_inner(child.into_inner().into())
     }
@@ -1023,6 +1048,28 @@ impl From<ChildStdin> for Stdio {
 
 #[stable(feature = "stdio_from", since = "1.20.0")]
 impl From<ChildStdout> for Stdio {
+    /// Converts a `ChildStdout` into a `Stdio`
+    ///
+    /// # Examples
+    ///
+    /// `ChildStdout` will be converted to `Stdio` using `Stdio::from` under the hood.
+    ///
+    /// ```rust
+    /// use std::process::{Command, Stdio};
+    ///
+    /// let hello = Command::new("echo")
+    ///     .arg("Hello, world!")
+    ///     .stdout(Stdio::piped())
+    ///     .spawn()
+    ///     .expect("failed echo command");
+    ///
+    /// let reverse = Command::new("rev")
+    ///     .stdin(hello.stdout.unwrap())  // Converted into a Stdio here
+    ///     .output()
+    ///     .expect("failed reverse command");
+    ///
+    /// assert_eq!(reverse.stdout, b"!dlrow ,olleH\n");
+    /// ```
     fn from(child: ChildStdout) -> Stdio {
         Stdio::from_inner(child.into_inner().into())
     }
@@ -1030,6 +1077,30 @@ impl From<ChildStdout> for Stdio {
 
 #[stable(feature = "stdio_from", since = "1.20.0")]
 impl From<ChildStderr> for Stdio {
+    /// Converts a `ChildStderr` into a `Stdio`
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use std::process::{Command, Stdio};
+    ///
+    /// let reverse = Command::new("rev")
+    ///     .arg("non_existing_file.txt")
+    ///     .stderr(Stdio::piped())
+    ///     .spawn()
+    ///     .expect("failed reverse command");
+    ///
+    /// let cat = Command::new("cat")
+    ///     .arg("-")
+    ///     .stdin(reverse.stderr.unwrap()) // Converted into a Stdio here
+    ///     .output()
+    ///     .expect("failed echo command");
+    ///
+    /// assert_eq!(
+    ///     String::from_utf8_lossy(&cat.stdout),
+    ///     "rev: cannot open non_existing_file.txt: No such file or directory\n"
+    /// );
+    /// ```
     fn from(child: ChildStderr) -> Stdio {
         Stdio::from_inner(child.into_inner().into())
     }
@@ -1037,6 +1108,26 @@ impl From<ChildStderr> for Stdio {
 
 #[stable(feature = "stdio_from", since = "1.20.0")]
 impl From<fs::File> for Stdio {
+    /// Converts a `File` into a `Stdio`
+    ///
+    /// # Examples
+    ///
+    /// `File` will be converted to `Stdio` using `Stdio::from` under the hood.
+    ///
+    /// ```rust,no_run
+    /// use std::fs::File;
+    /// use std::process::Command;
+    ///
+    /// // With the `foo.txt` file containing `Hello, world!"
+    /// let file = File::open("foo.txt").unwrap();
+    ///
+    /// let reverse = Command::new("rev")
+    ///     .stdin(file)  // Implicit File conversion into a Stdio
+    ///     .output()
+    ///     .expect("failed reverse command");
+    ///
+    /// assert_eq!(reverse.stdout, b"!dlrow ,olleH");
+    /// ```
     fn from(file: fs::File) -> Stdio {
         Stdio::from_inner(file.into_inner().into())
     }
@@ -1249,7 +1340,7 @@ impl Child {
     /// Attempts to collect the exit status of the child if it has already
     /// exited.
     ///
-    /// This function will not block the calling thread and will only advisorily
+    /// This function will not block the calling thread and will only
     /// check to see if the child process has exited or not. If the child has
     /// exited then on Unix the process id is reaped. This function is
     /// guaranteed to repeatedly return a successful exit status so long as the

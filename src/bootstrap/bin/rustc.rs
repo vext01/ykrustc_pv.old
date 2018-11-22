@@ -232,7 +232,9 @@ fn main() {
                 // flesh out rpath support more fully in the future.
                 cmd.arg("-Z").arg("osx-rpath-install-name");
                 Some("-Wl,-rpath,@loader_path/../lib")
-            } else if !target.contains("windows") && !target.contains("wasm32") {
+            } else if !target.contains("windows") &&
+                      !target.contains("wasm32") &&
+                      !target.contains("fuchsia") {
                 Some("-Wl,-rpath,$ORIGIN/../lib")
             } else {
                 None
@@ -253,8 +255,15 @@ fn main() {
 
         // When running miri tests, we need to generate MIR for all libraries
         if env::var("TEST_MIRI").ok().map_or(false, |val| val == "true") {
+            // The flags here should be kept in sync with `add_miri_default_args`
+            // in miri's `src/lib.rs`.
             cmd.arg("-Zalways-encode-mir");
-            cmd.arg("-Zmir-emit-validate=1");
+            // These options are preferred by miri, to be able to perform better validation,
+            // but the bootstrap compiler might not understand them.
+            if stage != "0" {
+                cmd.arg("-Zmir-emit-retag");
+                cmd.arg("-Zmir-opt-level=0");
+            }
         }
 
         // Force all crates compiled by this compiler to (a) be unstable and (b)
@@ -285,10 +294,6 @@ fn main() {
 
     if env::var_os("RUSTC_PARALLEL_QUERIES").is_some() {
         cmd.arg("--cfg").arg("parallel_queries");
-    }
-
-    if env::var_os("RUSTC_VERIFY_LLVM_IR").is_some() {
-        cmd.arg("-Z").arg("verify-llvm-ir");
     }
 
     if env::var_os("RUSTC_DENY_WARNINGS").is_some() && env::var_os("RUSTC_EXTERNAL_TOOL").is_none()

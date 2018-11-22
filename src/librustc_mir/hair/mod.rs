@@ -19,6 +19,7 @@ use rustc::hir::def_id::DefId;
 use rustc::middle::region;
 use rustc::ty::subst::Substs;
 use rustc::ty::{AdtDef, UpvarSubsts, Region, Ty, Const};
+use rustc::ty::layout::VariantIdx;
 use rustc::hir;
 use syntax::ast;
 use syntax_pos::Span;
@@ -28,6 +29,7 @@ pub mod cx;
 
 pub mod pattern;
 pub use self::pattern::{BindingMode, Pattern, PatternKind, FieldPattern};
+pub(crate) use self::pattern::{PatternTypeProjection, PatternTypeProjections};
 
 mod util;
 
@@ -71,9 +73,13 @@ pub enum StmtRef<'tcx> {
 }
 
 #[derive(Clone, Debug)]
+pub struct StatementSpan(pub Span);
+
+#[derive(Clone, Debug)]
 pub struct Stmt<'tcx> {
     pub kind: StmtKind<'tcx>,
     pub opt_destruction_scope: Option<region::Scope>,
+    pub span: StatementSpan,
 }
 
 #[derive(Clone, Debug)]
@@ -114,7 +120,7 @@ pub enum StmtKind<'tcx> {
 /// reference to an expression in this enum is an `ExprRef<'tcx>`, which
 /// may in turn be another instance of this enum (boxed), or else an
 /// unlowered `&'tcx H::Expr`. Note that instances of `Expr` are very
-/// shortlived. They are created by `Hair::to_expr`, analyzed and
+/// short-lived. They are created by `Hair::to_expr`, analyzed and
 /// converted into MIR, and then discarded.
 ///
 /// If you compare `Expr` to the full compiler AST, you will see it is
@@ -263,7 +269,7 @@ pub enum ExprKind<'tcx> {
     },
     Adt {
         adt_def: &'tcx AdtDef,
-        variant_index: usize,
+        variant_index: VariantIdx,
         substs: &'tcx Substs<'tcx>,
 
         /// Optional user-given substs: for something like `let x =
@@ -276,12 +282,12 @@ pub enum ExprKind<'tcx> {
     PlaceTypeAscription {
         source: ExprRef<'tcx>,
         /// Type that the user gave to this expression
-        user_ty: UserTypeAnnotation<'tcx>,
+        user_ty: Option<UserTypeAnnotation<'tcx>>,
     },
     ValueTypeAscription {
         source: ExprRef<'tcx>,
         /// Type that the user gave to this expression
-        user_ty: UserTypeAnnotation<'tcx>,
+        user_ty: Option<UserTypeAnnotation<'tcx>>,
     },
     Closure {
         closure_id: DefId,

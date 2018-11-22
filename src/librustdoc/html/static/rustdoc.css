@@ -70,7 +70,7 @@
 /* General structure and fonts */
 
 body {
-	font: 16px/1.4 "Source Serif Pro", Georgia, Times, "Times New Roman", serif;
+	font: 16px/1.4 "Source Serif Pro", serif;
 	margin: 0;
 	position: relative;
 	padding: 10px 15px 20px 15px;
@@ -114,7 +114,7 @@ h3.impl, h3.method, h3.type {
 h1, h2, h3, h4,
 .sidebar, a.source, .search-input, .content table :not(code)>a,
 .collapse-toggle, div.item-list .out-of-band {
-	font-family: "Fira Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+	font-family: "Fira Sans", sans-serif;
 }
 
 ol, ul {
@@ -133,7 +133,7 @@ summary {
 }
 
 code, pre {
-	font-family: "Source Code Pro", Menlo, Monaco, Consolas, "DejaVu Sans Mono", Inconsolata, monospace;
+	font-family: "Source Code Pro", monospace;
 	white-space: pre-wrap;
 }
 .docblock code, .docblock-short code {
@@ -282,6 +282,32 @@ nav.sub {
 	padding-left: 0;
 }
 
+body:not(.source) .example-wrap {
+	display: inline-flex;
+	margin-bottom: 10px;
+}
+
+.example-wrap {
+	width: 100%;
+}
+
+.example-wrap > pre.line-number {
+	overflow: initial;
+	border: 1px solid;
+	border-top-left-radius: 5px;
+	border-bottom-left-radius: 5px;
+	padding: 13px 8px;
+	text-align: right;
+}
+
+body:not(.source) .example-wrap > pre.rust {
+	width: 100%;
+}
+
+body:not(.source) .example-wrap > pre {
+	margin: 0;
+}
+
 #search {
 	margin-left: 230px;
 	position: relative;
@@ -394,7 +420,7 @@ h4 > code, h3 > code, .invisible > code {
 }
 #main > .since {
 	top: inherit;
-	font-family: "Fira Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+	font-family: "Fira Sans", sans-serif;
 }
 
 .content table:not(.table-display) {
@@ -458,17 +484,6 @@ h4 > code, h3 > code, .invisible > code {
 	margin-bottom: 15px;
 }
 
-.content .impl-items .method, .content .impl-items > .type, .impl-items > .associatedconstant {
-	margin-left: 20px;
-}
-.content .impl-items .docblock, .content .impl-items .stability {
-	margin-bottom: .6em;
-}
-
-.content .impl-items > .stability {
-	margin-left: 40px;
-}
-
 .content .docblock > .impl-items {
 	margin-left: 20px;
 	margin-top: -34px;
@@ -499,6 +514,10 @@ h4 > code, h3 > code, .invisible > code {
 	margin-top: -13px;
 }
 
+.sub-variant > div > .stability {
+	margin-top: initial;
+}
+
 .content .stability::before {
 	content: '˪';
 	font-size: 30px;
@@ -506,7 +525,20 @@ h4 > code, h3 > code, .invisible > code {
 	top: -9px;
 	left: -13px;
 }
-.methods > .stability {
+
+.content .impl-items .method, .content .impl-items > .type, .impl-items > .associatedconstant {
+	margin-left: 20px;
+}
+
+.content .impl-items .docblock, .content .impl-items .stability {
+	margin-bottom: .6em;
+}
+
+.content .impl-items > .stability {
+	margin-left: 40px;
+}
+
+.methods > .stability, .content .impl-items > .stability {
 	margin-top: -8px;
 }
 
@@ -814,6 +846,11 @@ h3 > .collapse-toggle, h4 > .collapse-toggle {
 	text-align: center;
 }
 
+.collapse-toggle.hidden-default {
+	position: relative;
+	margin-left: 20px;
+}
+
 .ghost {
 	display: none;
 }
@@ -848,7 +885,23 @@ span.since {
 }
 
 .sub-variant, .sub-variant > h3 {
-	margin-top: 0 !important;
+	margin-top: 1px !important;
+}
+
+#main > .sub-variant > h3 {
+	font-size: 15px;
+	margin-left: 25px;
+	margin-bottom: 5px;
+}
+
+.sub-variant > div {
+	margin-left: 20px;
+	margin-bottom: 10px;
+}
+
+.sub-variant > div > span {
+	display: block;
+	position: relative;
 }
 
 .toggle-label {
@@ -908,7 +961,7 @@ span.since {
 		padding-top: 0px;
 	}
 
-	body > .sidebar {
+	.rustdoc > .sidebar {
 		height: 45px;
 		min-height: 40px;
 		margin: 0;
@@ -1086,17 +1139,14 @@ pre.rust {
 	float: left;
 	width: 33.3%;
 	text-align: center;
-	border-bottom: 1px solid;
 	font-size: 18px;
 	cursor: pointer;
+	border-top: 2px solid;
 }
 
-#titles > div.selected {
-	border-bottom: 3px solid;
-}
-
-#titles > div:hover {
-	border-bottom: 3px solid;
+#titles > div:not(:last-child):not(.selected) {
+	margin-right: 1px;
+	width: calc(33.3% - 1px);
 }
 
 #titles > div > div.count {
@@ -1293,7 +1343,7 @@ h3.important {
 kbd {
 	display: inline-block;
 	padding: 3px 5px;
-	font: 15px "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+	font: 15px monospace;
 	line-height: 10px;
 	vertical-align: middle;
 	border: solid 1px;

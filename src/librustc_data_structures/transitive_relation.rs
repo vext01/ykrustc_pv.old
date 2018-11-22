@@ -42,6 +42,18 @@ pub struct TransitiveRelation<T: Clone + Debug + Eq + Hash> {
     closure: Lock<Option<BitMatrix<usize, usize>>>,
 }
 
+// HACK(eddyb) manual impl avoids `Default` bound on `T`.
+impl<T: Clone + Debug + Eq + Hash> Default for TransitiveRelation<T> {
+    fn default() -> Self {
+        TransitiveRelation {
+            elements: Default::default(),
+            map: Default::default(),
+            edges: Default::default(),
+            closure: Default::default(),
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, RustcEncodable, RustcDecodable, Debug)]
 struct Index(usize);
 
@@ -52,15 +64,6 @@ struct Edge {
 }
 
 impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
-    pub fn new() -> TransitiveRelation<T> {
-        TransitiveRelation {
-            elements: vec![],
-            map: FxHashMap(),
-            edges: vec![],
-            closure: Lock::new(None),
-        }
-    }
-
     pub fn is_empty(&self) -> bool {
         self.edges.is_empty()
     }
@@ -95,7 +98,7 @@ impl<T: Clone + Debug + Eq + Hash> TransitiveRelation<T> {
         where F: FnMut(&T) -> Option<U>,
               U: Clone + Debug + Eq + Hash + Clone,
     {
-        let mut result = TransitiveRelation::new();
+        let mut result = TransitiveRelation::default();
         for edge in &self.edges {
             result.add(f(&self.elements[edge.source.0])?, f(&self.elements[edge.target.0])?);
         }
@@ -487,7 +490,7 @@ impl<CTX> HashStable<CTX> for Index {
 
 #[test]
 fn test_one_step() {
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "b");
     relation.add("a", "c");
     assert!(relation.contains(&"a", &"c"));
@@ -498,7 +501,7 @@ fn test_one_step() {
 
 #[test]
 fn test_many_steps() {
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "b");
     relation.add("a", "c");
     relation.add("a", "f");
@@ -528,7 +531,7 @@ fn mubs_triangle() {
     //      ^
     //      |
     //      b
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "tcx");
     relation.add("b", "tcx");
     assert_eq!(relation.minimal_upper_bounds(&"a", &"b"), vec![&"tcx"]);
@@ -549,7 +552,7 @@ fn mubs_best_choice1() {
     // need the second pare down call to get the right result (after
     // intersection, we have [1, 2], but 2 -> 1).
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("0", "1");
     relation.add("0", "2");
 
@@ -576,7 +579,7 @@ fn mubs_best_choice2() {
     // Like the precedecing test, but in this case intersection is [2,
     // 1], and hence we rely on the first pare down call.
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("0", "1");
     relation.add("0", "2");
 
@@ -595,7 +598,7 @@ fn mubs_best_choice2() {
 fn mubs_no_best_choice() {
     // in this case, the intersection yields [1, 2], and the "pare
     // down" calls find nothing to remove.
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("0", "1");
     relation.add("0", "2");
 
@@ -612,7 +615,7 @@ fn mubs_best_choice_scc() {
     // in this case, 1 and 2 form a cycle; we pick arbitrarily (but
     // consistently).
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("0", "1");
     relation.add("0", "2");
 
@@ -634,7 +637,7 @@ fn pdub_crisscross() {
     //   /\       |
     // b -> b1 ---+
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "a1");
     relation.add("a", "b1");
     relation.add("b", "a1");
@@ -657,7 +660,7 @@ fn pdub_crisscross_more() {
     //   /\    /\             |
     // b -> b1 -> b2 ---------+
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "a1");
     relation.add("a", "b1");
     relation.add("b", "a1");
@@ -690,7 +693,7 @@ fn pdub_lub() {
     //            |
     // b -> b1 ---+
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "a1");
     relation.add("b", "b1");
     relation.add("a1", "x");
@@ -713,7 +716,7 @@ fn mubs_intermediate_node_on_one_side_only() {
     //           b
 
     // "digraph { a -> c -> d; b -> d; }",
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "c");
     relation.add("c", "d");
     relation.add("b", "d");
@@ -732,7 +735,7 @@ fn mubs_scc_1() {
     //           b
 
     // "digraph { a -> c -> d; d -> c; a -> d; b -> d; }",
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "c");
     relation.add("c", "d");
     relation.add("d", "c");
@@ -752,7 +755,7 @@ fn mubs_scc_2() {
     //      +--- b
 
     // "digraph { a -> c -> d; d -> c; b -> d; b -> c; }",
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "c");
     relation.add("c", "d");
     relation.add("d", "c");
@@ -772,7 +775,7 @@ fn mubs_scc_3() {
     //           b ---+
 
     // "digraph { a -> c -> d -> e -> c; b -> d; b -> e; }",
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "c");
     relation.add("c", "d");
     relation.add("d", "e");
@@ -794,7 +797,7 @@ fn mubs_scc_4() {
     //           b ---+
 
     // "digraph { a -> c -> d -> e -> c; a -> d; b -> e; }"
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     relation.add("a", "c");
     relation.add("c", "d");
     relation.add("d", "e");
@@ -832,7 +835,7 @@ fn parent() {
         (1, /*->*/ 3),
     ];
 
-    let mut relation = TransitiveRelation::new();
+    let mut relation = TransitiveRelation::default();
     for (a, b) in pairs {
         relation.add(a, b);
     }

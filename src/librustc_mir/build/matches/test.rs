@@ -22,6 +22,7 @@ use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::fx::FxHashMap;
 use rustc::ty::{self, Ty};
 use rustc::ty::util::IntTypeExt;
+use rustc::ty::layout::VariantIdx;
 use rustc::mir::*;
 use rustc::hir::{RangeEnd, Mutability};
 use syntax_pos::Span;
@@ -30,7 +31,7 @@ use std::cmp::Ordering;
 impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     /// Identifies what test is needed to decide if `match_pair` is applicable.
     ///
-    /// It is a bug to call this with a simplifyable pattern.
+    /// It is a bug to call this with a simplifiable pattern.
     pub fn test<'pat>(&mut self, match_pair: &MatchPair<'pat, 'tcx>) -> Test<'tcx> {
         match *match_pair.pattern.kind {
             PatternKind::Variant { ref adt_def, substs: _, variant_index: _, subpatterns: _ } => {
@@ -55,7 +56,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                         // these maps are empty to start; cases are
                         // added below in add_cases_to_switch
                         options: vec![],
-                        indices: FxHashMap(),
+                        indices: Default::default(),
                     }
                 }
             }
@@ -152,7 +153,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     pub fn add_variants_to_switch<'pat>(&mut self,
                                         test_place: &Place<'tcx>,
                                         candidate: &Candidate<'pat, 'tcx>,
-                                        variants: &mut BitSet<usize>)
+                                        variants: &mut BitSet<VariantIdx>)
                                         -> bool
     {
         let match_pair = match candidate.match_pairs.iter().find(|mp| mp.place == *test_place) {
@@ -196,7 +197,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 let mut targets = Vec::with_capacity(used_variants + 1);
                 let mut values = Vec::with_capacity(used_variants);
                 let tcx = self.hir.tcx();
-                for (idx, discr) in adt_def.discriminants(tcx).enumerate() {
+                for (idx, discr) in adt_def.discriminants(tcx) {
                     target_blocks.push(if variants.contains(idx) {
                         values.push(discr.val);
                         targets.push(self.cfg.start_new_block());
@@ -324,7 +325,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     let ref_ty = self.hir.tcx().mk_ref(region, tam);
 
                     // let lhs_ref_place = &lhs;
-                    let ref_rvalue = Rvalue::Ref(region, BorrowKind::Shared, place.clone());
+                    let ref_rvalue = Rvalue::Ref(region, BorrowKind::Shared, place);
                     let lhs_ref_place = self.temp(ref_ty, test.span);
                     self.cfg.push_assign(block, source_info, &lhs_ref_place, ref_rvalue);
                     let val = Operand::Move(lhs_ref_place);
@@ -512,7 +513,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                                                         variant_index,
                                                         subpatterns,
                                                         candidate);
-                resulting_candidates[variant_index].push(new_candidate);
+                resulting_candidates[variant_index.as_usize()].push(new_candidate);
                 true
             }
             (&TestKind::Switch { .. }, _) => false,
@@ -673,7 +674,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     fn candidate_after_variant_switch<'pat>(&mut self,
                                             match_pair_index: usize,
                                             adt_def: &'tcx ty::AdtDef,
-                                            variant_index: usize,
+                                            variant_index: VariantIdx,
                                             subpatterns: &'pat [FieldPattern<'tcx>],
                                             candidate: &Candidate<'pat, 'tcx>)
                                             -> Candidate<'pat, 'tcx> {

@@ -40,7 +40,7 @@ def v(*args):
     options.append(Option(*args, value=True))
 
 
-o("debug", "rust.debug", "debug mode; disables optimization unless `--enable-optimize` given")
+o("debug", "rust.debug", "enables debugging environment; does not affect optimization of bootstrapped code (use `--disable-optimize` for that)")
 o("docs", "build.docs", "build standard library documentation")
 o("compiler-docs", "build.compiler-docs", "build compiler documentation")
 o("optimize-tests", "rust.optimize-tests", "build tests with optimizations")
@@ -64,10 +64,11 @@ o("locked-deps", "build.locked-deps", "force Cargo.lock to be up to date")
 o("vendor", "build.vendor", "enable usage of vendored Rust crates")
 o("sanitizers", "build.sanitizers", "build the sanitizer runtimes (asan, lsan, msan, tsan)")
 o("dist-src", "rust.dist-src", "when building tarballs enables building a source tarball")
-o("cargo-openssl-static", "build.openssl-static", "static openssl in cargo")
+o("cargo-native-static", "build.cargo-native-static", "static native libraries in cargo")
 o("profiler", "build.profiler", "build the profiler runtime")
 o("emscripten", None, "compile the emscripten backend as well as LLVM")
 o("full-tools", None, "enable all tools")
+o("lld", "rust.lld", "build lld")
 o("lldb", "rust.lldb", "build lldb")
 o("missing-tools", "dist.missing-tools", "allow failures when building tools")
 
@@ -82,7 +83,6 @@ o("debuginfo", "rust.debuginfo", "build with debugger metadata")
 o("debuginfo-lines", "rust.debuginfo-lines", "build with line number debugger metadata")
 o("debuginfo-only-std", "rust.debuginfo-only-std", "build only libstd with debugging information")
 o("debuginfo-tools", "rust.debuginfo-tools", "build extended tools with debugging information")
-o("debug-jemalloc", "rust.debug-jemalloc", "build jemalloc with --enable-debug --enable-fill")
 v("save-toolstates", "rust.save-toolstates", "save build and test status of external tools into this file")
 
 v("prefix", "install.prefix", "set installation prefix")
@@ -99,7 +99,6 @@ v("llvm-root", None, "set LLVM root")
 v("llvm-config", None, "set path to llvm-config")
 v("llvm-filecheck", None, "set path to LLVM's FileCheck utility")
 v("python", "build.python", "set path to python")
-v("jemalloc-root", None, "set directory where libjemalloc_pic.a is located")
 v("android-cross-path", "target.arm-linux-androideabi.android-ndk",
   "Android NDK standalone path (deprecated)")
 v("i686-linux-android-ndk", "target.i686-linux-android.android-ndk",
@@ -148,7 +147,6 @@ v("default-linker", "rust.default-linker", "the default linker")
 # Many of these are saved below during the "writing configuration" step
 # (others are conditionally saved).
 o("manage-submodules", "build.submodules", "let the build manage the git submodules")
-o("jemalloc", "rust.use-jemalloc", "build liballoc with jemalloc")
 o("full-bootstrap", "build.full-bootstrap", "build three compilers instead of two")
 o("extended", "build.extended", "build an extended rust tool set")
 
@@ -330,8 +328,6 @@ for key in known_args:
         set('target.{}.llvm-config'.format(build()), value)
     elif option.name == 'llvm-filecheck':
         set('target.{}.llvm-filecheck'.format(build()), value)
-    elif option.name == 'jemalloc-root':
-        set('target.{}.jemalloc'.format(build()), value + '/libjemalloc_pic.a')
     elif option.name == 'tools':
         set('build.tools', value.split(','))
     elif option.name == 'host':
@@ -393,6 +389,13 @@ for target in configured_targets:
     targets[target][0] = targets[target][0].replace("x86_64-unknown-linux-gnu", target)
 
 
+def is_number(value):
+  try:
+    float(value)
+    return True
+  except ValueError:
+    return False
+
 # Here we walk through the constructed configuration we have from the parsed
 # command line arguments. We then apply each piece of configuration by
 # basically just doing a `sed` to change the various configuration line to what
@@ -406,7 +409,11 @@ def to_toml(value):
     elif isinstance(value, list):
         return '[' + ', '.join(map(to_toml, value)) + ']'
     elif isinstance(value, str):
-        return "'" + value + "'"
+        # Don't put quotes around numeric values
+        if is_number(value):
+            return value
+        else:
+            return "'" + value + "'"
     else:
         raise RuntimeError('no toml')
 

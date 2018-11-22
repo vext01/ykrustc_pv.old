@@ -247,8 +247,13 @@ impl<F> AttrProcMacro for F
 
 /// Represents a thing that maps token trees to Macro Results
 pub trait TTMacroExpander {
-    fn expand<'cx>(&self, ecx: &'cx mut ExtCtxt, span: Span, input: TokenStream)
-                   -> Box<dyn MacResult+'cx>;
+    fn expand<'cx>(
+        &self,
+        ecx: &'cx mut ExtCtxt,
+        span: Span,
+        input: TokenStream,
+        def_span: Option<Span>,
+    ) -> Box<dyn MacResult+'cx>;
 }
 
 pub type MacroExpanderFn =
@@ -259,8 +264,13 @@ impl<F> TTMacroExpander for F
     where F: for<'cx> Fn(&'cx mut ExtCtxt, Span, &[tokenstream::TokenTree])
     -> Box<dyn MacResult+'cx>
 {
-    fn expand<'cx>(&self, ecx: &'cx mut ExtCtxt, span: Span, input: TokenStream)
-                   -> Box<dyn MacResult+'cx> {
+    fn expand<'cx>(
+        &self,
+        ecx: &'cx mut ExtCtxt,
+        span: Span,
+        input: TokenStream,
+        _def_span: Option<Span>,
+    ) -> Box<dyn MacResult+'cx> {
         struct AvoidInterpolatedIdents;
 
         impl Folder for AvoidInterpolatedIdents {
@@ -481,7 +491,7 @@ impl DummyResult {
     pub fn raw_expr(sp: Span) -> P<ast::Expr> {
         P(ast::Expr {
             id: ast::DUMMY_NODE_ID,
-            node: ast::ExprKind::Lit(P(source_map::respan(sp, ast::LitKind::Bool(false)))),
+            node: ast::ExprKind::Lit(source_map::respan(sp, ast::LitKind::Bool(false))),
             span: sp,
             attrs: ThinVec::new(),
         })
@@ -583,6 +593,13 @@ impl MacroKind {
             MacroKind::Attr => "attribute macro",
             MacroKind::Derive => "derive macro",
             MacroKind::ProcMacroStub => "crate-local procedural macro",
+        }
+    }
+
+    pub fn article(self) -> &'static str {
+        match self {
+            MacroKind::Attr => "an",
+            _ => "a",
         }
     }
 }

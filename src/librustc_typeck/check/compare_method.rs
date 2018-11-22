@@ -233,7 +233,7 @@ fn compare_predicate_entailment<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         let mut selcx = traits::SelectionContext::new(&infcx);
 
         let impl_m_own_bounds = impl_m_predicates.instantiate_own(tcx, impl_to_skol_substs);
-        let (impl_m_own_bounds, _) = infcx.replace_late_bound_regions_with_fresh_var(
+        let (impl_m_own_bounds, _) = infcx.replace_bound_vars_with_fresh_vars(
             impl_m_span,
             infer::HigherRankedType,
             &ty::Binder::bind(impl_m_own_bounds.predicates)
@@ -262,10 +262,11 @@ fn compare_predicate_entailment<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         // Compute placeholder form of impl and trait method tys.
         let tcx = infcx.tcx;
 
-        let (impl_sig, _) =
-            infcx.replace_late_bound_regions_with_fresh_var(impl_m_span,
-                                                            infer::HigherRankedType,
-                                                            &tcx.fn_sig(impl_m.def_id));
+        let (impl_sig, _) = infcx.replace_bound_vars_with_fresh_vars(
+            impl_m_span,
+            infer::HigherRankedType,
+            &tcx.fn_sig(impl_m.def_id)
+        );
         let impl_sig =
             inh.normalize_associated_types_in(impl_m_span,
                                               impl_m_node_id,
@@ -325,7 +326,7 @@ fn compare_predicate_entailment<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                         diag.span_suggestion_with_applicability(
                             impl_err_span,
                             "consider change the type to match the mutability in trait",
-                            trait_err_str.to_string(),
+                            trait_err_str,
                             Applicability::MachineApplicable,
                         );
                     }
@@ -595,7 +596,9 @@ fn compare_number_of_generics<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     if num_impl_m_type_params != num_trait_m_type_params {
         let impl_m_node_id = tcx.hir.as_local_node_id(impl_m.def_id).unwrap();
         let impl_m_item = tcx.hir.expect_impl_item(impl_m_node_id);
-        let span = if impl_m_item.generics.params.is_empty() {
+        let span = if impl_m_item.generics.params.is_empty()
+            || impl_m_item.generics.span.is_dummy()  // impl Trait in argument position (#55374)
+        {
             impl_m_span
         } else {
             impl_m_item.generics.span

@@ -30,6 +30,8 @@
 extern crate libc;
 #[macro_use]
 extern crate log;
+extern crate memmap;
+extern crate stable_deref_trait;
 #[macro_use]
 extern crate syntax;
 extern crate syntax_pos;
@@ -38,7 +40,6 @@ extern crate serialize as rustc_serialize; // used by deriving
 extern crate rustc_errors as errors;
 extern crate syntax_ext;
 extern crate proc_macro;
-extern crate rustc_metadata_utils;
 
 #[macro_use]
 extern crate rustc;
@@ -63,5 +64,35 @@ pub mod creader;
 pub mod cstore;
 pub mod dynamic_lib;
 pub mod locator;
+
+pub fn validate_crate_name(
+    sess: Option<&rustc::session::Session>,
+    s: &str,
+    sp: Option<syntax_pos::Span>
+) {
+    let mut err_count = 0;
+    {
+        let mut say = |s: &str| {
+            match (sp, sess) {
+                (_, None) => bug!("{}", s),
+                (Some(sp), Some(sess)) => sess.span_err(sp, s),
+                (None, Some(sess)) => sess.err(s),
+            }
+            err_count += 1;
+        };
+        if s.is_empty() {
+            say("crate name must not be empty");
+        }
+        for c in s.chars() {
+            if c.is_alphanumeric() { continue }
+            if c == '_'  { continue }
+            say(&format!("invalid character `{}` in crate name: `{}`", c, s));
+        }
+    }
+
+    if err_count > 0 {
+        sess.unwrap().abort_if_errors();
+    }
+}
 
 __build_diagnostic_array! { librustc_metadata, DIAGNOSTICS }

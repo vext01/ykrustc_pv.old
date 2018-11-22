@@ -48,6 +48,7 @@ static TARGETS: &'static [&'static str] = &[
     "aarch64-apple-ios",
     "aarch64-fuchsia",
     "aarch64-linux-android",
+    "aarch64-pc-windows-msvc",
     "aarch64-unknown-cloudabi",
     "aarch64-unknown-linux-gnu",
     "aarch64-unknown-linux-musl",
@@ -60,7 +61,6 @@ static TARGETS: &'static [&'static str] = &[
     "armv5te-unknown-linux-musleabi",
     "armv7-apple-ios",
     "armv7-linux-androideabi",
-    "armv7-unknown-cloudabi-eabihf",
     "armv7-unknown-linux-gnueabihf",
     "armv7-unknown-linux-musleabihf",
     "armebv7r-none-eabi",
@@ -77,7 +77,6 @@ static TARGETS: &'static [&'static str] = &[
     "i686-linux-android",
     "i686-pc-windows-gnu",
     "i686-pc-windows-msvc",
-    "i686-unknown-cloudabi",
     "i686-unknown-freebsd",
     "i686-unknown-linux-gnu",
     "i686-unknown-linux-musl",
@@ -88,14 +87,11 @@ static TARGETS: &'static [&'static str] = &[
     "mipsel-unknown-linux-gnu",
     "mipsel-unknown-linux-musl",
     "powerpc-unknown-linux-gnu",
-    "powerpc-unknown-linux-gnuspe",
     "powerpc64-unknown-linux-gnu",
     "powerpc64le-unknown-linux-gnu",
-    "powerpc64le-unknown-linux-musl",
     "riscv32imc-unknown-none-elf",
     "riscv32imac-unknown-none-elf",
     "s390x-unknown-linux-gnu",
-    "sparc-unknown-linux-gnu",
     "sparc64-unknown-linux-gnu",
     "sparcv9-sun-solaris",
     "thumbv6m-none-eabi",
@@ -114,7 +110,6 @@ static TARGETS: &'static [&'static str] = &[
     "x86_64-sun-solaris",
     "x86_64-unknown-cloudabi",
     "x86_64-unknown-freebsd",
-    "x86_64-unknown-hermit",
     "x86_64-unknown-linux-gnu",
     "x86_64-unknown-linux-gnux32",
     "x86_64-unknown-linux-musl",
@@ -360,6 +355,8 @@ impl Builder {
         self.package("lldb-preview", &mut manifest.pkg, TARGETS);
 
         manifest.renames.insert("rls".to_owned(), Rename { to: "rls-preview".to_owned() });
+        manifest.renames.insert("rustfmt".to_owned(), Rename { to: "rustfmt-preview".to_owned() });
+        manifest.renames.insert("clippy".to_owned(), Rename { to: "clippy-preview".to_owned() });
 
         let mut pkg = Package {
             version: self.cached_version("rust")

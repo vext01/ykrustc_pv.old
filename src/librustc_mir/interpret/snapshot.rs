@@ -6,9 +6,8 @@
 // it is not used by the general miri engine, just by CTFE.
 
 use std::hash::{Hash, Hasher};
-use std::mem;
 
-use rustc::ich::{StableHashingContext, StableHashingContextProvider};
+use rustc::ich::StableHashingContextProvider;
 use rustc::mir;
 use rustc::mir::interpret::{
     AllocId, Pointer, Scalar,
@@ -20,12 +19,12 @@ use rustc::ty::{self, TyCtxt};
 use rustc::ty::layout::Align;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::indexed_vec::IndexVec;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher, StableHasherResult};
+use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use syntax::ast::Mutability;
 use syntax::source_map::Span;
 
 use super::eval_context::{LocalValue, StackPopCleanup};
-use super::{Frame, Memory, Operand, MemPlace, Place, Value, ScalarMaybeUndef};
+use super::{Frame, Memory, Operand, MemPlace, Place, Immediate, ScalarMaybeUndef};
 use const_eval::CompileTimeInterpreter;
 
 #[derive(Default)]
@@ -196,11 +195,6 @@ impl<'a, Ctx> Snapshot<'a, Ctx> for Scalar
     }
 }
 
-impl_stable_hash_for!(enum ::interpret::ScalarMaybeUndef {
-    Scalar(v),
-    Undef
-});
-
 impl_snapshot_for!(enum ScalarMaybeUndef {
     Scalar(s),
     Undef,
@@ -217,23 +211,10 @@ impl_snapshot_for!(struct MemPlace {
     align -> *align, // just copy alignment verbatim
 });
 
-// Can't use the macro here because that does not support named enum fields.
-impl<'a> HashStable<StableHashingContext<'a>> for Place {
-    fn hash_stable<W: StableHasherResult>(
-        &self, hcx: &mut StableHashingContext<'a>,
-        hasher: &mut StableHasher<W>)
-    {
-        mem::discriminant(self).hash_stable(hcx, hasher);
-        match self {
-            Place::Ptr(mem_place) => mem_place.hash_stable(hcx, hasher),
-
-            Place::Local { frame, local } => {
-                frame.hash_stable(hcx, hasher);
-                local.hash_stable(hcx, hasher);
-            },
-        }
-    }
-}
+impl_stable_hash_for!(enum ::interpret::Place {
+    Ptr(mem_place),
+    Local { frame, local },
+});
 impl<'a, Ctx> Snapshot<'a, Ctx> for Place
     where Ctx: SnapshotContext<'a>,
 {
@@ -251,11 +232,11 @@ impl<'a, Ctx> Snapshot<'a, Ctx> for Place
     }
 }
 
-impl_stable_hash_for!(enum ::interpret::Value {
+impl_stable_hash_for!(enum ::interpret::Immediate {
     Scalar(x),
     ScalarPair(x, y),
 });
-impl_snapshot_for!(enum Value {
+impl_snapshot_for!(enum Immediate {
     Scalar(s),
     ScalarPair(s, t),
 });
@@ -305,7 +286,7 @@ impl<'a, Ctx> Snapshot<'a, Ctx> for &'a Allocation
     type Item = AllocationSnapshot<'a>;
 
     fn snapshot(&self, ctx: &'a Ctx) -> Self::Item {
-        let Allocation { bytes, relocations, undef_mask, align, mutability } = self;
+        let Allocation { bytes, relocations, undef_mask, align, mutability, extra: () } = self;
 
         AllocationSnapshot {
             bytes,
@@ -317,20 +298,10 @@ impl<'a, Ctx> Snapshot<'a, Ctx> for &'a Allocation
     }
 }
 
-// Can't use the macro here because that does not support named enum fields.
-impl<'a> HashStable<StableHashingContext<'a>> for StackPopCleanup {
-    fn hash_stable<W: StableHasherResult>(
-        &self,
-        hcx: &mut StableHashingContext<'a>,
-        hasher: &mut StableHasher<W>)
-    {
-        mem::discriminant(self).hash_stable(hcx, hasher);
-        match self {
-            StackPopCleanup::Goto(ref block) => block.hash_stable(hcx, hasher),
-            StackPopCleanup::None { cleanup } => cleanup.hash_stable(hcx, hasher),
-        }
-    }
-}
+impl_stable_hash_for!(enum ::interpret::eval_context::StackPopCleanup {
+    Goto(block),
+    None { cleanup },
+});
 
 #[derive(Eq, PartialEq)]
 struct FrameSnapshot<'a, 'tcx: 'a> {
@@ -343,28 +314,17 @@ struct FrameSnapshot<'a, 'tcx: 'a> {
     stmt: usize,
 }
 
-// Not using the macro because that does not support types depending on two lifetimes
-impl<'a, 'mir, 'tcx: 'mir> HashStable<StableHashingContext<'a>> for Frame<'mir, 'tcx> {
-    fn hash_stable<W: StableHasherResult>(
-        &self,
-        hcx: &mut StableHashingContext<'a>,
-        hasher: &mut StableHasher<W>) {
+impl_stable_hash_for!(impl<'tcx, 'mir: 'tcx> for struct Frame<'mir, 'tcx> {
+    mir,
+    instance,
+    span,
+    return_to_block,
+    return_place -> (return_place.as_ref().map(|r| &**r)),
+    locals,
+    block,
+    stmt,
+});
 
-        let Frame {
-            mir,
-            instance,
-            span,
-            return_to_block,
-            return_place,
-            locals,
-            block,
-            stmt,
-        } = self;
-
-        (mir, instance, span, return_to_block).hash_stable(hcx, hasher);
-        (return_place.as_ref().map(|r| &**r), locals, block, stmt).hash_stable(hcx, hasher);
-    }
-}
 impl<'a, 'mir, 'tcx, Ctx> Snapshot<'a, Ctx> for &'a Frame<'mir, 'tcx>
     where Ctx: SnapshotContext<'a>,
 {
@@ -443,21 +403,11 @@ impl<'a, 'mir, 'tcx> Hash for EvalSnapshot<'a, 'mir, 'tcx>
     }
 }
 
-// Not using the macro because we need special handling for `memory`, which the macro
-// does not support at the same time as the extra bounds on the type.
-impl<'a, 'b, 'mir, 'tcx> HashStable<StableHashingContext<'b>>
-    for EvalSnapshot<'a, 'mir, 'tcx>
-{
-    fn hash_stable<W: StableHasherResult>(
-        &self,
-        hcx: &mut StableHashingContext<'b>,
-        hasher: &mut StableHasher<W>)
-    {
-        // Not hashing memory: Avoid hashing memory all the time during execution
-        let EvalSnapshot{ memory: _, stack } = self;
-        stack.hash_stable(hcx, hasher);
-    }
-}
+impl_stable_hash_for!(impl<'tcx, 'b, 'mir> for struct EvalSnapshot<'b, 'mir, 'tcx> {
+    // Not hashing memory: Avoid hashing memory all the time during execution
+    memory -> _,
+    stack,
+});
 
 impl<'a, 'mir, 'tcx> Eq for EvalSnapshot<'a, 'mir, 'tcx>
 {}

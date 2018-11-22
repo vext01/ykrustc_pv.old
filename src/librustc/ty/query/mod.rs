@@ -27,16 +27,19 @@ use middle::stability::{self, DeprecationEntry};
 use middle::lib_features::LibFeatures;
 use middle::lang_items::{LanguageItems, LangItem};
 use middle::exported_symbols::{SymbolExportLevel, ExportedSymbol};
-use mir::interpret::ConstEvalResult;
+use mir::interpret::{ConstEvalRawResult, ConstEvalResult};
 use mir::mono::CodegenUnit;
 use mir;
 use mir::interpret::GlobalId;
 use session::{CompileResult, CrateDisambiguator};
 use session::config::OutputFilenames;
 use traits::{self, Vtable};
-use traits::query::{CanonicalPredicateGoal, CanonicalProjectionGoal,
-                    CanonicalTyGoal, CanonicalTypeOpEqGoal, CanonicalTypeOpSubtypeGoal,
-                    CanonicalTypeOpProvePredicateGoal, CanonicalTypeOpNormalizeGoal, NoSolution};
+use traits::query::{
+    CanonicalPredicateGoal, CanonicalProjectionGoal,
+    CanonicalTyGoal, CanonicalTypeOpAscribeUserTypeGoal, CanonicalTypeOpEqGoal,
+    CanonicalTypeOpSubtypeGoal, CanonicalTypeOpProvePredicateGoal,
+    CanonicalTypeOpNormalizeGoal, NoSolution,
+};
 use traits::query::dropck_outlives::{DtorckConstraint, DropckOutlivesResult};
 use traits::query::normalize::NormalizationResult;
 use traits::query::outlives_bounds::OutlivesBound;
@@ -124,17 +127,18 @@ define_queries! { <'tcx>
         /// predicate gets in the way of some checks, which are intended
         /// to operate over only the actual where-clauses written by the
         /// user.)
-        [] fn predicates_of: PredicatesOfItem(DefId) -> ty::GenericPredicates<'tcx>,
+        [] fn predicates_of: PredicatesOfItem(DefId) -> Lrc<ty::GenericPredicates<'tcx>>,
 
         /// Maps from the def-id of an item (trait/struct/enum/fn) to the
         /// predicates (where clauses) directly defined on it. This is
         /// equal to the `explicit_predicates_of` predicates plus the
         /// `inferred_outlives_of` predicates.
-        [] fn predicates_defined_on: PredicatesDefinedOnItem(DefId) -> ty::GenericPredicates<'tcx>,
+        [] fn predicates_defined_on: PredicatesDefinedOnItem(DefId)
+            -> Lrc<ty::GenericPredicates<'tcx>>,
 
         /// Returns the predicates written explicit by the user.
         [] fn explicit_predicates_of: ExplicitPredicatesOfItem(DefId)
-            -> ty::GenericPredicates<'tcx>,
+            -> Lrc<ty::GenericPredicates<'tcx>>,
 
         /// Returns the inferred outlives predicates (e.g., for `struct
         /// Foo<'a, T> { x: &'a T }`, this would return `T: 'a`).
@@ -146,12 +150,12 @@ define_queries! { <'tcx>
         /// evaluate them even during type conversion, often before the
         /// full predicates are available (note that supertraits have
         /// additional acyclicity requirements).
-        [] fn super_predicates_of: SuperPredicatesOfItem(DefId) -> ty::GenericPredicates<'tcx>,
+        [] fn super_predicates_of: SuperPredicatesOfItem(DefId) -> Lrc<ty::GenericPredicates<'tcx>>,
 
         /// To avoid cycles within the predicates of a single item we compute
         /// per-type-parameter predicates for resolving `T::AssocTy`.
         [] fn type_param_predicates: type_param_predicates((DefId, DefId))
-            -> ty::GenericPredicates<'tcx>,
+            -> Lrc<ty::GenericPredicates<'tcx>>,
 
         [] fn trait_def: TraitDefOfItem(DefId) -> &'tcx ty::TraitDef,
         [] fn adt_def: AdtDefOfItem(DefId) -> &'tcx ty::AdtDef,
@@ -288,7 +292,8 @@ define_queries! { <'tcx>
         /// Gets a complete map from all types to their inherent impls.
         /// Not meant to be used directly outside of coherence.
         /// (Defined only for LOCAL_CRATE)
-        [] fn crate_inherent_impls: crate_inherent_impls_dep_node(CrateNum) -> CrateInherentImpls,
+        [] fn crate_inherent_impls: crate_inherent_impls_dep_node(CrateNum)
+            -> Lrc<CrateInherentImpls>,
 
         /// Checks all types in the krate for overlap in their inherent impls. Reports errors.
         /// Not meant to be used directly outside of coherence.
@@ -298,6 +303,14 @@ define_queries! { <'tcx>
     },
 
     Other {
+        /// Evaluate a constant without running sanity checks
+        ///
+        /// DO NOT USE THIS outside const eval. Const eval uses this to break query cycles during
+        /// validation. Please add a comment to every use site explaining why using `const_eval`
+        /// isn't sufficient
+        [] fn const_eval_raw: const_eval_raw_dep_node(ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>)
+            -> ConstEvalRawResult<'tcx>,
+
         /// Results of evaluating const items or constants embedded in
         /// other items (such as enum variant explicit discriminants).
         [] fn const_eval: const_eval_dep_node(ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>)
@@ -369,16 +382,16 @@ define_queries! { <'tcx>
             -> Lrc<specialization_graph::Graph>,
         [] fn is_object_safe: ObjectSafety(DefId) -> bool,
 
-        // Get the ParameterEnvironment for a given item; this environment
-        // will be in "user-facing" mode, meaning that it is suitabe for
-        // type-checking etc, and it does not normalize specializable
-        // associated types. This is almost always what you want,
-        // unless you are doing MIR optimizations, in which case you
-        // might want to use `reveal_all()` method to change modes.
+        /// Get the ParameterEnvironment for a given item; this environment
+        /// will be in "user-facing" mode, meaning that it is suitabe for
+        /// type-checking etc, and it does not normalize specializable
+        /// associated types. This is almost always what you want,
+        /// unless you are doing MIR optimizations, in which case you
+        /// might want to use `reveal_all()` method to change modes.
         [] fn param_env: ParamEnv(DefId) -> ty::ParamEnv<'tcx>,
 
-        // Trait selection queries. These are best used by invoking `ty.moves_by_default()`,
-        // `ty.is_copy()`, etc, since that will prune the environment where possible.
+        /// Trait selection queries. These are best used by invoking `ty.moves_by_default()`,
+        /// `ty.is_copy()`, etc, since that will prune the environment where possible.
         [] fn is_copy_raw: is_copy_dep_node(ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool,
         [] fn is_sized_raw: is_sized_dep_node(ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool,
         [] fn is_freeze_raw: is_freeze_dep_node(ty::ParamEnvAnd<'tcx, Ty<'tcx>>) -> bool,
@@ -590,6 +603,14 @@ define_queries! { <'tcx>
         ) -> Result<traits::EvaluationResult, traits::OverflowError>,
 
         /// Do not call this query directly: part of the `Eq` type-op
+        [] fn type_op_ascribe_user_type: TypeOpAscribeUserType(
+            CanonicalTypeOpAscribeUserTypeGoal<'tcx>
+        ) -> Result<
+            Lrc<Canonical<'tcx, canonical::QueryResponse<'tcx, ()>>>,
+            NoSolution,
+        >,
+
+        /// Do not call this query directly: part of the `Eq` type-op
         [] fn type_op_eq: TypeOpEq(
             CanonicalTypeOpEqGoal<'tcx>
         ) -> Result<
@@ -664,8 +685,11 @@ define_queries! { <'tcx>
         [] fn program_clauses_for: ProgramClausesFor(DefId) -> Clauses<'tcx>,
 
         [] fn program_clauses_for_env: ProgramClausesForEnv(
-            ty::ParamEnv<'tcx>
+            traits::Environment<'tcx>
         ) -> Clauses<'tcx>,
+
+        // Get the chalk-style environment of the given item.
+        [] fn environment: Environment(DefId) -> ty::Binder<traits::Environment<'tcx>>,
     },
 
     Linking {
@@ -761,6 +785,10 @@ fn typeck_item_bodies_dep_node<'tcx>(_: CrateNum) -> DepConstructor<'tcx> {
 fn const_eval_dep_node<'tcx>(param_env: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>)
                              -> DepConstructor<'tcx> {
     DepConstructor::ConstEval { param_env }
+}
+fn const_eval_raw_dep_node<'tcx>(param_env: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>)
+                             -> DepConstructor<'tcx> {
+    DepConstructor::ConstEvalRaw { param_env }
 }
 
 fn mir_keys<'tcx>(_: CrateNum) -> DepConstructor<'tcx> {

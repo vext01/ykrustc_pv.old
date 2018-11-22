@@ -131,7 +131,7 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
         }
 
         return tcx.infer_ctxt().enter(|mut infcx| {
-            let mut fresh_preds = FxHashSet();
+            let mut fresh_preds = FxHashSet::default();
 
             // Due to the way projections are handled by SelectionContext, we need to run
             // evaluate_predicates twice: once on the original param env, and once on the result of
@@ -309,9 +309,9 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
     ) -> Option<(ty::ParamEnv<'c>, ty::ParamEnv<'c>)> {
         let tcx = infcx.tcx;
 
-        let mut select = SelectionContext::new(&infcx);
+        let mut select = SelectionContext::with_negative(&infcx, true);
 
-        let mut already_visited = FxHashSet();
+        let mut already_visited = FxHashSet::default();
         let mut predicates = VecDeque::new();
         predicates.push_back(ty::Binder::bind(ty::TraitPredicate {
             trait_ref: ty::TraitRef {
@@ -338,6 +338,21 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
 
             match &result {
                 &Ok(Some(ref vtable)) => {
+                    // If we see an explicit negative impl (e.g. 'impl !Send for MyStruct'),
+                    // we immediately bail out, since it's impossible for us to continue.
+                    match vtable {
+                        Vtable::VtableImpl(VtableImplData { impl_def_id, .. }) => {
+                            // Blame tidy for the weird bracket placement
+                            if infcx.tcx.impl_polarity(*impl_def_id) == hir::ImplPolarity::Negative
+                            {
+                                debug!("evaluate_nested_obligations: Found explicit negative impl\
+                                        {:?}, bailing out", impl_def_id);
+                                return None;
+                            }
+                        },
+                        _ => {}
+                    }
+
                     let obligations = vtable.clone().nested_obligations().into_iter();
 
                     if !self.evaluate_nested_obligations(
@@ -447,27 +462,51 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                                     ty::RegionKind::ReLateBound(_, _),
                                 ) => {}
 
-                                (ty::RegionKind::ReLateBound(_, _), _) => {
+                                (ty::RegionKind::ReLateBound(_, _), _) |
+                                (_, ty::RegionKind::ReVar(_)) => {
+                                    // One of these is true:
                                     // The new predicate has a HRTB in a spot where the old
                                     // predicate does not (if they both had a HRTB, the previous
-                                    // match arm would have executed).
+                                    // match arm would have executed). A HRBT is a 'stricter'
+                                    // bound than anything else, so we want to keep the newer
+                                    // predicate (with the HRBT) in place of the old predicate.
                                     //
-                                    // The means we want to remove the older predicate from
-                                    // user_computed_preds, since having both it and the new
+                                    // OR
+                                    //
+                                    // The old predicate has a region variable where the new
+                                    // predicate has some other kind of region. An region
+                                    // variable isn't something we can actually display to a user,
+                                    // so we choose ther new predicate (which doesn't have a region
+                                    // varaible).
+                                    //
+                                    // In both cases, we want to remove the old predicate,
+                                    // from user_computed_preds, and replace it with the new
+                                    // one. Having both the old and the new
                                     // predicate in a ParamEnv would confuse SelectionContext
+                                    //
                                     // We're currently in the predicate passed to 'retain',
                                     // so we return 'false' to remove the old predicate from
                                     // user_computed_preds
                                     return false;
                                 }
-                                (_, ty::RegionKind::ReLateBound(_, _)) => {
-                                    // This is the opposite situation as the previous arm - the
-                                    // old predicate has a HRTB lifetime in a place where the
-                                    // new predicate does not. We want to leave the old
+                                (_, ty::RegionKind::ReLateBound(_, _)) |
+                                (ty::RegionKind::ReVar(_), _) => {
+                                    // This is the opposite situation as the previous arm.
+                                    // One of these is true:
+                                    //
+                                    // The old predicate has a HRTB lifetime in a place where the
+                                    // new predicate does not.
+                                    //
+                                    // OR
+                                    //
+                                    // The new predicate has a region variable where the old
+                                    // predicate has some other type of region.
+                                    //
+                                    // We want to leave the old
                                     // predicate in user_computed_preds, and skip adding
                                     // new_pred to user_computed_params.
                                     should_add_new = false
-                                }
+                                },
                                 _ => {}
                             }
                         }
@@ -498,8 +537,8 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                     panic!("Missing lifetime with name {:?} for {:?}", name, region)
                 )
             )
-            .unwrap_or(&"'static".to_owned())
-            .clone()
+            .cloned()
+            .unwrap_or_else(|| "'static".to_owned())
     }
 
     // This is very similar to handle_lifetimes. However, instead of matching ty::Region's
@@ -508,8 +547,8 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
         &self,
         regions: &RegionConstraintData<'cx>,
     ) -> FxHashMap<ty::RegionVid, ty::Region<'cx>> {
-        let mut vid_map: FxHashMap<RegionTarget<'cx>, RegionDeps<'cx>> = FxHashMap();
-        let mut finished_map = FxHashMap();
+        let mut vid_map: FxHashMap<RegionTarget<'cx>, RegionDeps<'cx>> = FxHashMap::default();
+        let mut finished_map = FxHashMap::default();
 
         for constraint in regions.constraints.keys() {
             match constraint {
@@ -683,8 +722,8 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                 }
                 &ty::Predicate::TypeOutlives(ref binder) => {
                     match (
-                        binder.no_late_bound_regions(),
-                        binder.map_bound_ref(|pred| pred.0).no_late_bound_regions(),
+                        binder.no_bound_vars(),
+                        binder.map_bound_ref(|pred| pred.0).no_bound_vars(),
                     ) {
                         (None, Some(t_a)) => {
                             select.infcx().register_region_obligation_with_cause(

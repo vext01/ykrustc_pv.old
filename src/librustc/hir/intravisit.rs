@@ -49,7 +49,6 @@ use hir::map::{self, Map};
 use super::itemlikevisit::DeepVisitor;
 
 use std::cmp;
-use std::u32;
 
 #[derive(Copy, Clone)]
 pub enum FnKind<'a> {
@@ -298,6 +297,9 @@ pub trait Visitor<'v> : Sized {
     fn visit_fn(&mut self, fk: FnKind<'v>, fd: &'v FnDecl, b: BodyId, s: Span, id: NodeId) {
         walk_fn(self, fk, fd, b, s, id)
     }
+    fn visit_use(&mut self, path: &'v Path, id: NodeId, hir_id: HirId) {
+        walk_use(self, path, id, hir_id)
+    }
     fn visit_trait_item(&mut self, ti: &'v TraitItem) {
         walk_trait_item(self, ti)
     }
@@ -436,7 +438,9 @@ pub fn walk_lifetime<'v, V: Visitor<'v>>(visitor: &mut V, lifetime: &'v Lifetime
             visitor.visit_ident(ident);
         }
         LifetimeName::Param(ParamName::Fresh(_)) |
+        LifetimeName::Param(ParamName::Error) |
         LifetimeName::Static |
+        LifetimeName::Error |
         LifetimeName::Implicit |
         LifetimeName::Underscore => {}
     }
@@ -469,8 +473,7 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item) {
             }
         }
         ItemKind::Use(ref path, _) => {
-            visitor.visit_id(item.id);
-            visitor.visit_path(path, item.hir_id);
+            visitor.visit_use(path, item.id, item.hir_id);
         }
         ItemKind::Static(ref typ, _, body) |
         ItemKind::Const(ref typ, body) => {
@@ -550,6 +553,14 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item) {
         }
     }
     walk_list!(visitor, visit_attribute, &item.attrs);
+}
+
+pub fn walk_use<'v, V: Visitor<'v>>(visitor: &mut V,
+                                    path: &'v Path,
+                                    item_id: NodeId,
+                                    hir_id: HirId) {
+    visitor.visit_id(item_id);
+    visitor.visit_path(path, hir_id);
 }
 
 pub fn walk_enum_def<'v, V: Visitor<'v>>(visitor: &mut V,
@@ -650,6 +661,9 @@ pub fn walk_path_segment<'v, V: Visitor<'v>>(visitor: &mut V,
                                              path_span: Span,
                                              segment: &'v PathSegment) {
     visitor.visit_ident(segment.ident);
+    if let Some(id) = segment.id {
+        visitor.visit_id(id);
+    }
     if let Some(ref args) = segment.args {
         visitor.visit_generic_args(path_span, args);
     }
@@ -747,7 +761,7 @@ pub fn walk_generic_param<'v, V: Visitor<'v>>(visitor: &mut V, param: &'v Generi
     walk_list!(visitor, visit_attribute, &param.attrs);
     match param.name {
         ParamName::Plain(ident) => visitor.visit_ident(ident),
-        ParamName::Fresh(_) => {}
+        ParamName::Error | ParamName::Fresh(_) => {}
     }
     match param.kind {
         GenericParamKind::Lifetime { .. } => {}
@@ -1137,8 +1151,8 @@ pub struct IdRange {
 impl IdRange {
     pub fn max() -> IdRange {
         IdRange {
-            min: NodeId::from_u32(u32::MAX),
-            max: NodeId::from_u32(u32::MIN),
+            min: NodeId::MAX,
+            max: NodeId::from_u32(0),
         }
     }
 

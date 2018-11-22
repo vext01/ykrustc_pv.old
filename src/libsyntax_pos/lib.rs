@@ -612,6 +612,17 @@ impl MultiSpan {
         &self.primary_spans
     }
 
+    /// Returns `true` if this contains only a dummy primary span with any hygienic context.
+    pub fn is_dummy(&self) -> bool {
+        let mut is_dummy = true;
+        for span in &self.primary_spans {
+            if !span.is_dummy() {
+                is_dummy = false;
+            }
+        }
+        is_dummy
+    }
+
     /// Replaces all occurrences of one Span with another. Used to move Spans in areas that don't
     /// display well (like std macros). Returns true if replacements occurred.
     pub fn replace(&mut self, before: Span, after: Span) -> bool {
@@ -1255,9 +1266,9 @@ pub struct LocWithOpt {
 
 // used to be structural records. Better names, anyone?
 #[derive(Debug)]
-pub struct SourceFileAndLine { pub fm: Lrc<SourceFile>, pub line: usize }
+pub struct SourceFileAndLine { pub sf: Lrc<SourceFile>, pub line: usize }
 #[derive(Debug)]
-pub struct SourceFileAndBytePos { pub fm: Lrc<SourceFile>, pub pos: BytePos }
+pub struct SourceFileAndBytePos { pub sf: Lrc<SourceFile>, pub pos: BytePos }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct LineInfo {
@@ -1292,7 +1303,7 @@ pub struct MacroBacktrace {
 }
 
 // _____________________________________________________________________________
-// SpanLinesError, SpanSnippetError, DistinctSources, MalformedCodemapPositions
+// SpanLinesError, SpanSnippetError, DistinctSources, MalformedSourceMapPositions
 //
 
 pub type FileLinesResult = Result<FileLines, SpanLinesError>;
@@ -1307,7 +1318,7 @@ pub enum SpanLinesError {
 pub enum SpanSnippetError {
     IllFormedSpan(Span),
     DistinctSources(DistinctSources),
-    MalformedForCodemap(MalformedCodemapPositions),
+    MalformedForSourcemap(MalformedSourceMapPositions),
     SourceNotAvailable { filename: FileName }
 }
 
@@ -1318,7 +1329,7 @@ pub struct DistinctSources {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct MalformedCodemapPositions {
+pub struct MalformedSourceMapPositions {
     pub name: FileName,
     pub source_len: usize,
     pub begin_pos: BytePos,

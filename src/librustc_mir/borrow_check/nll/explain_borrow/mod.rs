@@ -10,19 +10,21 @@
 
 use borrow_check::borrow_set::BorrowData;
 use borrow_check::error_reporting::UseSpans;
-use borrow_check::nll::region_infer::Cause;
+use borrow_check::nll::ConstraintDescription;
+use borrow_check::nll::region_infer::{Cause, RegionName};
 use borrow_check::{Context, MirBorrowckCtxt, WriteKind};
-use rustc::ty::{self, Region, TyCtxt};
+use rustc::ty::{self, TyCtxt};
 use rustc::mir::{
-    CastKind, FakeReadCause, Local, Location, Mir, Operand, Place, Projection, ProjectionElem,
-    Rvalue, Statement, StatementKind, TerminatorKind
+    CastKind, ConstraintCategory, FakeReadCause, Local, Location, Mir, Operand,
+    Place, Projection, ProjectionElem, Rvalue, Statement, StatementKind,
+    TerminatorKind
 };
 use rustc_errors::DiagnosticBuilder;
 use syntax_pos::Span;
 
 mod find_use;
 
-pub(in borrow_check) enum BorrowExplanation<'tcx> {
+pub(in borrow_check) enum BorrowExplanation {
     UsedLater(LaterUseKind, Span),
     UsedLaterInLoop(LaterUseKind, Span),
     UsedLaterWhenDropped {
@@ -30,7 +32,13 @@ pub(in borrow_check) enum BorrowExplanation<'tcx> {
         dropped_local: Local,
         should_note_order: bool,
     },
-    MustBeValidFor(Region<'tcx>),
+    MustBeValidFor {
+        category: ConstraintCategory,
+        from_closure: bool,
+        span: Span,
+        region_name: RegionName,
+        opt_place_desc: Option<String>,
+    },
     Unexplained,
 }
 
@@ -43,8 +51,8 @@ pub(in borrow_check) enum LaterUseKind {
     Other,
 }
 
-impl<'tcx> BorrowExplanation<'tcx> {
-    pub(in borrow_check) fn add_explanation_to_diagnostic<'cx, 'gcx>(
+impl BorrowExplanation {
+    pub(in borrow_check) fn add_explanation_to_diagnostic<'cx, 'gcx, 'tcx>(
         &self,
         tcx: TyCtxt<'cx, 'gcx, 'tcx>,
         mir: &Mir<'tcx>,
@@ -87,9 +95,9 @@ impl<'tcx> BorrowExplanation<'tcx> {
                     // Otherwise, just report the whole type (and use
                     // the intentionally fuzzy phrase "destructor")
                     ty::Closure(..) =>
-                        ("destructor", format!("closure")),
+                        ("destructor", "closure".to_owned()),
                     ty::Generator(..) =>
-                        ("destructor", format!("generator")),
+                        ("destructor", "generator".to_owned()),
 
                     _ => ("destructor", format!("type `{}`", local_decl.ty)),
                 };
@@ -142,15 +150,27 @@ impl<'tcx> BorrowExplanation<'tcx> {
                         }
                     }
                 }
-            }
+            },
+            BorrowExplanation::MustBeValidFor {
+                category,
+                span,
+                ref region_name,
+                ref opt_place_desc,
+                from_closure: _,
+            } => {
+                region_name.highlight_region_name(err);
 
-            BorrowExplanation::MustBeValidFor(region) => {
-                tcx.note_and_explain_free_region(
-                    err,
-                    &format!("{}{}", borrow_desc, "borrowed value must be valid for "),
-                    region,
-                    "...",
-                );
+                if let Some(desc) = opt_place_desc {
+                    err.span_label(span, format!(
+                        "{}requires that `{}` is borrowed for `{}`",
+                        category.description(), desc, region_name,
+                    ));
+                } else {
+                    err.span_label(span, format!(
+                        "{}requires that {}borrow lasts for `{}`",
+                        category.description(), borrow_desc, region_name,
+                    ));
+                };
             },
             _ => {},
         }
@@ -176,7 +196,7 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
         context: Context,
         borrow: &BorrowData<'tcx>,
         kind_place: Option<(WriteKind, &Place<'tcx>)>,
-    ) -> BorrowExplanation<'tcx> {
+    ) -> BorrowExplanation {
         debug!(
             "explain_why_borrow_contains_point(context={:?}, borrow={:?}, kind_place={:?})",
             context, borrow, kind_place
@@ -241,11 +261,27 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                  }
             }
 
-            None => if let Some(region) = regioncx.to_error_region(region_sub) {
-                BorrowExplanation::MustBeValidFor(region)
+            None => if let Some(region) = regioncx.to_error_region_vid(borrow_region_vid) {
+                let (category, from_closure, span, region_name) = self
+                    .nonlexical_regioncx
+                    .free_region_constraint_info(
+                        self.mir,
+                        self.mir_def_id,
+                        self.infcx,
+                        borrow_region_vid,
+                        region,
+                    );
+                let opt_place_desc = self.describe_place(&borrow.borrowed_place);
+                BorrowExplanation::MustBeValidFor {
+                    category,
+                    from_closure,
+                    span,
+                    region_name,
+                    opt_place_desc,
+                }
             } else {
                 BorrowExplanation::Unexplained
-            },
+            }
         }
     }
 
@@ -279,9 +315,8 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                         pending_locations.push(target.start_location());
                     },
                     TerminatorKind::SwitchInt { ref targets, .. } => {
-                        for target in targets {
-                            pending_locations.push(target.start_location());
-                        }
+                        pending_locations.extend(
+                            targets.into_iter().map(|target| target.start_location()));
                     },
                     TerminatorKind::Drop { target, unwind, .. } |
                     TerminatorKind::DropAndReplace { target, unwind, .. } |
@@ -303,9 +338,8 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                     },
                     TerminatorKind::FalseEdges { real_target, ref imaginary_targets, .. } => {
                         pending_locations.push(real_target.start_location());
-                        for target in imaginary_targets {
-                            pending_locations.push(target.start_location());
-                        }
+                        pending_locations.extend(
+                            imaginary_targets.into_iter().map(|target| target.start_location()));
                     },
                     _ => {},
                 }
@@ -441,17 +475,17 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                             Operand::Move(Place::Local(from)) if *from == target => {
                                 debug!("was_captured_by_trait_object: ty={:?}", ty);
                                 // Check the type for a trait object.
-                                match ty.sty {
+                                return match ty.sty {
                                     // `&dyn Trait`
-                                    ty::TyKind::Ref(_, ty, _) if ty.is_trait() => return true,
+                                    ty::TyKind::Ref(_, ty, _) if ty.is_trait() => true,
                                     // `Box<dyn Trait>`
                                     _ if ty.is_box() && ty.boxed_ty().is_trait() =>
-                                        return true,
+                                        true,
                                     // `dyn Trait`
-                                    _ if ty.is_trait() => return true,
+                                    _ if ty.is_trait() => true,
                                     // Anything else.
-                                    _ => return false,
-                                }
+                                    _ => false,
+                                };
                             },
                             _ => return false,
                         },
@@ -466,32 +500,29 @@ impl<'cx, 'gcx, 'tcx> MirBorrowckCtxt<'cx, 'gcx, 'tcx> {
                 let terminator = block.terminator();
                 debug!("was_captured_by_trait_object: terminator={:?}", terminator);
 
-                match &terminator.kind {
-                    TerminatorKind::Call {
-                        destination: Some((Place::Local(dest), block)),
-                        args,
-                        ..
-                    } => {
-                        debug!(
-                            "was_captured_by_trait_object: target={:?} dest={:?} args={:?}",
-                            target, dest, args
-                        );
-                        // Check if one of the arguments to this function is the target place.
-                        let found_target = args.iter().any(|arg| {
-                            if let Operand::Move(Place::Local(potential)) = arg {
-                                *potential == target
-                            } else {
-                                false
-                            }
-                        });
-
-                        // If it is, follow this to the next block and update the target.
-                        if found_target {
-                            target = *dest;
-                            queue.push(block.start_location());
+                if let TerminatorKind::Call {
+                    destination: Some((Place::Local(dest), block)),
+                    args,
+                    ..
+                } = &terminator.kind {
+                    debug!(
+                        "was_captured_by_trait_object: target={:?} dest={:?} args={:?}",
+                        target, dest, args
+                    );
+                    // Check if one of the arguments to this function is the target place.
+                    let found_target = args.iter().any(|arg| {
+                        if let Operand::Move(Place::Local(potential)) = arg {
+                            *potential == target
+                        } else {
+                            false
                         }
-                    },
-                    _ => {},
+                    });
+
+                    // If it is, follow this to the next block and update the target.
+                    if found_target {
+                        target = *dest;
+                        queue.push(block.start_location());
+                    }
                 }
             }
 

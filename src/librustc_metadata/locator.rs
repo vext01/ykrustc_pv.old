@@ -243,12 +243,14 @@ use std::cmp;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use flate2::read::DeflateDecoder;
 
 use rustc_data_structures::owning_ref::OwningRef;
+
 pub struct CrateMismatch {
     path: PathBuf,
     got: String,
@@ -459,7 +461,7 @@ impl<'a> Context<'a> {
         let mut candidates: FxHashMap<
             _,
             (FxHashMap<_, _>, FxHashMap<_, _>, FxHashMap<_, _>),
-        > = FxHashMap();
+        > = Default::default();
         let mut staticlibs = vec![];
 
         // First, find all possible candidate rlibs and dylibs purely based on
@@ -528,7 +530,7 @@ impl<'a> Context<'a> {
         // A Library candidate is created if the metadata for the set of
         // libraries corresponds to the crate id and hash criteria that this
         // search is being performed for.
-        let mut libraries = FxHashMap();
+        let mut libraries = FxHashMap::default();
         for (_hash, (rlibs, rmetas, dylibs)) in candidates {
             let mut slot = None;
             let rlib = self.extract_one(rlibs, CrateFlavor::Rlib, &mut slot);
@@ -678,7 +680,7 @@ impl<'a> Context<'a> {
             if let Some((ref prev, _)) = ret {
                 let sysroot = self.sess.sysroot();
                 let sysroot = sysroot.canonicalize()
-                                     .unwrap_or(sysroot.to_path_buf());
+                                     .unwrap_or_else(|_| sysroot.to_path_buf());
                 if prev.starts_with(&sysroot) {
                     continue
                 }
@@ -771,9 +773,9 @@ impl<'a> Context<'a> {
         // rlibs/dylibs.
         let sess = self.sess;
         let dylibname = self.dylibname();
-        let mut rlibs = FxHashMap();
-        let mut rmetas = FxHashMap();
-        let mut dylibs = FxHashMap();
+        let mut rlibs = FxHashMap::default();
+        let mut rmetas = FxHashMap::default();
+        let mut dylibs = FxHashMap::default();
         {
             let locs = locs.map(|l| PathBuf::from(l)).filter(|loc| {
                 if !loc.exists() {
@@ -856,6 +858,19 @@ fn get_metadata_section(target: &Target,
     return ret;
 }
 
+/// A trivial wrapper for `Mmap` that implements `StableDeref`.
+struct StableDerefMmap(memmap::Mmap);
+
+impl Deref for StableDerefMmap {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.0.deref()
+    }
+}
+
+unsafe impl stable_deref_trait::StableDeref for StableDerefMmap {}
+
 fn get_metadata_section_imp(target: &Target,
                             flavor: CrateFlavor,
                             filename: &Path,
@@ -892,9 +907,14 @@ fn get_metadata_section_imp(target: &Target,
             }
         }
         CrateFlavor::Rmeta => {
-            let buf = fs::read(filename).map_err(|_|
-                format!("failed to read rmeta metadata: '{}'", filename.display()))?;
-            rustc_erase_owner!(OwningRef::new(buf).map_owner_box())
+            // mmap the file, because only a small fraction of it is read.
+            let file = std::fs::File::open(filename).map_err(|_|
+                format!("failed to open rmeta metadata: '{}'", filename.display()))?;
+            let mmap = unsafe { memmap::Mmap::map(&file) };
+            let mmap = mmap.map_err(|_|
+                format!("failed to mmap rmeta metadata: '{}'", filename.display()))?;
+
+            rustc_erase_owner!(OwningRef::new(StableDerefMmap(mmap)).map_owner_box())
         }
     };
     let blob = MetadataBlob(raw_bytes);

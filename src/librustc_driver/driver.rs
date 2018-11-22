@@ -798,7 +798,9 @@ where
                 trait_map: resolver.trait_map,
                 maybe_unused_trait_imports: resolver.maybe_unused_trait_imports,
                 maybe_unused_extern_crates: resolver.maybe_unused_extern_crates,
-                extern_prelude: resolver.extern_prelude,
+                extern_prelude: resolver.extern_prelude.iter().map(|(ident, entry)| {
+                    (ident.name, entry.introduced_by_item)
+                }).collect(),
             },
 
             analysis: ty::CrateAnalysis {
@@ -890,7 +892,7 @@ where
         )
     });
 
-    let mut registry = registry.unwrap_or(Registry::new(sess, krate.span));
+    let mut registry = registry.unwrap_or_else(|| Registry::new(sess, krate.span));
 
     time(sess, "plugin registration", || {
         if sess.features_untracked().rustc_diagnostic_macros {

@@ -35,7 +35,7 @@ pub(super) fn generate_invalidates<'cx, 'gcx, 'tcx>(
     mir: &Mir<'tcx>,
     borrow_set: &BorrowSet<'tcx>,
 ) {
-    if !all_facts.is_some() {
+    if all_facts.is_none() {
         // Nothing to do if we don't have any facts
         return;
     }
@@ -128,7 +128,7 @@ impl<'cx, 'tcx, 'gcx> Visitor<'tcx> for InvalidationGenerator<'cx, 'tcx, 'gcx> {
                         );
                     }
                 }
-                for input in inputs.iter() {
+                for (_, input) in inputs.iter() {
                     self.consume_operand(context, input);
                 }
             }
@@ -136,9 +136,10 @@ impl<'cx, 'tcx, 'gcx> Visitor<'tcx> for InvalidationGenerator<'cx, 'tcx, 'gcx> {
             StatementKind::EndRegion(..) |
             StatementKind::Nop |
             StatementKind::AscribeUserType(..) |
-            StatementKind::Validate(..) |
+            StatementKind::Retag { .. } |
+            StatementKind::EscapeToRaw { .. } |
             StatementKind::StorageLive(..) => {
-                // `Nop`, `AscribeUserType`, `Validate`, and `StorageLive` are irrelevant
+                // `Nop`, `AscribeUserType`, `Retag`, and `StorageLive` are irrelevant
                 // to borrow check.
             }
             StatementKind::StorageDead(local) => {

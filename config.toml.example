@@ -182,10 +182,9 @@
 # Build the profiler runtime
 #profiler = false
 
-# Indicates whether the OpenSSL linked into Cargo will be statically linked or
-# not. If static linkage is specified then the build system will download a
-# known-good version of OpenSSL, compile it, and link it to Cargo.
-#openssl-static = false
+# Indicates whether the native libraries linked into Cargo will be statically
+# linked or not.
+#cargo-native-static = false
 
 # Run the build with low priority, by setting the process group's "nice" value
 # to +10 on Unix platforms, and by using a "low priority" job object on Windows.
@@ -278,6 +277,10 @@
 # compiler.
 #codegen-units = 1
 
+# Sets the number of codegen units to build the standard library with,
+# regardless of what the codegen-unit setting for the rest of the compiler is.
+#codegen-units-std = 1
+
 # Whether or not debug assertions are enabled for the compiler and standard
 # library. Also enables compilation of debug! and trace! logging macros.
 #debug-assertions = false
@@ -296,12 +299,6 @@
 # Enable debuginfo for the extended tools: cargo, rls, rustfmt
 # Adding debuginfo makes them several times larger.
 #debuginfo-tools = false
-
-# Whether or not jemalloc is built and enabled
-#use-jemalloc = true
-
-# Whether or not jemalloc is built with its debug option set
-#debug-jemalloc = false
 
 # Whether or not `panic!`s generate backtraces (RUST_BACKTRACE)
 #backtrace = true
@@ -399,6 +396,10 @@
 # generally only set for releases
 #remap-debuginfo = false
 
+# Link the compiler against `jemalloc`, where on Linux and OSX it should
+# override the default allocator for rustc and LLVM.
+#jemalloc = false
+
 # =============================================================================
 # Options for specific targets
 #
@@ -437,10 +438,6 @@
 # Normally the build system can find LLVM's FileCheck utility, but if
 # not, you can specify an explicit file name for it.
 #llvm-filecheck = "/path/to/FileCheck"
-
-# Path to the custom jemalloc static library to link into the standard library
-# by default. This is only used if jemalloc is still enabled above
-#jemalloc = "/path/to/jemalloc/libjemalloc_pic.a"
 
 # If this target is for Android, this option will be required to specify where
 # the NDK for the target lives. This is used to find the C compiler to link and

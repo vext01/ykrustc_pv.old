@@ -400,7 +400,7 @@ impl<'a, 'tcx> MetadataBlob {
         for (i, dep) in root.crate_deps
                             .decode(self)
                             .enumerate() {
-            write!(out, "{} {}-{}\n", i + 1, dep.name, dep.hash)?;
+            write!(out, "{} {}{}\n", i + 1, dep.name, dep.extra_filename)?;
         }
         write!(out, "\n")?;
         Ok(())
@@ -601,7 +601,7 @@ impl<'a, 'tcx> CrateMetadata {
                 })
                 .collect()
         } else {
-            vec![self.get_variant(tcx, &item, item_id, kind)]
+            std::iter::once(self.get_variant(tcx, &item, item_id, kind)).collect()
         };
 
         tcx.alloc_adt_def(did, kind, variants, repr)

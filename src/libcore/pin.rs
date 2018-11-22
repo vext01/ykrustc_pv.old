@@ -3,7 +3,7 @@
 //! It is sometimes useful to have objects that are guaranteed to not move,
 //! in the sense that their placement in memory does not change, and can thus be relied upon.
 //!
-//! A prime example of such a scenario would be building self-referencial structs,
+//! A prime example of such a scenario would be building self-referential structs,
 //! since moving an object with pointers to itself will invalidate them,
 //! which could cause undefined behavior.
 //!
@@ -39,7 +39,7 @@
 //! use std::marker::Pinned;
 //! use std::ptr::NonNull;
 //!
-//! // This is a self referencial struct since the slice field points to the data field.
+//! // This is a self-referential struct since the slice field points to the data field.
 //! // We cannot inform the compiler about that with a normal reference,
 //! // since this pattern cannot be described with the usual borrowing rules.
 //! // Instead we use a raw pointer, though one which is known to not be null,
@@ -91,7 +91,7 @@
 
 use fmt;
 use marker::Sized;
-use ops::{Deref, DerefMut, CoerceUnsized};
+use ops::{Deref, DerefMut, CoerceUnsized, DispatchFromDyn};
 
 #[doc(inline)]
 pub use marker::Unpin;
@@ -102,7 +102,7 @@ pub use marker::Unpin;
 /// value in place, preventing the value referenced by that pointer from being moved
 /// unless it implements [`Unpin`].
 ///
-/// See the [`pin` module] documentation for furthur explanation on pinning.
+/// See the [`pin` module] documentation for further explanation on pinning.
 ///
 /// [`Unpin`]: ../../std/marker/trait.Unpin.html
 /// [`pin` module]: ../../std/pin/index.html
@@ -322,6 +322,12 @@ impl<P: fmt::Pointer> fmt::Pointer for Pin<P> {
 impl<P, U> CoerceUnsized<Pin<U>> for Pin<P>
 where
     P: CoerceUnsized<U>,
+{}
+
+#[unstable(feature = "pin", issue = "49150")]
+impl<'a, P, U> DispatchFromDyn<Pin<U>> for Pin<P>
+where
+    P: DispatchFromDyn<U>,
 {}
 
 #[unstable(feature = "pin", issue = "49150")]

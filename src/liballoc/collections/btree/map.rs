@@ -77,7 +77,7 @@ use self::Entry::*;
 /// movie_reviews.insert("Office Space",       "Deals with real issues in the workplace.");
 /// movie_reviews.insert("Pulp Fiction",       "Masterpiece.");
 /// movie_reviews.insert("The Godfather",      "Very enjoyable.");
-/// movie_reviews.insert("The Blues Brothers", "Eye lyked it alot.");
+/// movie_reviews.insert("The Blues Brothers", "Eye lyked it a lot.");
 ///
 /// // check for a specific one.
 /// if !movie_reviews.contains_key("Les Misérables") {
@@ -853,9 +853,10 @@ impl<K: Ord, V> BTreeMap<K, V> {
     /// ```
     /// use std::collections::BTreeMap;
     ///
-    /// let mut map: BTreeMap<&str, i32> = ["Alice", "Bob", "Carol", "Cheryl"].iter()
-    ///                                                                       .map(|&s| (s, 0))
-    ///                                                                       .collect();
+    /// let mut map: BTreeMap<&str, i32> = ["Alice", "Bob", "Carol", "Cheryl"]
+    ///     .iter()
+    ///     .map(|&s| (s, 0))
+    ///     .collect();
     /// for (_, balance) in map.range_mut("B".."Cheryl") {
     ///     *balance += 100;
     /// }

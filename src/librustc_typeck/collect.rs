@@ -39,6 +39,7 @@ use rustc::ty::{self, AdtKind, ToPolyTraitRef, Ty, TyCtxt};
 use rustc::ty::{ReprOptions, ToPredicate};
 use rustc::util::captures::Captures;
 use rustc::util::nodemap::FxHashMap;
+use rustc_data_structures::sync::Lrc;
 use rustc_target::spec::abi;
 
 use syntax::ast;
@@ -58,11 +59,13 @@ use rustc::hir::{self, CodegenFnAttrFlags, CodegenFnAttrs, Unsafety};
 
 use std::iter;
 
+struct OnlySelfBounds(bool);
+
 ///////////////////////////////////////////////////////////////////////////
 // Main entry point
 
 pub fn collect_item_types<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
-    let mut visitor = CollectItemTypesVisitor { tcx: tcx };
+    let mut visitor = CollectItemTypesVisitor { tcx };
     tcx.hir
        .krate()
        .visit_all_item_likes(&mut visitor.as_deep_visitor());
@@ -176,7 +179,8 @@ impl<'a, 'tcx> AstConv<'tcx, 'tcx> for ItemCtxt<'a, 'tcx> {
         self.tcx
     }
 
-    fn get_type_parameter_bounds(&self, span: Span, def_id: DefId) -> ty::GenericPredicates<'tcx> {
+    fn get_type_parameter_bounds(&self, span: Span, def_id: DefId)
+                                 -> Lrc<ty::GenericPredicates<'tcx>> {
         self.tcx
             .at(span)
             .type_param_predicates((self.item_def_id, def_id))
@@ -208,7 +212,7 @@ impl<'a, 'tcx> AstConv<'tcx, 'tcx> for ItemCtxt<'a, 'tcx> {
         item_def_id: DefId,
         poly_trait_ref: ty::PolyTraitRef<'tcx>,
     ) -> Ty<'tcx> {
-        if let Some(trait_ref) = poly_trait_ref.no_late_bound_regions() {
+        if let Some(trait_ref) = poly_trait_ref.no_bound_vars() {
             self.tcx().mk_projection(item_def_id, trait_ref.substs)
         } else {
             // no late-bound regions, we can just ignore the binder
@@ -241,12 +245,12 @@ impl<'a, 'tcx> AstConv<'tcx, 'tcx> for ItemCtxt<'a, 'tcx> {
 fn type_param_predicates<'a, 'tcx>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     (item_def_id, def_id): (DefId, DefId),
-) -> ty::GenericPredicates<'tcx> {
+) -> Lrc<ty::GenericPredicates<'tcx>> {
     use rustc::hir::*;
 
     // In the AST, bounds can derive from two places. Either
-    // written inline like `<T:Foo>` or in a where clause like
-    // `where T:Foo`.
+    // written inline like `<T : Foo>` or in a where clause like
+    // `where T : Foo`.
 
     let param_id = tcx.hir.as_local_node_id(def_id).unwrap();
     let param_owner = tcx.hir.ty_param_owner(param_id);
@@ -262,11 +266,11 @@ fn type_param_predicates<'a, 'tcx>(
         tcx.generics_of(item_def_id).parent
     };
 
-    let mut result = parent.map_or(
-        ty::GenericPredicates {
+    let mut result = parent.map_or_else(
+        || Lrc::new(ty::GenericPredicates {
             parent: None,
             predicates: vec![],
-        },
+        }),
         |parent| {
             let icx = ItemCtxt::new(tcx, parent);
             icx.get_type_parameter_bounds(DUMMY_SP, def_id)
@@ -296,7 +300,7 @@ fn type_param_predicates<'a, 'tcx>(
                     // Implied `Self: Trait` and supertrait bounds.
                     if param_id == item_node_id {
                         let identity_trait_ref = ty::TraitRef::identity(tcx, item_def_id);
-                        result
+                        Lrc::make_mut(&mut result)
                             .predicates
                             .push((identity_trait_ref.to_predicate(), item.span));
                     }
@@ -315,14 +319,15 @@ fn type_param_predicates<'a, 'tcx>(
     };
 
     let icx = ItemCtxt::new(tcx, item_def_id);
-    result
+    Lrc::make_mut(&mut result)
         .predicates
-        .extend(icx.type_parameter_bounds_in_generics(ast_generics, param_id, ty));
+        .extend(icx.type_parameter_bounds_in_generics(ast_generics, param_id, ty,
+            OnlySelfBounds(true)));
     result
 }
 
 impl<'a, 'tcx> ItemCtxt<'a, 'tcx> {
-    /// Find bounds from hir::Generics. This requires scanning through the
+    /// Find bounds from `hir::Generics`. This requires scanning through the
     /// AST. We do this to avoid having to convert *all* the bounds, which
     /// would create artificial cycles. Instead we can only convert the
     /// bounds for a type parameter `X` if `X::Foo` is used.
@@ -331,6 +336,7 @@ impl<'a, 'tcx> ItemCtxt<'a, 'tcx> {
         ast_generics: &hir::Generics,
         param_id: ast::NodeId,
         ty: Ty<'tcx>,
+        only_self_bounds: OnlySelfBounds,
     ) -> Vec<(ty::Predicate<'tcx>, Span)> {
         let from_ty_params = ast_generics
             .params
@@ -350,9 +356,17 @@ impl<'a, 'tcx> ItemCtxt<'a, 'tcx> {
                 hir::WherePredicate::BoundPredicate(ref bp) => Some(bp),
                 _ => None,
             })
-            .filter(|bp| is_param(self.tcx, &bp.bounded_ty, param_id))
-            .flat_map(|bp| bp.bounds.iter())
-            .flat_map(|b| predicates_from_bound(self, ty, b));
+            .flat_map(|bp| {
+                let bt = if is_param(self.tcx, &bp.bounded_ty, param_id) {
+                    Some(ty)
+                } else if !only_self_bounds.0 {
+                    Some(self.to_ty(&bp.bounded_ty))
+                } else {
+                    None
+                };
+                bp.bounds.iter().filter_map(move |b| bt.map(|bt| (bt, b)))
+            })
+            .flat_map(|(bt, b)| predicates_from_bound(self, bt, b));
 
         from_ty_params.chain(from_where_clauses).collect()
     }
@@ -419,12 +433,9 @@ fn convert_item<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, item_id: ast::NodeId) {
             tcx.predicates_of(def_id);
         }
         hir::ItemKind::TraitAlias(..) => {
-            span_err!(
-                tcx.sess,
-                it.span,
-                E0645,
-                "trait aliases are not yet implemented (see issue #41517)"
-            );
+            tcx.generics_of(def_id);
+            tcx.at(it.span).super_predicates_of(def_id);
+            tcx.predicates_of(def_id);
         }
         hir::ItemKind::Struct(ref struct_def, _) | hir::ItemKind::Union(ref struct_def, _) => {
             tcx.generics_of(def_id);
@@ -561,7 +572,7 @@ fn convert_variant<'a, 'tcx>(
     adt_kind: ty::AdtKind,
     attribute_def_id: DefId
 ) -> ty::VariantDef {
-    let mut seen_fields: FxHashMap<ast::Ident, Span> = FxHashMap();
+    let mut seen_fields: FxHashMap<ast::Ident, Span> = Default::default();
     let node_id = tcx.hir.as_local_node_id(did).unwrap();
     let fields = def
         .fields()
@@ -642,7 +653,7 @@ fn adt_def<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> &'tcx ty::Ad
             };
             (
                 AdtKind::Struct,
-                vec![convert_variant(
+                std::iter::once(convert_variant(
                     tcx,
                     ctor_id.unwrap_or(def_id),
                     item.name,
@@ -650,12 +661,12 @@ fn adt_def<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> &'tcx ty::Ad
                     def,
                     AdtKind::Struct,
                     def_id
-                )],
+                )).collect(),
             )
         }
         ItemKind::Union(ref def, _) => (
             AdtKind::Union,
-            vec![convert_variant(
+            std::iter::once(convert_variant(
                 tcx,
                 def_id,
                 item.name,
@@ -663,7 +674,7 @@ fn adt_def<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> &'tcx ty::Ad
                 def,
                 AdtKind::Union,
                 def_id
-            )],
+            )).collect(),
         ),
         _ => bug!(),
     };
@@ -676,7 +687,7 @@ fn adt_def<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> &'tcx ty::Ad
 fn super_predicates_of<'a, 'tcx>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     trait_def_id: DefId,
-) -> ty::GenericPredicates<'tcx> {
+) -> Lrc<ty::GenericPredicates<'tcx>> {
     debug!("super_predicates(trait_def_id={:?})", trait_def_id);
     let trait_node_id = tcx.hir.as_local_node_id(trait_def_id).unwrap();
 
@@ -693,15 +704,20 @@ fn super_predicates_of<'a, 'tcx>(
 
     let icx = ItemCtxt::new(tcx, trait_def_id);
 
-    // Convert the bounds that follow the colon, e.g. `Bar+Zed` in `trait Foo : Bar+Zed`.
+    // Convert the bounds that follow the colon, e.g. `Bar + Zed` in `trait Foo : Bar + Zed`.
     let self_param_ty = tcx.mk_self_type();
     let superbounds1 = compute_bounds(&icx, self_param_ty, bounds, SizedByDefault::No, item.span);
 
     let superbounds1 = superbounds1.predicates(tcx, self_param_ty);
 
     // Convert any explicit superbounds in the where clause,
-    // e.g. `trait Foo where Self : Bar`:
-    let superbounds2 = icx.type_parameter_bounds_in_generics(generics, item.id, self_param_ty);
+    // e.g. `trait Foo where Self : Bar`.
+    // In the case of trait aliases, however, we include all bounds in the where clause,
+    // so e.g. `trait Foo = where u32: PartialEq<Self>` would include `u32: PartialEq<Self>`
+    // as one of its "superpredicates".
+    let is_trait_alias = ty::is_trait_alias(tcx, trait_def_id);
+    let superbounds2 = icx.type_parameter_bounds_in_generics(
+        generics, item.id, self_param_ty, OnlySelfBounds(!is_trait_alias));
 
     // Combine the two lists to form the complete set of superbounds:
     let superbounds: Vec<_> = superbounds1.into_iter().chain(superbounds2).collect();
@@ -709,15 +725,16 @@ fn super_predicates_of<'a, 'tcx>(
     // Now require that immediate supertraits are converted,
     // which will, in turn, reach indirect supertraits.
     for &(pred, span) in &superbounds {
+        debug!("superbound: {:?}", pred);
         if let ty::Predicate::Trait(bound) = pred {
             tcx.at(span).super_predicates_of(bound.def_id());
         }
     }
 
-    ty::GenericPredicates {
+    Lrc::new(ty::GenericPredicates {
         parent: None,
         predicates: superbounds,
-    }
+    })
 }
 
 fn trait_def<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> &'tcx ty::TraitDef {
@@ -1590,27 +1607,34 @@ fn early_bound_lifetimes_from_generics<'a, 'tcx>(
 fn predicates_defined_on<'a, 'tcx>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     def_id: DefId,
-) -> ty::GenericPredicates<'tcx> {
-    let explicit = tcx.explicit_predicates_of(def_id);
-    let span = tcx.def_span(def_id);
-    let predicates = explicit.predicates.into_iter().chain(
-        tcx.inferred_outlives_of(def_id).iter().map(|&p| (p, span))
-    ).collect();
-
-    ty::GenericPredicates {
-        parent: explicit.parent,
-        predicates: predicates,
+) -> Lrc<ty::GenericPredicates<'tcx>> {
+    debug!("predicates_defined_on({:?})", def_id);
+    let mut result = tcx.explicit_predicates_of(def_id);
+    debug!(
+        "predicates_defined_on: explicit_predicates_of({:?}) = {:?}",
+        def_id,
+        result,
+    );
+    let inferred_outlives = tcx.inferred_outlives_of(def_id);
+    if !inferred_outlives.is_empty() {
+        let span = tcx.def_span(def_id);
+        debug!(
+            "predicates_defined_on: inferred_outlives_of({:?}) = {:?}",
+            def_id,
+            inferred_outlives,
+        );
+        Lrc::make_mut(&mut result)
+            .predicates
+            .extend(inferred_outlives.iter().map(|&p| (p, span)));
     }
+    result
 }
 
 fn predicates_of<'a, 'tcx>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     def_id: DefId,
-) -> ty::GenericPredicates<'tcx> {
-    let ty::GenericPredicates {
-        parent,
-        mut predicates,
-    } = tcx.predicates_defined_on(def_id);
+) -> Lrc<ty::GenericPredicates<'tcx>> {
+    let mut result = tcx.predicates_defined_on(def_id);
 
     if tcx.is_trait(def_id) {
         // For traits, add `Self: Trait` predicate. This is
@@ -1626,16 +1650,17 @@ fn predicates_of<'a, 'tcx>(
         // used, and adding the predicate into this list ensures
         // that this is done.
         let span = tcx.def_span(def_id);
-        predicates.push((ty::TraitRef::identity(tcx, def_id).to_predicate(), span));
+        Lrc::make_mut(&mut result)
+            .predicates
+            .push((ty::TraitRef::identity(tcx, def_id).to_predicate(), span));
     }
-
-    ty::GenericPredicates { parent, predicates }
+    result
 }
 
 fn explicit_predicates_of<'a, 'tcx>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     def_id: DefId,
-) -> ty::GenericPredicates<'tcx> {
+) -> Lrc<ty::GenericPredicates<'tcx>> {
     use rustc::hir::*;
     use rustc_data_structures::fx::FxHashSet;
 
@@ -1678,6 +1703,7 @@ fn explicit_predicates_of<'a, 'tcx>(
 
     let icx = ItemCtxt::new(tcx, def_id);
     let no_generics = hir::Generics::empty();
+    let empty_trait_items = HirVec::new();
 
     let mut predicates = UniquePredicates::new();
 
@@ -1722,6 +1748,10 @@ fn explicit_predicates_of<'a, 'tcx>(
                     is_trait = Some((ty::TraitRef::identity(tcx, def_id), items));
                     generics
                 }
+                ItemKind::TraitAlias(ref generics, _) => {
+                    is_trait = Some((ty::TraitRef::identity(tcx, def_id), &empty_trait_items));
+                    generics
+                }
                 ItemKind::Existential(ExistTy {
                     ref bounds,
                     impl_trait_fn,
@@ -1741,10 +1771,10 @@ fn explicit_predicates_of<'a, 'tcx>(
 
                     if impl_trait_fn.is_some() {
                         // impl Trait
-                        return ty::GenericPredicates {
+                        return Lrc::new(ty::GenericPredicates {
                             parent: None,
                             predicates: bounds.predicates(tcx, opaque_ty),
-                        };
+                        });
                     } else {
                         // named existential types
                         predicates.extend(bounds.predicates(tcx, opaque_ty));
@@ -1774,7 +1804,7 @@ fn explicit_predicates_of<'a, 'tcx>(
     // on a trait we need to add in the supertrait bounds and bounds found on
     // associated types.
     if let Some((_trait_ref, _)) = is_trait {
-        predicates.extend(tcx.super_predicates_of(def_id).predicates);
+        predicates.extend(tcx.super_predicates_of(def_id).predicates.iter().cloned());
     }
 
     // In default impls, we can assume that the self type implements
@@ -1837,8 +1867,9 @@ fn explicit_predicates_of<'a, 'tcx>(
             &hir::WherePredicate::BoundPredicate(ref bound_pred) => {
                 let ty = icx.to_ty(&bound_pred.bounded_ty);
 
-                // Keep the type around in a WF predicate, in case of no bounds.
-                // That way, `where Ty:` is not a complete noop (see #53696).
+                // Keep the type around in a dummy predicate, in case of no bounds.
+                // That way, `where Ty:` is not a complete noop (see #53696) and `Ty`
+                // is still checked for WF.
                 if bound_pred.bounds.is_empty() {
                     if let ty::Param(_) = ty.sty {
                         // This is a `where T:`, which can be in the HIR from the
@@ -1849,7 +1880,10 @@ fn explicit_predicates_of<'a, 'tcx>(
                         // compiler/tooling bugs from not handling WF predicates.
                     } else {
                         let span = bound_pred.bounded_ty.span;
-                        predicates.push((ty::Predicate::WellFormed(ty), span));
+                        let predicate = ty::OutlivesPredicate(ty, tcx.mk_region(ty::ReEmpty));
+                        predicates.push(
+                            (ty::Predicate::TypeOutlives(ty::Binder::dummy(predicate)), span)
+                        );
                     }
                 }
 
@@ -1947,10 +1981,10 @@ fn explicit_predicates_of<'a, 'tcx>(
         );
     }
 
-    ty::GenericPredicates {
+    Lrc::new(ty::GenericPredicates {
         parent: generics.parent,
         predicates,
-    }
+    })
 }
 
 pub enum SizedByDefault {
@@ -1958,9 +1992,9 @@ pub enum SizedByDefault {
     No,
 }
 
-/// Translate the AST's notion of ty param bounds (which are an enum consisting of a newtyped Ty or
-/// a region) to ty's notion of ty param bounds, which can either be user-defined traits, or the
-/// built-in trait (formerly known as kind): Send.
+/// Translate the AST's notion of ty param bounds (which are an enum consisting of a newtyped `Ty`
+/// or a region) to ty's notion of ty param bounds, which can either be user-defined traits, or the
+/// built-in trait `Send`.
 pub fn compute_bounds<'gcx: 'tcx, 'tcx>(
     astconv: &dyn AstConv<'gcx, 'tcx>,
     param_ty: Ty<'tcx>,
@@ -1968,8 +2002,8 @@ pub fn compute_bounds<'gcx: 'tcx, 'tcx>(
     sized_by_default: SizedByDefault,
     span: Span,
 ) -> Bounds<'tcx> {
-    let mut region_bounds = vec![];
-    let mut trait_bounds = vec![];
+    let mut region_bounds = Vec::new();
+    let mut trait_bounds = Vec::new();
 
     for ast_bound in ast_bounds {
         match *ast_bound {
@@ -1979,7 +2013,7 @@ pub fn compute_bounds<'gcx: 'tcx, 'tcx>(
         }
     }
 
-    let mut projection_bounds = vec![];
+    let mut projection_bounds = Vec::new();
 
     let mut trait_bounds: Vec<_> = trait_bounds.iter().map(|&bound| {
         (astconv.instantiate_poly_trait_ref(bound, param_ty, &mut projection_bounds), bound.span)
@@ -2010,10 +2044,10 @@ pub fn compute_bounds<'gcx: 'tcx, 'tcx>(
     }
 }
 
-/// Converts a specific GenericBound from the AST into a set of
+/// Converts a specific `GenericBound` from the AST into a set of
 /// predicates that apply to the self-type. A vector is returned
-/// because this can be anywhere from 0 predicates (`T:?Sized` adds no
-/// predicates) to 1 (`T:Foo`) to many (`T:Bar<X=i32>` adds `T:Bar`
+/// because this can be anywhere from zero predicates (`T : ?Sized` adds no
+/// predicates) to one (`T : Foo`) to many (`T : Bar<X=i32>` adds `T : Bar`
 /// and `<T as Bar>::X == i32`).
 fn predicates_from_bound<'tcx>(
     astconv: &dyn AstConv<'tcx, 'tcx>,

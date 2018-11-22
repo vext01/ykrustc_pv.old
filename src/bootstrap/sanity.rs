@@ -74,7 +74,7 @@ pub fn check(build: &mut Build) {
     // one is present as part of the PATH then that can lead to the system
     // being unable to identify the files properly. See
     // https://github.com/rust-lang/rust/issues/34959 for more details.
-    if cfg!(windows) && path.to_string_lossy().contains("\"") {
+    if cfg!(windows) && path.to_string_lossy().contains('\"') {
         panic!("PATH contains invalid character '\"'");
     }
 
@@ -151,12 +151,6 @@ pub fn check(build: &mut Build) {
     for host in &build.hosts {
         if !build.config.dry_run {
             cmd_finder.must_have(build.cxx(*host).unwrap());
-        }
-
-        // The msvc hosts don't use jemalloc, turn it off globally to
-        // avoid packaging the dummy liballoc_jemalloc on that platform.
-        if host.contains("msvc") {
-            build.config.use_jemalloc = false;
         }
     }
 

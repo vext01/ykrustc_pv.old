@@ -103,6 +103,8 @@ use rustc::ty::adjustment::{Adjust, Adjustment, AllowTwoPhase, AutoBorrow, AutoB
 use rustc::ty::fold::TypeFoldable;
 use rustc::ty::query::Providers;
 use rustc::ty::util::{Representability, IntTypeExt, Discr};
+use rustc::ty::layout::VariantIdx;
+use rustc_data_structures::indexed_vec::Idx;
 use errors::{Applicability, DiagnosticBuilder, DiagnosticId};
 
 use require_c_abi_if_variadic;
@@ -548,7 +550,7 @@ pub struct FnCtxt<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     /// current expression. As each subpart is processed, they may set
     /// the flag to `Always` etc.  Finally, at the end, we take the
     /// result and "union" it with the original value, so that when we
-    /// return the flag indicates if any subpart of the the parent
+    /// return the flag indicates if any subpart of the parent
     /// expression (up to and including this part) has diverged.  So,
     /// if you read it after evaluating a subexpression `X`, the value
     /// you get indicates whether any subexpression that was
@@ -641,11 +643,11 @@ impl<'a, 'gcx, 'tcx> Inherited<'a, 'gcx, 'tcx> {
             },
             infcx,
             fulfillment_cx: RefCell::new(TraitEngine::new(tcx)),
-            locals: RefCell::new(NodeMap()),
-            deferred_call_resolutions: RefCell::new(DefIdMap()),
+            locals: RefCell::new(Default::default()),
+            deferred_call_resolutions: RefCell::new(Default::default()),
             deferred_cast_checks: RefCell::new(Vec::new()),
             deferred_generator_interiors: RefCell::new(Vec::new()),
-            opaque_types: RefCell::new(DefIdMap()),
+            opaque_types: RefCell::new(Default::default()),
             implicit_region_bound,
             body_id,
         }
@@ -653,8 +655,8 @@ impl<'a, 'gcx, 'tcx> Inherited<'a, 'gcx, 'tcx> {
 
     fn register_predicate(&self, obligation: traits::PredicateObligation<'tcx>) {
         debug!("register_predicate({:?})", obligation);
-        if obligation.has_escaping_regions() {
-            span_bug!(obligation.cause.span, "escaping regions in predicate {:?}",
+        if obligation.has_escaping_bound_vars() {
+            span_bug!(obligation.cause.span, "escaping bound vars in predicate {:?}",
                       obligation);
         }
         self.fulfillment_cx
@@ -976,7 +978,7 @@ impl<'a, 'gcx, 'tcx> Visitor<'gcx> for GatherLocalsVisitor<'a, 'gcx, 'tcx> {
                     o_ty
                 };
 
-                let c_ty = self.fcx.inh.infcx.canonicalize_response(&revealed_ty);
+                let c_ty = self.fcx.inh.infcx.canonicalize_user_type_annotation(&revealed_ty);
                 debug!("visit_local: ty.hir_id={:?} o_ty={:?} revealed_ty={:?} c_ty={:?}",
                        ty.hir_id, o_ty, revealed_ty, c_ty);
                 self.fcx.tables.borrow_mut().user_provided_tys_mut().insert(ty.hir_id, c_ty);
@@ -1167,7 +1169,7 @@ fn check_fn<'a, 'gcx, 'tcx>(inherited: &'a Inherited<'a, 'gcx, 'tcx>,
         }
     }
 
-    // Check that a function marked as `#[panic_implementation]` has signature `fn(&PanicInfo) -> !`
+    // Check that a function marked as `#[panic_handler]` has signature `fn(&PanicInfo) -> !`
     if let Some(panic_impl_did) = fcx.tcx.lang_items().panic_impl() {
         if panic_impl_did == fcx.tcx.hir.local_def_id(fn_id) {
             if let Some(panic_info_did) = fcx.tcx.lang_items().panic_info() {
@@ -1713,7 +1715,7 @@ fn check_packed<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, sp: Span, def_id: DefId) 
     let repr = tcx.adt_def(def_id).repr;
     if repr.packed() {
         for attr in tcx.get_attrs(def_id).iter() {
-            for r in attr::find_repr_attrs(tcx.sess.diagnostic(), attr) {
+            for r in attr::find_repr_attrs(&tcx.sess.parse_sess, attr) {
                 if let attr::ReprPacked(pack) = r {
                     if pack != repr.pack {
                         struct_span_err!(tcx.sess, sp, E0634,
@@ -1837,10 +1839,11 @@ pub fn check_enum<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     }
 
     let mut disr_vals: Vec<Discr<'tcx>> = Vec::with_capacity(vs.len());
-    for (discr, v) in def.discriminants(tcx).zip(vs) {
+    for ((_, discr), v) in def.discriminants(tcx).zip(vs) {
         // Check for duplicate discriminant values
         if let Some(i) = disr_vals.iter().position(|&x| x.val == discr.val) {
-            let variant_i_node_id = tcx.hir.as_local_node_id(def.variants[i].did).unwrap();
+            let variant_did = def.variants[VariantIdx::new(i)].did;
+            let variant_i_node_id = tcx.hir.as_local_node_id(variant_did).unwrap();
             let variant_i = tcx.hir.expect_variant(variant_i_node_id);
             let i_span = match variant_i.node.disr_expr {
                 Some(ref expr) => tcx.hir.span(expr.id),
@@ -1866,7 +1869,7 @@ impl<'a, 'gcx, 'tcx> AstConv<'gcx, 'tcx> for FnCtxt<'a, 'gcx, 'tcx> {
     fn tcx<'b>(&'b self) -> TyCtxt<'b, 'gcx, 'tcx> { self.tcx }
 
     fn get_type_parameter_bounds(&self, _: Span, def_id: DefId)
-                                 -> ty::GenericPredicates<'tcx>
+                                 -> Lrc<ty::GenericPredicates<'tcx>>
     {
         let tcx = self.tcx;
         let node_id = tcx.hir.as_local_node_id(def_id).unwrap();
@@ -1874,7 +1877,7 @@ impl<'a, 'gcx, 'tcx> AstConv<'gcx, 'tcx> for FnCtxt<'a, 'gcx, 'tcx> {
         let item_def_id = tcx.hir.local_def_id(item_id);
         let generics = tcx.generics_of(item_def_id);
         let index = generics.param_def_id_to_index[&def_id];
-        ty::GenericPredicates {
+        Lrc::new(ty::GenericPredicates {
             parent: None,
             predicates: self.param_env.caller_bounds.iter().filter_map(|&predicate| {
                 match predicate {
@@ -1887,7 +1890,7 @@ impl<'a, 'gcx, 'tcx> AstConv<'gcx, 'tcx> for FnCtxt<'a, 'gcx, 'tcx> {
                     _ => None
                 }
             }).collect()
-        }
+        })
     }
 
     fn re_infer(&self, span: Span, def: Option<&ty::GenericParamDef>)
@@ -1918,17 +1921,17 @@ impl<'a, 'gcx, 'tcx> AstConv<'gcx, 'tcx> for FnCtxt<'a, 'gcx, 'tcx> {
                                         poly_trait_ref: ty::PolyTraitRef<'tcx>)
                                         -> Ty<'tcx>
     {
-        let (trait_ref, _) =
-            self.replace_late_bound_regions_with_fresh_var(
-                span,
-                infer::LateBoundRegionConversionTime::AssocTypeProjection(item_def_id),
-                &poly_trait_ref);
+        let (trait_ref, _) = self.replace_bound_vars_with_fresh_vars(
+            span,
+            infer::LateBoundRegionConversionTime::AssocTypeProjection(item_def_id),
+            &poly_trait_ref
+        );
 
         self.tcx().mk_projection(item_def_id, trait_ref.substs)
     }
 
     fn normalize_ty(&self, span: Span, ty: Ty<'tcx>) -> Ty<'tcx> {
-        if ty.has_escaping_regions() {
+        if ty.has_escaping_bound_vars() {
             ty // FIXME: normalization and escaping regions
         } else {
             self.normalize_associated_types_in(span, &ty)
@@ -1983,7 +1986,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             has_errors: Cell::new(false),
             enclosing_breakables: RefCell::new(EnclosingBreakables {
                 stack: Vec::new(),
-                by_id: NodeMap(),
+                by_id: Default::default(),
             }),
             inh,
         }
@@ -2137,7 +2140,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                             method.substs[i]
                         }
                     });
-                    self.infcx.canonicalize_response(&UserSubsts {
+                    self.infcx.canonicalize_user_type_annotation(&UserSubsts {
                         substs: just_method_substs,
                         user_self_ty: None, // not relevant here
                     })
@@ -2181,7 +2184,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         );
 
         if !substs.is_noop() {
-            let user_substs = self.infcx.canonicalize_response(&UserSubsts {
+            let user_substs = self.infcx.canonicalize_user_type_annotation(&UserSubsts {
                 substs,
                 user_self_ty,
             });
@@ -2357,6 +2360,24 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         t
     }
 
+    pub fn to_ty_saving_user_provided_ty(&self, ast_ty: &hir::Ty) -> Ty<'tcx> {
+        let ty = self.to_ty(ast_ty);
+
+        // If the type given by the user has free regions, save it for
+        // later, since NLL would like to enforce those. Also pass in
+        // types that involve projections, since those can resolve to
+        // `'static` bounds (modulo #54940, which hopefully will be
+        // fixed by the time you see this comment, dear reader,
+        // although I have my doubts). Other sorts of things are
+        // already sufficiently enforced with erased regions. =)
+        if ty.has_free_regions() || ty.has_projections() {
+            let c_ty = self.infcx.canonicalize_response(&ty);
+            self.tables.borrow_mut().user_provided_tys_mut().insert(ast_ty.hir_id, c_ty);
+        }
+
+        ty
+    }
+
     pub fn node_ty(&self, id: hir::HirId) -> Ty<'tcx> {
         match self.tables.borrow().node_types().get(id) {
             Some(&t) => t,
@@ -2413,7 +2434,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                                           cause: traits::ObligationCause<'tcx>,
                                           predicates: &ty::InstantiatedPredicates<'tcx>)
     {
-        assert!(!predicates.has_escaping_regions());
+        assert!(!predicates.has_escaping_bound_vars());
 
         debug!("add_obligations_for_parameters(predicates={:?})",
                predicates);
@@ -3115,7 +3136,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             Ok(formal_args.iter().map(|ty| {
                 self.resolve_type_vars_if_possible(ty)
             }).collect())
-        }).unwrap_or(Vec::new());
+        }).unwrap_or_default();
         debug!("expected_inputs_for_expected_output(formal={:?} -> {:?}, expected={:?} -> {:?})",
                formal_args, formal_ret,
                expect_args, expected_ret);
@@ -3492,12 +3513,11 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             _ => span_bug!(span, "non-ADT passed to check_expr_struct_fields")
         };
 
-        let mut remaining_fields = FxHashMap();
-        for (i, field) in variant.fields.iter().enumerate() {
-            remaining_fields.insert(field.ident.modern(), (i, field));
-        }
+        let mut remaining_fields = variant.fields.iter().enumerate().map(|(i, field)|
+            (field.ident.modern(), (i, field))
+        ).collect::<FxHashMap<_, _>>();
 
-        let mut seen_fields = FxHashMap();
+        let mut seen_fields = FxHashMap::default();
 
         let mut error_happened = false;
 
@@ -4133,7 +4153,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     // [1]
                     self.tcx.sess.delay_span_bug(body.span, "no coercion, but loop may not break");
                 }
-                ctxt.coerce.map(|c| c.complete(self)).unwrap_or(self.tcx.mk_unit())
+                ctxt.coerce.map(|c| c.complete(self)).unwrap_or_else(|| self.tcx.mk_unit())
             }
             hir::ExprKind::Match(ref discrim, ref arms, match_src) => {
                 self.check_match(expr, &discrim, arms, expected, match_src)
@@ -4153,7 +4173,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             hir::ExprKind::Cast(ref e, ref t) => {
                 // Find the type of `e`. Supply hints based on the type we are casting to,
                 // if appropriate.
-                let t_cast = self.to_ty(t);
+                let t_cast = self.to_ty_saving_user_provided_ty(t);
                 let t_cast = self.resolve_type_vars_if_possible(&t_cast);
                 let t_expr = self.check_expr_with_expectation(e, ExpectCastableToType(t_cast));
                 let t_cast = self.resolve_type_vars_if_possible(&t_cast);
@@ -4176,10 +4196,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 }
             }
             hir::ExprKind::Type(ref e, ref t) => {
-                let ty = self.to_ty(&t);
+                let ty = self.to_ty_saving_user_provided_ty(&t);
                 self.check_expr_eq_type(&e, ty);
-                let c_ty = self.infcx.canonicalize_response(&ty);
-                self.tables.borrow_mut().user_provided_tys_mut().insert(t.hir_id, c_ty);
                 ty
             }
             hir::ExprKind::Array(ref args) => {
@@ -4221,13 +4239,6 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                     promoted: None
                 };
                 let count = tcx.const_eval(param_env.and(global_id));
-
-                if let Err(ref err) = count {
-                    err.report_as_error(
-                        tcx.at(tcx.def_span(count_def_id)),
-                        "could not evaluate repeat length",
-                    );
-                }
 
                 let uty = match expected {
                     ExpectHasType(uty) => {
@@ -4736,32 +4747,24 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         } else if !self.check_for_cast(err, expr, found, expected) {
             let methods = self.get_conversion_methods(expr.span, expected, found);
             if let Ok(expr_text) = self.sess().source_map().span_to_snippet(expr.span) {
-                let suggestions = iter::repeat(expr_text).zip(methods.iter())
+                let mut suggestions = iter::repeat(&expr_text).zip(methods.iter())
                     .filter_map(|(receiver, method)| {
                         let method_call = format!(".{}()", method.ident);
                         if receiver.ends_with(&method_call) {
                             None  // do not suggest code that is already there (#53348)
                         } else {
-                            /*
-                            methods defined in `method_call_list` will overwrite
-                            `.clone()` in copy of `receiver`
-                            */
                             let method_call_list = [".to_vec()", ".to_string()"];
                             if receiver.ends_with(".clone()")
-                                    && method_call_list.contains(&method_call.as_str()){
-                                // created copy of `receiver` because we don't want other
-                                // suggestion to get affected
-                                let mut new_receiver = receiver.clone();
-                                let max_len = new_receiver.rfind(".").unwrap();
-                                new_receiver.truncate(max_len);
-                                Some(format!("{}{}", new_receiver, method_call))
+                                    && method_call_list.contains(&method_call.as_str()) {
+                                let max_len = receiver.rfind(".").unwrap();
+                                Some(format!("{}{}", &receiver[..max_len], method_call))
                             }
                             else {
                                 Some(format!("{}{}", receiver, method_call))
                             }
                         }
-                    }).collect::<Vec<_>>();
-                if !suggestions.is_empty() {
+                    }).peekable();
+                if suggestions.peek().is_some() {
                     err.span_suggestions_with_applicability(
                         expr.span,
                         "try using a conversion method",
@@ -5050,10 +5053,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         // provided (if any) into their appropriate spaces. We'll also report
         // errors if type parameters are provided in an inappropriate place.
 
-        let mut generic_segs = FxHashSet::default();
-        for PathSeg(_, index) in &path_segs {
-            generic_segs.insert(index);
-        }
+        let generic_segs = path_segs.iter().map(|PathSeg(_, index)| index)
+            .collect::<FxHashSet<_>>();
         AstConv::prohibit_generics(self, segments.iter().enumerate().filter_map(|(index, seg)| {
             if !generic_segs.contains(&index) {
                 Some(seg)
@@ -5182,7 +5183,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                         } else {
                             // If no type arguments were provided, we have to infer them.
                             // This case also occurs as a result of some malformed input, e.g.
-                            // a lifetime argument being given instead of a type paramter.
+                            // a lifetime argument being given instead of a type parameter.
                             // Using inference instead of `Error` gives better error messages.
                             self.var_for_def(span, param)
                         }
@@ -5190,8 +5191,8 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 }
             },
         );
-        assert!(!substs.has_escaping_regions());
-        assert!(!ty.has_escaping_regions());
+        assert!(!substs.has_escaping_bound_vars());
+        assert!(!ty.has_escaping_bound_vars());
 
         // Write the "user substs" down first thing for later.
         let hir_id = self.tcx.hir.node_to_hir_id(node_id);

@@ -80,8 +80,8 @@ crate fn create(
         region_bound_pairs: Vec::new(),
         relations: UniversalRegionRelations {
             universal_regions: universal_regions.clone(),
-            outlives: TransitiveRelation::new(),
-            inverse_outlives: TransitiveRelation::new(),
+            outlives: Default::default(),
+            inverse_outlives: Default::default(),
         },
     }.create()
 }
@@ -271,15 +271,14 @@ impl UniversalRegionRelationsBuilder<'cx, 'gcx, 'tcx> {
 
         for data in constraint_sets {
             constraint_conversion::ConstraintConversion::new(
-                self.infcx.tcx,
+                self.infcx,
                 &self.universal_regions,
                 &self.region_bound_pairs,
                 self.implicit_region_bound,
                 self.param_env,
                 Locations::All(DUMMY_SP),
                 ConstraintCategory::Internal,
-                &mut self.constraints.outlives_constraints,
-                &mut self.constraints.type_tests,
+                &mut self.constraints,
             ).convert_all(&data);
         }
 

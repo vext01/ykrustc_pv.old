@@ -159,9 +159,9 @@ impl LintStore {
             pre_expansion_passes: Some(vec![]),
             early_passes: Some(vec![]),
             late_passes: Some(vec![]),
-            by_name: FxHashMap(),
-            future_incompatible: FxHashMap(),
-            lint_groups: FxHashMap(),
+            by_name: Default::default(),
+            future_incompatible: Default::default(),
+            lint_groups: Default::default(),
         }
     }
 
@@ -783,11 +783,11 @@ impl<'a, 'tcx> LateContext<'a, 'tcx> {
     }
 }
 
-impl<'a, 'tcx> LayoutOf for &'a LateContext<'a, 'tcx> {
+impl<'a, 'tcx> LayoutOf for LateContext<'a, 'tcx> {
     type Ty = Ty<'tcx>;
     type TyLayout = Result<TyLayout<'tcx>, LayoutError<'tcx>>;
 
-    fn layout_of(self, ty: Ty<'tcx>) -> Self::TyLayout {
+    fn layout_of(&self, ty: Ty<'tcx>) -> Self::TyLayout {
         self.tcx.layout_of(self.param_env.and(ty))
     }
 }
@@ -1020,9 +1020,12 @@ impl<'a> ast_visit::Visitor<'a> for EarlyContext<'a> {
     }
 
     fn visit_pat(&mut self, p: &'a ast::Pat) {
-        run_lints!(self, check_pat, p);
+        let mut visit_subpats = true;
+        run_lints!(self, check_pat, p, &mut visit_subpats);
         self.check_id(p.id);
-        ast_visit::walk_pat(self, p);
+        if visit_subpats {
+            ast_visit::walk_pat(self, p);
+        }
     }
 
     fn visit_expr(&mut self, e: &'a ast::Expr) {
@@ -1230,7 +1233,7 @@ pub fn check_ast_crate(
     let (passes, buffered) = if pre_expansion {
         (
             sess.lint_store.borrow_mut().pre_expansion_passes.take(),
-            LintBuffer::new(),
+            LintBuffer::default(),
         )
     } else {
         (

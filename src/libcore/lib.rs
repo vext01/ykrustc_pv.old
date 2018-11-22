@@ -87,7 +87,6 @@
 #![feature(doc_spotlight)]
 #![feature(extern_types)]
 #![feature(fundamental)]
-#![feature(impl_header_lifetime_elision)]
 #![feature(intrinsics)]
 #![feature(lang_items)]
 #![feature(link_llvm_intrinsics)]
@@ -107,6 +106,7 @@
 #![feature(staged_api)]
 #![feature(stmt_expr_attributes)]
 #![feature(unboxed_closures)]
+#![feature(unsized_locals)]
 #![feature(untagged_unions)]
 #![feature(unwind_attributes)]
 #![feature(doc_alias)]
@@ -129,6 +129,7 @@
 #![feature(const_transmute)]
 #![feature(reverse_bits)]
 #![feature(non_exhaustive)]
+#![feature(structural_match)]
 
 #[prelude_import]
 #[allow(unused)]
@@ -228,7 +229,7 @@ mod nonzero;
 mod tuple;
 mod unit;
 
-// Pull in the the `coresimd` crate directly into libcore. This is where all the
+// Pull in the `coresimd` crate directly into libcore. This is where all the
 // architecture-specific (and vendor-specific) intrinsics are defined. AKA
 // things like SIMD and such. Note that the actual source for all this lies in a
 // different repository, rust-lang-nursery/stdsimd. That's why the setup here is

@@ -55,11 +55,11 @@ impl<T> QueryValue<T> {
     }
 }
 
-impl<'tcx, M: QueryConfig<'tcx>> QueryCache<'tcx, M> {
-    pub(super) fn new() -> QueryCache<'tcx, M> {
+impl<'tcx, M: QueryConfig<'tcx>> Default for QueryCache<'tcx, M> {
+    fn default() -> QueryCache<'tcx, M> {
         QueryCache {
-            results: FxHashMap(),
-            active: FxHashMap(),
+            results: FxHashMap::default(),
+            active: FxHashMap::default(),
         }
     }
 }
@@ -100,7 +100,7 @@ pub(super) struct JobOwner<'a, 'tcx: 'a, Q: QueryDescription<'tcx> + 'a> {
 }
 
 impl<'a, 'tcx, Q: QueryDescription<'tcx>> JobOwner<'a, 'tcx, Q> {
-    /// Either gets a JobOwner corresponding the the query, allowing us to
+    /// Either gets a JobOwner corresponding the query, allowing us to
     /// start executing the query, or it returns with the result of the query.
     /// If the query is executing elsewhere, this will wait for it.
     /// If the query panicked, this will silently panic.
@@ -314,7 +314,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     /// Try to read a node index for the node dep_node.
     /// A node will have an index, when it's already been marked green, or when we can mark it
     /// green. This function will mark the current task as a reader of the specified node, when
-    /// the a node index can be found for that node.
+    /// a node index can be found for that node.
     pub(super) fn try_mark_green_and_read(self, dep_node: &DepNode) -> Option<DepNodeIndex> {
         match self.dep_graph.node_color(dep_node) {
             Some(DepNodeColor::Green(dep_node_index)) => {
@@ -699,7 +699,7 @@ macro_rules! define_queries_inner {
                     providers,
                     fallback_extern_providers: Box::new(fallback_extern_providers),
                     on_disk_cache,
-                    $($name: Lock::new(QueryCache::new())),*
+                    $($name: Default::default()),*
                 }
             }
 
@@ -1063,6 +1063,7 @@ pub fn force_from_dep_node<'a, 'gcx, 'lcx>(tcx: TyCtxt<'a, 'gcx, 'lcx>,
         DepKind::NeedsDrop |
         DepKind::Layout |
         DepKind::ConstEval |
+        DepKind::ConstEvalRaw |
         DepKind::InstanceSymbolName |
         DepKind::MirShim |
         DepKind::BorrowCheckKrate |
@@ -1079,6 +1080,7 @@ pub fn force_from_dep_node<'a, 'gcx, 'lcx>(tcx: TyCtxt<'a, 'gcx, 'lcx>,
         DepKind::ImpliedOutlivesBounds |
         DepKind::DropckOutlives |
         DepKind::EvaluateObligation |
+        DepKind::TypeOpAscribeUserType |
         DepKind::TypeOpEq |
         DepKind::TypeOpSubtype |
         DepKind::TypeOpProvePredicate |
@@ -1156,6 +1158,7 @@ pub fn force_from_dep_node<'a, 'gcx, 'lcx>(tcx: TyCtxt<'a, 'gcx, 'lcx>,
         DepKind::CheckMatch => { force!(check_match, def_id!()); }
 
         DepKind::ParamEnv => { force!(param_env, def_id!()); }
+        DepKind::Environment => { force!(environment, def_id!()); }
         DepKind::DescribeDef => { force!(describe_def, def_id!()); }
         DepKind::DefSpan => { force!(def_span, def_id!()); }
         DepKind::LookupStability => { force!(lookup_stability, def_id!()); }

@@ -26,6 +26,7 @@
 #![feature(rustc_diagnostic_macros)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(str_escape)]
+#![feature(step_trait)]
 #![feature(try_trait)]
 #![feature(unicode_internals)]
 
@@ -37,7 +38,7 @@ extern crate serialize;
 #[macro_use] extern crate log;
 pub extern crate rustc_errors as errors;
 extern crate syntax_pos;
-extern crate rustc_data_structures;
+#[macro_use] extern crate rustc_data_structures;
 extern crate rustc_target;
 #[macro_use] extern crate scoped_tls;
 #[macro_use]
@@ -64,6 +65,23 @@ macro_rules! panictry {
             Ok(e) => e,
             Err(mut e) => {
                 e.emit();
+                FatalError.raise()
+            }
+        }
+    })
+}
+
+// A variant of 'panictry!' that works on a Vec<Diagnostic> instead of a single DiagnosticBuilder.
+macro_rules! panictry_buffer {
+    ($handler:expr, $e:expr) => ({
+        use std::result::Result::{Ok, Err};
+        use errors::{FatalError, DiagnosticBuilder};
+        match $e {
+            Ok(e) => e,
+            Err(errs) => {
+                for e in errs {
+                    DiagnosticBuilder::new_diagnostic($handler, e).emit();
+                }
                 FatalError.raise()
             }
         }

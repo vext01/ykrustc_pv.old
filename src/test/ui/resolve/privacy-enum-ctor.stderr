@@ -132,28 +132,28 @@ LL | use m::n::Z;
    |
 
 error[E0603]: enum `Z` is private
-  --> $DIR/privacy-enum-ctor.rs:67:16
+  --> $DIR/privacy-enum-ctor.rs:67:22
    |
 LL |     let _: Z = m::n::Z;
-   |                ^^^^^^^
+   |                      ^
 
 error[E0603]: enum `Z` is private
-  --> $DIR/privacy-enum-ctor.rs:71:16
+  --> $DIR/privacy-enum-ctor.rs:71:22
    |
 LL |     let _: Z = m::n::Z::Fn;
-   |                ^^^^^^^^^^^
+   |                      ^
 
 error[E0603]: enum `Z` is private
-  --> $DIR/privacy-enum-ctor.rs:74:16
+  --> $DIR/privacy-enum-ctor.rs:74:22
    |
 LL |     let _: Z = m::n::Z::Struct;
-   |                ^^^^^^^^^^^^^^^
+   |                      ^
 
 error[E0603]: enum `Z` is private
-  --> $DIR/privacy-enum-ctor.rs:78:16
+  --> $DIR/privacy-enum-ctor.rs:78:22
    |
 LL |     let _: Z = m::n::Z::Unit {};
-   |                ^^^^^^^^^^^^^
+   |                      ^
 
 error[E0308]: mismatched types
   --> $DIR/privacy-enum-ctor.rs:37:20
@@ -171,7 +171,9 @@ LL |             Unit,
    |             ---- `Z::Unit` defined here
 ...
 LL |         let _ = Z::Unit();
-   |                 ^^^^^^^^^ not a function
+   |                 ^^^^^^^--
+   |                 |
+   |                 call expression requires function
 help: `Z::Unit` is a unit variant, you need to write it without the parenthesis
    |
 LL |         let _ = Z::Unit;
@@ -193,7 +195,9 @@ LL |         Unit,
    |         ---- `m::E::Unit` defined here
 ...
 LL |     let _: E = m::E::Unit();
-   |                ^^^^^^^^^^^^ not a function
+   |                ^^^^^^^^^^--
+   |                |
+   |                call expression requires function
 help: `m::E::Unit` is a unit variant, you need to write it without the parenthesis
    |
 LL |     let _: E = m::E::Unit;
@@ -215,7 +219,9 @@ LL |         Unit,
    |         ---- `E::Unit` defined here
 ...
 LL |     let _: E = E::Unit();
-   |                ^^^^^^^^^ not a function
+   |                ^^^^^^^--
+   |                |
+   |                call expression requires function
 help: `E::Unit` is a unit variant, you need to write it without the parenthesis
    |
 LL |     let _: E = E::Unit;

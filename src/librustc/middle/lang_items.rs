@@ -155,7 +155,7 @@ impl<'a, 'v, 'tcx> ItemLikeVisitor<'v> for LanguageItemCollector<'a, 'tcx> {
 
 impl<'a, 'tcx> LanguageItemCollector<'a, 'tcx> {
     fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>) -> LanguageItemCollector<'a, 'tcx> {
-        let mut item_refs = FxHashMap();
+        let mut item_refs = FxHashMap::default();
 
         $( item_refs.insert($name, ($variant as usize, $target)); )*
 
@@ -204,9 +204,7 @@ pub fn extract(attrs: &[ast::Attribute]) -> Option<(Symbol, Span)> {
             if let Some(value) = attribute.value_str() {
                 return Some((value, attribute.span));
             }
-        } else if attribute.check_name("panic_implementation") ||
-            attribute.check_name("panic_handler")
-        {
+        } else if attribute.check_name("panic_handler") {
             return Some((Symbol::intern("panic_impl"), attribute.span))
         } else if attribute.check_name("alloc_error_handler") {
             return Some((Symbol::intern("oom"), attribute.span))
@@ -271,6 +269,7 @@ language_item_table! {
     DropTraitLangItem,           "drop",               drop_trait,              Target::Trait;
 
     CoerceUnsizedTraitLangItem,  "coerce_unsized",     coerce_unsized_trait,    Target::Trait;
+    DispatchFromDynTraitLangItem,"dispatch_from_dyn",  dispatch_from_dyn_trait, Target::Trait;
 
     AddTraitLangItem,            "add",                add_trait,               Target::Trait;
     SubTraitLangItem,            "sub",                sub_trait,               Target::Trait;

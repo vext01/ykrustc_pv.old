@@ -23,6 +23,18 @@ pub struct SnapshotMap<K, V>
     undo_log: Vec<UndoLog<K, V>>,
 }
 
+// HACK(eddyb) manual impl avoids `Default` bounds on `K` and `V`.
+impl<K, V> Default for SnapshotMap<K, V>
+    where K: Hash + Clone + Eq
+{
+    fn default() -> Self {
+        SnapshotMap {
+            map: Default::default(),
+            undo_log: Default::default(),
+        }
+    }
+}
+
 pub struct Snapshot {
     len: usize,
 }
@@ -38,13 +50,6 @@ enum UndoLog<K, V> {
 impl<K, V> SnapshotMap<K, V>
     where K: Hash + Clone + Eq
 {
-    pub fn new() -> Self {
-        SnapshotMap {
-            map: FxHashMap(),
-            undo_log: vec![],
-        }
-    }
-
     pub fn clear(&mut self) {
         self.map.clear();
         self.undo_log.clear();

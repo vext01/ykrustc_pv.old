@@ -304,7 +304,7 @@ impl<Idx: PartialOrd<Idx>> RangeTo<Idx> {
     }
 }
 
-/// An range bounded inclusively below and above (`start..=end`).
+/// A range bounded inclusively below and above (`start..=end`).
 ///
 /// The `RangeInclusive` `start..=end` contains all values with `x >= start`
 /// and `x <= end`.  It is empty unless `start <= end`.
@@ -391,7 +391,7 @@ impl<Idx> RangeInclusive<Idx> {
     /// ```
     #[stable(feature = "inclusive_range_methods", since = "1.27.0")]
     #[inline]
-    #[cfg_attr(not(stage0), rustc_promotable)]
+    #[rustc_promotable]
     pub const fn new(start: Idx, end: Idx) -> Self {
         Self { start, end, is_empty: None }
     }
@@ -416,7 +416,7 @@ impl<Idx> RangeInclusive<Idx> {
     /// ```
     #[stable(feature = "inclusive_range_methods", since = "1.27.0")]
     #[inline]
-    pub fn start(&self) -> &Idx {
+    pub const fn start(&self) -> &Idx {
         &self.start
     }
 
@@ -440,7 +440,7 @@ impl<Idx> RangeInclusive<Idx> {
     /// ```
     #[stable(feature = "inclusive_range_methods", since = "1.27.0")]
     #[inline]
-    pub fn end(&self) -> &Idx {
+    pub const fn end(&self) -> &Idx {
         &self.end
     }
 

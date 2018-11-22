@@ -8,13 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use alloc_system::System;
-use std::alloc::{Global, Alloc, Layout};
+use std::alloc::{Global, Alloc, Layout, System};
 
 /// https://github.com/rust-lang/rust/issues/45955
-///
-/// Note that `#[global_allocator]` is not used,
-/// so `liballoc_jemalloc` is linked (on some platforms).
 #[test]
 fn alloc_system_overaligned_request() {
     check_overalign_requests(System)

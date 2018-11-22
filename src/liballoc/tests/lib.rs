@@ -9,9 +9,7 @@
 // except according to those terms.
 
 #![feature(allocator_api)]
-#![feature(alloc_system)]
 #![feature(box_syntax)]
-#![cfg_attr(stage0, feature(min_const_fn))]
 #![feature(drain_filter)]
 #![feature(exact_size_is_empty)]
 #![feature(pattern)]
@@ -19,10 +17,8 @@
 #![feature(str_escape)]
 #![feature(try_reserve)]
 #![feature(unboxed_closures)]
-#![feature(chunks_exact)]
 #![feature(repeat_generic_slice)]
 
-extern crate alloc_system;
 extern crate core;
 extern crate rand;
 

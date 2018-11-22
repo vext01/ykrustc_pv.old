@@ -52,7 +52,7 @@ impl<'a, 'tcx> Visitor<'tcx> for OuterVisitor<'a, 'tcx> {
 }
 
 pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
-    tcx.hir.krate().visit_all_item_likes(&mut OuterVisitor { tcx: tcx }.as_deep_visitor());
+    tcx.hir.krate().visit_all_item_likes(&mut OuterVisitor { tcx }.as_deep_visitor());
     tcx.sess.abort_if_errors();
 }
 
@@ -238,8 +238,8 @@ impl<'a, 'tcx> MatchVisitor<'a, 'tcx> {
                                                         is non-empty",
                                                        pat_ty));
                     span_help!(&mut err, scrut.span,
-                               "Please ensure that all possible cases are being handled; \
-                                possibly adding wildcards or more match arms.");
+                               "ensure that all possible cases are being handled, \
+                                possibly by adding wildcards or more match arms");
                     err.emit();
                 }
                 // If the type *is* uninhabited, it's vacuously exhaustive
@@ -298,7 +298,8 @@ impl<'a, 'tcx> MatchVisitor<'a, 'tcx> {
             let label_msg = match pat.node {
                 PatKind::Path(hir::QPath::Resolved(None, ref path))
                         if path.segments.len() == 1 && path.segments[0].args.is_none() => {
-                    format!("interpreted as a {} pattern, not new variable", path.def.kind_name())
+                    format!("interpreted as {} {} pattern, not new variable",
+                            path.def.article(), path.def.kind_name())
                 }
                 _ => format!("pattern `{}` not covered", pattern_string),
             };

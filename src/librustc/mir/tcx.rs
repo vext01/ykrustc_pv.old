@@ -16,6 +16,7 @@
 use mir::*;
 use ty::subst::{Subst, Substs};
 use ty::{self, AdtDef, Ty, TyCtxt};
+use ty::layout::VariantIdx;
 use hir;
 use ty::util::IntTypeExt;
 
@@ -27,12 +28,16 @@ pub enum PlaceTy<'tcx> {
     /// Downcast to a particular variant of an enum.
     Downcast { adt_def: &'tcx AdtDef,
                substs: &'tcx Substs<'tcx>,
-               variant_index: usize },
+               variant_index: VariantIdx },
 }
+
+static_assert!(PLACE_TY_IS_3_PTRS_LARGE:
+    mem::size_of::<PlaceTy<'_>>() <= 24
+);
 
 impl<'a, 'gcx, 'tcx> PlaceTy<'tcx> {
     pub fn from_ty(ty: Ty<'tcx>) -> PlaceTy<'tcx> {
-        PlaceTy::Ty { ty: ty }
+        PlaceTy::Ty { ty }
     }
 
     pub fn to_ty(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Ty<'tcx> {
@@ -44,11 +49,61 @@ impl<'a, 'gcx, 'tcx> PlaceTy<'tcx> {
         }
     }
 
+    /// `place_ty.field_ty(tcx, f)` computes the type at a given field
+    /// of a record or enum-variant. (Most clients of `PlaceTy` can
+    /// instead just extract the relevant type directly from their
+    /// `PlaceElem`, but some instances of `ProjectionElem<V, T>` do
+    /// not carry a `Ty` for `T`.)
+    ///
+    /// Note that the resulting type has not been normalized.
+    pub fn field_ty(self, tcx: TyCtxt<'a, 'gcx, 'tcx>, f: &Field) -> Ty<'tcx>
+    {
+        // Pass `0` here so it can be used as a "default" variant_index in first arm below
+        let answer = match (self, VariantIdx::new(0)) {
+            (PlaceTy::Ty {
+                ty: &ty::TyS { sty: ty::TyKind::Adt(adt_def, substs), .. } }, variant_index) |
+            (PlaceTy::Downcast { adt_def, substs, variant_index }, _) => {
+                let variant_def = &adt_def.variants[variant_index];
+                let field_def = &variant_def.fields[f.index()];
+                field_def.ty(tcx, substs)
+            }
+            (PlaceTy::Ty { ty }, _) => {
+                match ty.sty {
+                    ty::Tuple(ref tys) => tys[f.index()],
+                    _ => bug!("extracting field of non-tuple non-adt: {:?}", self),
+                }
+            }
+        };
+        debug!("field_ty self: {:?} f: {:?} yields: {:?}", self, f, answer);
+        answer
+    }
+
+    /// Convenience wrapper around `projection_ty_core` for
+    /// `PlaceElem`, where we can just use the `Ty` that is already
+    /// stored inline on field projection elems.
     pub fn projection_ty(self, tcx: TyCtxt<'a, 'gcx, 'tcx>,
                          elem: &PlaceElem<'tcx>)
                          -> PlaceTy<'tcx>
     {
-        match *elem {
+        self.projection_ty_core(tcx, elem, |_, _, ty| -> Result<Ty<'tcx>, ()> { Ok(ty) })
+            .unwrap()
+    }
+
+    /// `place_ty.projection_ty_core(tcx, elem, |...| { ... })`
+    /// projects `place_ty` onto `elem`, returning the appropriate
+    /// `Ty` or downcast variant corresponding to that projection.
+    /// The `handle_field` callback must map a `Field` to its `Ty`,
+    /// (which should be trivial when `T` = `Ty`).
+    pub fn projection_ty_core<V, T, E>(
+        self,
+        tcx: TyCtxt<'a, 'gcx, 'tcx>,
+        elem: &ProjectionElem<'tcx, V, T>,
+        mut handle_field: impl FnMut(&Self, &Field, &T) -> Result<Ty<'tcx>, E>)
+        -> Result<PlaceTy<'tcx>, E>
+    where
+        V: ::std::fmt::Debug, T: ::std::fmt::Debug
+    {
+        let answer = match *elem {
             ProjectionElem::Deref => {
                 let ty = self.to_ty(tcx)
                              .builtin_deref(true)
@@ -84,7 +139,7 @@ impl<'a, 'gcx, 'tcx> PlaceTy<'tcx> {
                 match self.to_ty(tcx).sty {
                     ty::Adt(adt_def, substs) => {
                         assert!(adt_def.is_enum());
-                        assert!(index < adt_def.variants.len());
+                        assert!(index.as_usize() < adt_def.variants.len());
                         assert_eq!(adt_def, adt_def1);
                         PlaceTy::Downcast { adt_def,
                                             substs,
@@ -94,8 +149,11 @@ impl<'a, 'gcx, 'tcx> PlaceTy<'tcx> {
                         bug!("cannot downcast non-ADT type: `{:?}`", self)
                     }
                 },
-            ProjectionElem::Field(_, fty) => PlaceTy::Ty { ty: fty }
-        }
+            ProjectionElem::Field(ref f, ref fty) =>
+                PlaceTy::Ty { ty: handle_field(&self, f, fty)? },
+        };
+        debug!("projection_ty self: {:?} elem: {:?} yields: {:?}", self, elem, answer);
+        Ok(answer)
     }
 }
 

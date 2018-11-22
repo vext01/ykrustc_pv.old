@@ -16,7 +16,6 @@ Rust MIR: a lowered representation of Rust. Also: an experiment!
 
 #![feature(nll)]
 #![feature(in_band_lifetimes)]
-#![feature(impl_header_lifetime_elision)]
 #![feature(slice_patterns)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(box_patterns)]
@@ -79,6 +78,7 @@ mod borrow_check;
 mod build;
 mod dataflow;
 mod hair;
+mod lints;
 mod shim;
 pub mod transform;
 pub mod util;
@@ -93,7 +93,9 @@ pub fn provide(providers: &mut Providers) {
     borrow_check::provide(providers);
     shim::provide(providers);
     transform::provide(providers);
+    monomorphize::partitioning::provide(providers);
     providers.const_eval = const_eval::const_eval_provider;
+    providers.const_eval_raw = const_eval::const_eval_raw_provider;
     providers.check_match = hair::pattern::check_match;
 }
 

@@ -71,7 +71,7 @@ impl<'b> JsonDumper<CallbackOutput<'b>> {
         config: Config,
     ) -> JsonDumper<CallbackOutput<'b>> {
         JsonDumper {
-            output: CallbackOutput { callback: callback },
+            output: CallbackOutput { callback },
             config: config.clone(),
             result: Analysis::new(config),
         }
@@ -93,7 +93,7 @@ impl<'b, O: DumpOutput + 'b> JsonDumper<O> {
         self.result.compilation = Some(data);
     }
 
-    pub fn macro_use(&mut self, data: MacroRef) {
+    pub fn _macro_use(&mut self, data: MacroRef) {
         if self.config.pub_only || self.config.reachable_only {
             return;
         }

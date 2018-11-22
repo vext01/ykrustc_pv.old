@@ -38,10 +38,12 @@ use rustc::hir::def::{self, Def, CtorKind};
 use rustc::hir::def_id::{CrateNum, DefId, CRATE_DEF_INDEX, LOCAL_CRATE};
 use rustc::ty::subst::Substs;
 use rustc::ty::{self, TyCtxt, Region, RegionVid, Ty, AdtKind};
+use rustc::ty::layout::VariantIdx;
 use rustc::middle::stability;
 use rustc::util::nodemap::{FxHashMap, FxHashSet};
 use rustc_typeck::hir_ty_to_ty;
 use rustc::infer::region_constraints::{RegionConstraintData, Constraint};
+use rustc_data_structures::indexed_vec::{IndexVec, Idx};
 
 use std::collections::hash_map::Entry;
 use std::fmt;
@@ -75,8 +77,7 @@ use self::cfg::Cfg;
 use self::auto_trait::AutoTraitFinder;
 use self::blanket_impl::BlanketImplFinder;
 
-thread_local!(pub static MAX_DEF_ID: RefCell<FxHashMap<CrateNum, DefId>> =
-    RefCell::new(FxHashMap()));
+thread_local!(pub static MAX_DEF_ID: RefCell<FxHashMap<CrateNum, DefId>> = Default::default());
 
 const FN_OUTPUT_NAME: &'static str = "Output";
 
@@ -95,6 +96,12 @@ pub trait Clean<T> {
 
 impl<T: Clean<U>, U> Clean<Vec<U>> for [T] {
     fn clean(&self, cx: &DocContext) -> Vec<U> {
+        self.iter().map(|x| x.clean(cx)).collect()
+    }
+}
+
+impl<T: Clean<U>, U, V: Idx> Clean<IndexVec<V, U>> for IndexVec<V, T> {
+    fn clean(&self, cx: &DocContext) -> IndexVec<V, U> {
         self.iter().map(|x| x.clean(cx)).collect()
     }
 }
@@ -165,7 +172,7 @@ impl<'a, 'tcx, 'rcx, 'cstore> Clean<Crate> for visit_ast::RustdocVisitor<'a, 'tc
         // Clean the crate, translating the entire libsyntax AST to one that is
         // understood by rustdoc.
         let mut module = self.module.clean(cx);
-        let mut masked_crates = FxHashSet();
+        let mut masked_crates = FxHashSet::default();
 
         match module.inner {
             ModuleItem(ref module) => {
@@ -552,6 +559,14 @@ impl ItemEnum {
             ItemEnum::ForeignFunctionItem(ref f) => &f.generics,
             _ => return None,
         })
+    }
+
+    pub fn is_associated(&self) -> bool {
+        match *self {
+            ItemEnum::TypedefItem(_, _) |
+            ItemEnum::AssociatedTypeItem(_, _) => true,
+            _ => false,
+        }
     }
 }
 
@@ -1261,7 +1276,6 @@ impl Clean<Option<Lifetime>> for ty::RegionKind {
             ty::RePlaceholder(..) |
             ty::ReEmpty |
             ty::ReClosureBound(_) |
-            ty::ReCanonical(_) |
             ty::ReErased => None
         }
     }
@@ -1311,15 +1325,10 @@ impl<'a> Clean<WherePredicate> for ty::Predicate<'a> {
             Predicate::RegionOutlives(ref pred) => pred.clean(cx),
             Predicate::TypeOutlives(ref pred) => pred.clean(cx),
             Predicate::Projection(ref pred) => pred.clean(cx),
-            Predicate::WellFormed(ty) => {
-                // This comes from `where Ty:` (i.e. no bounds) (see #53696).
-                WherePredicate::BoundPredicate {
-                    ty: ty.clean(cx),
-                    bounds: vec![],
-                }
-            }
-            Predicate::ObjectSafe(_) => panic!("not user writable"),
-            Predicate::ClosureKind(..) => panic!("not user writable"),
+
+            Predicate::WellFormed(..) |
+            Predicate::ObjectSafe(..) |
+            Predicate::ClosureKind(..) |
             Predicate::ConstEvaluatable(..) => panic!("not user writable"),
         }
     }
@@ -1554,7 +1563,7 @@ impl Clean<Generics> for hir::Generics {
 }
 
 impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics,
-                                    &'a ty::GenericPredicates<'tcx>) {
+                                    &'a Lrc<ty::GenericPredicates<'tcx>>) {
     fn clean(&self, cx: &DocContext) -> Generics {
         use self::WherePredicate as WP;
 
@@ -1585,7 +1594,7 @@ impl<'a, 'tcx> Clean<Generics> for (&'a ty::Generics,
         // Note that associated types also have a sized bound by default, but we
         // don't actually know the set of associated types right here so that's
         // handled in cleaning associated types
-        let mut sized_params = FxHashSet();
+        let mut sized_params = FxHashSet::default();
         where_predicates.retain(|pred| {
             match *pred {
                 WP::BoundPredicate { ty: Generic(ref g), ref bounds } => {
@@ -2447,8 +2456,8 @@ impl Clean<Type> for hir::Ty {
 
                 if let Some(&hir::ItemKind::Ty(ref ty, ref generics)) = alias {
                     let provided_params = &path.segments.last().expect("segments were empty");
-                    let mut ty_substs = FxHashMap();
-                    let mut lt_substs = FxHashMap();
+                    let mut ty_substs = FxHashMap::default();
+                    let mut lt_substs = FxHashMap::default();
                     provided_params.with_generic_args(|generic_args| {
                         let mut indices: GenericParamCount = Default::default();
                         for param in generics.params.iter() {
@@ -2734,6 +2743,7 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
 
             ty::Closure(..) | ty::Generator(..) => Tuple(vec![]), // FIXME(pcwalton)
 
+            ty::Bound(..) => panic!("Bound"),
             ty::UnnormalizedProjection(..) => panic!("UnnormalizedProjection"),
             ty::GeneratorWitness(..) => panic!("GeneratorWitness"),
             ty::Infer(..) => panic!("Infer"),
@@ -2879,7 +2889,7 @@ impl Clean<VariantStruct> for ::rustc::hir::VariantData {
 
 #[derive(Clone, RustcEncodable, RustcDecodable, Debug)]
 pub struct Enum {
-    pub variants: Vec<Item>,
+    pub variants: IndexVec<VariantIdx, Item>,
     pub generics: Generics,
     pub variants_stripped: bool,
 }
@@ -2895,7 +2905,7 @@ impl Clean<Item> for doctree::Enum {
             stability: self.stab.clean(cx),
             deprecation: self.depr.clean(cx),
             inner: EnumItem(Enum {
-                variants: self.variants.clean(cx),
+                variants: self.variants.iter().map(|v| v.clean(cx)).collect(),
                 generics: self.generics.clean(cx),
                 variants_stripped: false,
             }),
@@ -2959,7 +2969,7 @@ impl<'tcx> Clean<Item> for ty::VariantDef {
             source: cx.tcx.def_span(self.did).clean(cx),
             visibility: Some(Inherited),
             def_id: self.did,
-            inner: VariantItem(Variant { kind: kind }),
+            inner: VariantItem(Variant { kind }),
             stability: get_stability(cx, self.did),
             deprecation: get_deprecation(cx, self.did),
         }
@@ -3388,7 +3398,7 @@ impl Clean<Vec<Item>> for doctree::Impl {
                   .into_iter()
                   .map(|meth| meth.ident.to_string())
                   .collect()
-        }).unwrap_or(FxHashSet());
+        }).unwrap_or_default();
 
         ret.push(Item {
             name: None,
@@ -3492,17 +3502,20 @@ impl Clean<Vec<Item>> for doctree::Import {
         // forcefully don't inline if this is not public or if the
         // #[doc(no_inline)] attribute is present.
         // Don't inline doc(hidden) imports so they can be stripped at a later stage.
-        let denied = !self.vis.node.is_pub() || self.attrs.iter().any(|a| {
+        let mut denied = !self.vis.node.is_pub() || self.attrs.iter().any(|a| {
             a.name() == "doc" && match a.meta_item_list() {
                 Some(l) => attr::list_contains_name(&l, "no_inline") ||
                            attr::list_contains_name(&l, "hidden"),
                 None => false,
             }
         });
+        // Also check whether imports were asked to be inlined, in case we're trying to re-export a
+        // crate in Rust 2018+
+        let please_inline = self.attrs.lists("doc").has_word("inline");
         let path = self.path.clean(cx);
         let inner = if self.glob {
             if !denied {
-                let mut visited = FxHashSet();
+                let mut visited = FxHashSet::default();
                 if let Some(items) = inline::try_inline_glob(cx, path.def, &mut visited) {
                     return items;
                 }
@@ -3511,8 +3524,18 @@ impl Clean<Vec<Item>> for doctree::Import {
             Import::Glob(resolve_use_source(cx, path))
         } else {
             let name = self.name;
+            if !please_inline {
+                match path.def {
+                    Def::Mod(did) => if !did.is_local() && did.index == CRATE_DEF_INDEX {
+                        // if we're `pub use`ing an extern crate root, don't inline it unless we
+                        // were specifically asked for it
+                        denied = true;
+                    }
+                    _ => {}
+                }
+            }
             if !denied {
-                let mut visited = FxHashSet();
+                let mut visited = FxHashSet::default();
                 if let Some(items) = inline::try_inline(cx, path.def, name, &mut visited) {
                     return items;
                 }
@@ -3612,7 +3635,7 @@ impl ToSource for syntax_pos::Span {
     fn to_src(&self, cx: &DocContext) -> String {
         debug!("converting span {:?} to snippet", self.clean(cx));
         let sn = match cx.sess().source_map().span_to_snippet(*self) {
-            Ok(x) => x.to_string(),
+            Ok(x) => x,
             Err(_) => String::new()
         };
         debug!("got snippet {}", sn);
@@ -3633,7 +3656,7 @@ fn name_from_pat(p: &hir::Pat) -> String {
                 fields.iter().map(|&Spanned { node: ref fp, .. }|
                                   format!("{}: {}", fp.ident, name_from_pat(&*fp.pat)))
                              .collect::<Vec<String>>().join(", "),
-                if etc { ", ..." } else { "" }
+                if etc { ", .." } else { "" }
             )
         }
         PatKind::Tuple(ref elts, _) => format!("({})", elts.iter().map(|p| name_from_pat(&**p))
@@ -4013,6 +4036,8 @@ where F: Fn(DefId) -> Def {
         def: def_ctor(def_id),
         segments: hir::HirVec::from_vec(apb.names.iter().map(|s| hir::PathSegment {
             ident: ast::Ident::from_str(&s),
+            id: None,
+            def: None,
             args: None,
             infer_types: false,
         }).collect())

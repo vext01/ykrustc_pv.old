@@ -18,8 +18,9 @@ pub use util::parser::ExprPrecedence;
 use ext::hygiene::{Mark, SyntaxContext};
 use print::pprust;
 use ptr::P;
-use rustc_data_structures::indexed_vec;
 use rustc_data_structures::indexed_vec::Idx;
+#[cfg(target_arch = "x86_64")]
+use rustc_data_structures::static_assert;
 use rustc_target::spec::abi::Abi;
 use source_map::{dummy_spanned, respan, Spanned};
 use symbol::{keywords, Symbol};
@@ -31,7 +32,6 @@ use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::sync::Lrc;
 use serialize::{self, Decoder, Encoder};
 use std::fmt;
-use std::u32;
 
 pub use rustc_target::abi::FloatTy;
 
@@ -129,6 +129,8 @@ pub struct PathSegment {
     /// The identifier portion of this path segment.
     pub ident: Ident,
 
+    pub id: NodeId,
+
     /// Type/lifetime parameters attached to this path. They come in
     /// two flavors: `Path<A,B,C>` and `Path(A,B) -> C`.
     /// `None` means that no parameter list is supplied (`Path`),
@@ -140,7 +142,7 @@ pub struct PathSegment {
 
 impl PathSegment {
     pub fn from_ident(ident: Ident) -> Self {
-        PathSegment { ident, args: None }
+        PathSegment { ident, id: DUMMY_NODE_ID, args: None }
     }
     pub fn crate_root(span: Span) -> Self {
         PathSegment::from_ident(Ident::new(keywords::CrateRoot.name(), span))
@@ -211,71 +213,54 @@ pub struct ParenthesisedArgs {
     pub output: Option<P<Ty>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct NodeId(u32);
+// hack to ensure that we don't try to access the private parts of `NodeId` in this module
+mod node_id_inner {
+    use rustc_data_structures::indexed_vec::Idx;
+    newtype_index! {
+        pub struct NodeId {
+            ENCODABLE = custom
+            DEBUG_FORMAT = "NodeId({})"
+        }
+    }
+}
+
+pub use self::node_id_inner::NodeId;
 
 impl NodeId {
-    pub fn new(x: usize) -> NodeId {
-        assert!(x < (u32::MAX as usize));
-        NodeId(x as u32)
-    }
-
-    pub fn from_u32(x: u32) -> NodeId {
-        NodeId(x)
-    }
-
-    pub fn as_usize(&self) -> usize {
-        self.0 as usize
-    }
-
-    pub fn as_u32(&self) -> u32 {
-        self.0
-    }
-
     pub fn placeholder_from_mark(mark: Mark) -> Self {
-        NodeId(mark.as_u32())
+        NodeId::from_u32(mark.as_u32())
     }
 
     pub fn placeholder_to_mark(self) -> Mark {
-        Mark::from_u32(self.0)
+        Mark::from_u32(self.as_u32())
     }
 }
 
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
+        fmt::Display::fmt(&self.as_u32(), f)
     }
 }
 
 impl serialize::UseSpecializedEncodable for NodeId {
     fn default_encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
-        s.emit_u32(self.0)
+        s.emit_u32(self.as_u32())
     }
 }
 
 impl serialize::UseSpecializedDecodable for NodeId {
     fn default_decode<D: Decoder>(d: &mut D) -> Result<NodeId, D::Error> {
-        d.read_u32().map(NodeId)
-    }
-}
-
-impl indexed_vec::Idx for NodeId {
-    fn new(idx: usize) -> Self {
-        NodeId::new(idx)
-    }
-
-    fn index(self) -> usize {
-        self.as_usize()
+        d.read_u32().map(NodeId::from_u32)
     }
 }
 
 /// Node id used to represent the root of the crate.
-pub const CRATE_NODE_ID: NodeId = NodeId(0);
+pub const CRATE_NODE_ID: NodeId = NodeId::from_u32_const(0);
 
 /// When parsing and doing expansions, we initially give all AST nodes this AST
 /// node value. Then later, in the renumber pass, we renumber them to have
 /// small, positive ids.
-pub const DUMMY_NODE_ID: NodeId = NodeId(!0);
+pub const DUMMY_NODE_ID: NodeId = NodeId::MAX;
 
 /// A modifier on a bound, currently this is only used for `?Sized`, where the
 /// modifier is `Maybe`. Negative bounds should also be handled here.
@@ -286,9 +271,9 @@ pub enum TraitBoundModifier {
 }
 
 /// The AST represents all type param bounds as types.
-/// typeck::collect::compute_bounds matches these against
-/// the "special" built-in traits (see middle::lang_items) and
-/// detects Copy, Send and Sync.
+/// `typeck::collect::compute_bounds` matches these against
+/// the "special" built-in traits (see `middle::lang_items`) and
+/// detects `Copy`, `Send` and `Sync`.
 #[derive(Clone, RustcEncodable, RustcDecodable, Debug)]
 pub enum GenericBound {
     Trait(PolyTraitRef, TraitBoundModifier),
@@ -922,6 +907,10 @@ pub struct Expr {
     pub attrs: ThinVec<Attribute>,
 }
 
+// `Expr` is used a lot. Make sure it doesn't unintentionally get bigger.
+#[cfg(target_arch = "x86_64")]
+static_assert!(MEM_SIZE_OF_EXPR: std::mem::size_of::<Expr>() == 88);
+
 impl Expr {
     /// Whether this expression would be valid somewhere that expects a value, for example, an `if`
     /// condition.
@@ -1084,7 +1073,7 @@ pub enum ExprKind {
     /// A unary operation (For example: `!x`, `*x`)
     Unary(UnOp, P<Expr>),
     /// A literal (For example: `1`, `"foo"`)
-    Lit(P<Lit>),
+    Lit(Lit),
     /// A cast (`foo as f64`)
     Cast(P<Expr>, P<Ty>),
     Type(P<Expr>, P<Ty>),
@@ -1322,6 +1311,14 @@ impl LitKind {
     pub fn is_str(&self) -> bool {
         match *self {
             LitKind::Str(..) => true,
+            _ => false,
+        }
+    }
+
+    /// Returns true if this literal is byte literal string false otherwise.
+    pub fn is_bytestr(&self) -> bool {
+        match self {
+            LitKind::ByteStr(_) => true,
             _ => false,
         }
     }

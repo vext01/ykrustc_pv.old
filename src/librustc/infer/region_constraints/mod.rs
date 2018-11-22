@@ -29,6 +29,7 @@ use std::{cmp, fmt, mem, u32};
 
 mod taint;
 
+#[derive(Default)]
 pub struct RegionConstraintCollector<'tcx> {
     /// For each `RegionVid`, the corresponding `RegionVariableOrigin`.
     var_infos: IndexVec<RegionVid, RegionVariableInfo>,
@@ -149,7 +150,7 @@ pub struct Verify<'tcx> {
     pub bound: VerifyBound<'tcx>,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum GenericKind<'tcx> {
     Param(ty::ParamTy),
     Projection(ty::ProjectionTy<'tcx>),
@@ -341,17 +342,8 @@ impl TaintDirections {
 }
 
 impl<'tcx> RegionConstraintCollector<'tcx> {
-    pub fn new() -> RegionConstraintCollector<'tcx> {
-        RegionConstraintCollector {
-            var_infos: VarInfos::default(),
-            data: RegionConstraintData::default(),
-            lubs: FxHashMap(),
-            glbs: FxHashMap(),
-            bound_count: 0,
-            undo_log: Vec::new(),
-            unification_table: ut::UnificationTable::new(),
-            any_unifications: false,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn num_region_vars(&self) -> usize {
@@ -749,7 +741,7 @@ impl<'tcx> RegionConstraintCollector<'tcx> {
                 a // LUB(a,a) = a
             }
 
-            _ => self.combine_vars(tcx, Lub, a, b, origin.clone()),
+            _ => self.combine_vars(tcx, Lub, a, b, origin),
         }
     }
 
@@ -771,7 +763,7 @@ impl<'tcx> RegionConstraintCollector<'tcx> {
                 a // GLB(a,a) = a
             }
 
-            _ => self.combine_vars(tcx, Glb, a, b, origin.clone()),
+            _ => self.combine_vars(tcx, Glb, a, b, origin),
         }
     }
 
@@ -833,10 +825,6 @@ impl<'tcx> RegionConstraintCollector<'tcx> {
             ty::RePlaceholder(placeholder) => placeholder.universe,
             ty::ReClosureBound(vid) | ty::ReVar(vid) => self.var_universe(vid),
             ty::ReLateBound(..) => bug!("universe(): encountered bound region {:?}", region),
-            ty::ReCanonical(..) => bug!(
-                "region_universe(): encountered canonical region {:?}",
-                region
-            ),
         }
     }
 

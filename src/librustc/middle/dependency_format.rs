@@ -63,7 +63,6 @@
 
 use hir::def_id::CrateNum;
 
-use session;
 use session::config;
 use ty::TyCtxt;
 use middle::cstore::{self, DepKind};
@@ -94,12 +93,11 @@ pub enum Linkage {
 
 pub fn calculate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
     let sess = &tcx.sess;
-    let mut fmts = FxHashMap();
-    for &ty in sess.crate_types.borrow().iter() {
+    let fmts = sess.crate_types.borrow().iter().map(|&ty| {
         let linkage = calculate_type(tcx, ty);
         verify_ok(tcx, &linkage);
-        fmts.insert(ty, linkage);
-    }
+        (ty, linkage)
+    }).collect::<FxHashMap<_, _>>();
     sess.abort_if_errors();
     sess.dependency_formats.set(fmts);
 }
@@ -170,7 +168,7 @@ fn calculate_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         }
     }
 
-    let mut formats = FxHashMap();
+    let mut formats = FxHashMap::default();
 
     // Sweep all crates for found dylibs. Add all dylibs, as well as their
     // dependencies, ensuring there are no conflicts. The only valid case for a
@@ -225,7 +223,6 @@ fn calculate_type<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     // quite yet, so do so here.
     activate_injected_dep(*sess.injected_panic_runtime.get(), &mut ret,
                           &|cnum| tcx.is_panic_runtime(cnum));
-    activate_injected_allocator(sess, &mut ret);
 
     // When dylib B links to dylib A, then when using B we must also link to A.
     // It could be the case, however, that the rlib for A is present (hence we
@@ -304,7 +301,6 @@ fn attempt_static<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) -> Option<DependencyLis
     // that here and activate them.
     activate_injected_dep(*sess.injected_panic_runtime.get(), &mut ret,
                           &|cnum| tcx.is_panic_runtime(cnum));
-    activate_injected_allocator(sess, &mut ret);
 
     Some(ret)
 }
@@ -333,18 +329,6 @@ fn activate_injected_dep(injected: Option<CrateNum>,
     if let Some(injected) = injected {
         let idx = injected.as_usize() - 1;
         assert_eq!(list[idx], Linkage::NotLinked);
-        list[idx] = Linkage::Static;
-    }
-}
-
-fn activate_injected_allocator(sess: &session::Session,
-                               list: &mut DependencyList) {
-    let cnum = match sess.injected_allocator.get() {
-        Some(cnum) => cnum,
-        None => return,
-    };
-    let idx = cnum.as_usize() - 1;
-    if list[idx] == Linkage::NotLinked {
         list[idx] = Linkage::Static;
     }
 }

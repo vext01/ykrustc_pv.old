@@ -180,7 +180,7 @@ impl<'a> State<'a> {
         State {
             s: pp::mk_printer(out, default_columns),
             cm: Some(cm),
-            comments: comments.clone(),
+            comments,
             literals: literals.unwrap_or_default().into_iter().peekable(),
             cur_cmnt: 0,
             boxes: Vec::new(),
@@ -1630,6 +1630,17 @@ impl<'a> State<'a> {
             }
         }
 
+        Ok(())
+    }
+
+    pub fn print_path_segment(&mut self, segment: &hir::PathSegment) -> io::Result<()> {
+        if segment.ident.name != keywords::CrateRoot.name() &&
+           segment.ident.name != keywords::DollarCrate.name() {
+           self.print_ident(segment.ident)?;
+           segment.with_generic_args(|generic_args| {
+               self.print_generic_args(generic_args, segment.infer_types, false)
+           })?;
+        }
         Ok(())
     }
 

@@ -116,7 +116,6 @@ pub struct Session {
     /// The metadata::creader module may inject an allocator/panic_runtime
     /// dependency if it didn't already find one, and this tracks what was
     /// injected.
-    pub injected_allocator: Once<Option<CrateNum>>,
     pub allocator_kind: Once<Option<AllocatorKind>>,
     pub injected_panic_runtime: Once<Option<CrateNum>>,
 
@@ -398,7 +397,7 @@ impl Session {
 
         match id.as_usize().checked_add(count) {
             Some(next) => {
-                self.next_node_id.set(ast::NodeId::new(next));
+                self.next_node_id.set(ast::NodeId::from_usize(next));
             }
             None => bug!("Input too large, ran out of node ids!"),
         }
@@ -529,6 +528,7 @@ impl Session {
     }
     pub fn verify_llvm_ir(&self) -> bool {
         self.opts.debugging_opts.verify_llvm_ir
+            || cfg!(always_verify_llvm_ir)
     }
     pub fn borrowck_stats(&self) -> bool {
         self.opts.debugging_opts.borrowck_stats
@@ -871,7 +871,7 @@ impl Session {
                 let fuel = self.optimization_fuel_limit.get();
                 ret = fuel != 0;
                 if fuel == 0 && !self.out_of_fuel.get() {
-                    println!("optimization-fuel-exhausted: {}", msg());
+                    eprintln!("optimization-fuel-exhausted: {}", msg());
                     self.out_of_fuel.set(true);
                 } else if fuel > 0 {
                     self.optimization_fuel_limit.set(fuel - 1);
@@ -964,6 +964,10 @@ impl Session {
 
     pub fn teach(&self, code: &DiagnosticId) -> bool {
         self.opts.debugging_opts.teach && self.diagnostic().must_teach(code)
+    }
+
+    pub fn rust_2015(&self) -> bool {
+        self.opts.edition == Edition::Edition2015
     }
 
     /// Are we allowed to use features from the Rust 2018 edition?
@@ -1150,8 +1154,8 @@ pub fn build_session_(
         local_crate_source_file,
         working_dir,
         lint_store: RwLock::new(lint::LintStore::new()),
-        buffered_lints: Lock::new(Some(lint::LintBuffer::new())),
-        one_time_diagnostics: Lock::new(FxHashSet()),
+        buffered_lints: Lock::new(Some(Default::default())),
+        one_time_diagnostics: Default::default(),
         plugin_llvm_passes: OneThread::new(RefCell::new(Vec::new())),
         plugin_attributes: OneThread::new(RefCell::new(Vec::new())),
         crate_types: Once::new(),
@@ -1161,8 +1165,7 @@ pub fn build_session_(
         recursion_limit: Once::new(),
         type_length_limit: Once::new(),
         const_eval_stack_frame_limit: 100,
-        next_node_id: OneThread::new(Cell::new(NodeId::new(1))),
-        injected_allocator: Once::new(),
+        next_node_id: OneThread::new(Cell::new(NodeId::from_u32(1))),
         allocator_kind: Once::new(),
         injected_panic_runtime: Once::new(),
         imported_macro_spans: OneThread::new(RefCell::new(FxHashMap::default())),
@@ -1177,7 +1180,7 @@ pub fn build_session_(
             normalize_ty_after_erasing_regions: AtomicUsize::new(0),
             normalize_projection_ty: AtomicUsize::new(0),
         },
-        code_stats: Lock::new(CodeStats::new()),
+        code_stats: Default::default(),
         optimization_fuel_crate,
         optimization_fuel_limit,
         print_fuel_crate,
@@ -1211,7 +1214,7 @@ pub fn build_session_(
         },
         has_global_allocator: Once::new(),
         has_panic_handler: Once::new(),
-        driver_lint_caps: FxHashMap(),
+        driver_lint_caps: Default::default(),
     };
 
     validate_commandline_args_with_session_available(&sess);

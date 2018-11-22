@@ -478,7 +478,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'gcx> {
     pub fn infer_ctxt(self) -> InferCtxtBuilder<'a, 'gcx, 'tcx> {
         InferCtxtBuilder {
             global_tcx: self,
-            arena: SyncDroplessArena::new(),
+            arena: SyncDroplessArena::default(),
             fresh_tables: None,
         }
     }
@@ -526,15 +526,15 @@ impl<'a, 'gcx, 'tcx> InferCtxtBuilder<'a, 'gcx, 'tcx> {
             f(InferCtxt {
                 tcx,
                 in_progress_tables,
-                projection_cache: RefCell::new(traits::ProjectionCache::new()),
+                projection_cache: Default::default(),
                 type_variables: RefCell::new(type_variable::TypeVariableTable::new()),
                 int_unification_table: RefCell::new(ut::UnificationTable::new()),
                 float_unification_table: RefCell::new(ut::UnificationTable::new()),
                 region_constraints: RefCell::new(Some(RegionConstraintCollector::new())),
                 lexical_region_resolutions: RefCell::new(None),
-                selection_cache: traits::SelectionCache::new(),
-                evaluation_cache: traits::EvaluationCache::new(),
-                reported_trait_errors: RefCell::new(FxHashMap()),
+                selection_cache: Default::default(),
+                evaluation_cache: Default::default(),
+                reported_trait_errors: Default::default(),
                 tainted_by_errors_flag: Cell::new(false),
                 err_count_on_creation: tcx.sess.err_count(),
                 in_snapshot: Cell::new(false),
@@ -1160,10 +1160,10 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
     }
 
     /// Takes ownership of the list of variable regions. This implies
-    /// that all the region constriants have already been taken, and
+    /// that all the region constraints have already been taken, and
     /// hence that `resolve_regions_and_report_errors` can never be
     /// called. This is used only during NLL processing to "hand off" ownership
-    /// of the set of region vairables into the NLL region context.
+    /// of the set of region variables into the NLL region context.
     pub fn take_region_var_origins(&self) -> VarInfos {
         let (var_infos, data) = self.region_constraints
             .borrow_mut()
@@ -1328,18 +1328,18 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         self.report_and_explain_type_error(trace, &err)
     }
 
-    pub fn replace_late_bound_regions_with_fresh_var<T>(
+    pub fn replace_bound_vars_with_fresh_vars<T>(
         &self,
         span: Span,
         lbrct: LateBoundRegionConversionTime,
-        value: &ty::Binder<T>,
+        value: &ty::Binder<T>
     ) -> (T, BTreeMap<ty::BoundRegion, ty::Region<'tcx>>)
     where
-        T: TypeFoldable<'tcx>,
+        T: TypeFoldable<'tcx>
     {
-        self.tcx.replace_late_bound_regions(value, |br| {
-            self.next_region_var(LateBoundRegion(span, br, lbrct))
-        })
+        let fld_r = |br| self.next_region_var(LateBoundRegion(span, br, lbrct));
+        let fld_t = |_| self.next_ty_var(TypeVariableOrigin::MiscVariable(span));
+        self.tcx.replace_bound_vars(value, fld_r, fld_t)
     }
 
     /// Given a higher-ranked projection predicate like:
@@ -1478,7 +1478,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
     }
 
     /// Clears the selection, evaluation, and projection caches. This is useful when
-    /// repeatedly attemping to select an Obligation while changing only
+    /// repeatedly attempting to select an Obligation while changing only
     /// its ParamEnv, since FulfillmentContext doesn't use 'probe'
     pub fn clear_caches(&self) {
         self.selection_cache.clear();

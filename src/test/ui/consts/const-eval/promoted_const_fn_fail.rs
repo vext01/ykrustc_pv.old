@@ -10,7 +10,7 @@
 
 #![feature(const_fn, const_fn_union)]
 
-#![deny(const_err)]
+#![allow(const_err)]
 
 union Bar {
     a: &'static u8,

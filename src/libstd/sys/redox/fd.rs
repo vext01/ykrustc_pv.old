@@ -21,12 +21,12 @@ pub struct FileDesc {
 
 impl FileDesc {
     pub fn new(fd: usize) -> FileDesc {
-        FileDesc { fd: fd }
+        FileDesc { fd }
     }
 
     pub fn raw(&self) -> usize { self.fd }
 
-    /// Extracts the actual filedescriptor without closing it.
+    /// Extracts the actual file descriptor without closing it.
     pub fn into_raw(self) -> usize {
         let fd = self.fd;
         mem::forget(self);

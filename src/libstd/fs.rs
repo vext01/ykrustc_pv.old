@@ -877,7 +877,7 @@ impl OpenOptions {
 
     fn _open(&self, path: &Path) -> io::Result<File> {
         let inner = fs_imp::File::open(path, &self.0)?;
-        Ok(File { inner: inner })
+        Ok(File { inner })
     }
 }
 
@@ -1755,12 +1755,19 @@ pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 ///
 /// [changes]: ../io/index.html#platform-specific-behavior
 ///
+/// **NOTE**: If a parent of the given path doesn't exist, this function will
+/// return an error. To create a directory and all its missing parents at the
+/// same time, use the [`create_dir_all`] function.
+///
 /// # Errors
 ///
 /// This function will return an error in the following situations, but is not
 /// limited to just these cases:
 ///
 /// * User lacks permissions to create directory at `path`.
+/// * A parent of the given path doesn't exist. (To create a directory and all
+///   its missing parents at the same time, use the [`create_dir_all`]
+///   function.)
 /// * `path` already exists.
 ///
 /// # Examples

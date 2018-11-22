@@ -25,7 +25,7 @@ use rustc_serialize::{Decodable, Decoder, Encodable, Encoder, opaque,
 use session::{CrateDisambiguator, Session};
 use std::mem;
 use syntax::ast::NodeId;
-use syntax::source_map::{SourceMap, StableFilemapId};
+use syntax::source_map::{SourceMap, StableSourceFileId};
 use syntax_pos::{BytePos, Span, DUMMY_SP, SourceFile};
 use syntax_pos::hygiene::{Mark, SyntaxContext, ExpnInfo};
 use ty;
@@ -62,7 +62,7 @@ pub struct OnDiskCache<'sess> {
     cnum_map: Once<IndexVec<CrateNum, Option<CrateNum>>>,
 
     source_map: &'sess SourceMap,
-    file_index_to_stable_id: FxHashMap<SourceFileIndex, StableFilemapId>,
+    file_index_to_stable_id: FxHashMap<SourceFileIndex, StableSourceFileId>,
 
     // These two fields caches that are populated lazily during decoding.
     file_index_to_file: Lock<FxHashMap<SourceFileIndex, Lrc<SourceFile>>>,
@@ -82,7 +82,7 @@ pub struct OnDiskCache<'sess> {
 // This type is used only for (de-)serialization.
 #[derive(RustcEncodable, RustcDecodable)]
 struct Footer {
-    file_index_to_stable_id: FxHashMap<SourceFileIndex, StableFilemapId>,
+    file_index_to_stable_id: FxHashMap<SourceFileIndex, StableSourceFileId>,
     prev_cnums: Vec<(u32, String, CrateDisambiguator)>,
     query_result_index: EncodedQueryResultIndex,
     diagnostics_index: EncodedQueryResultIndex,
@@ -136,14 +136,14 @@ impl<'sess> OnDiskCache<'sess> {
         OnDiskCache {
             serialized_data: data,
             file_index_to_stable_id: footer.file_index_to_stable_id,
-            file_index_to_file: Lock::new(FxHashMap()),
+            file_index_to_file: Default::default(),
             prev_cnums: footer.prev_cnums,
             cnum_map: Once::new(),
             source_map: sess.source_map(),
-            current_diagnostics: Lock::new(FxHashMap()),
+            current_diagnostics: Default::default(),
             query_result_index: footer.query_result_index.into_iter().collect(),
             prev_diagnostics_index: footer.diagnostics_index.into_iter().collect(),
-            synthetic_expansion_infos: Lock::new(FxHashMap()),
+            synthetic_expansion_infos: Default::default(),
             alloc_decoding_state: AllocDecodingState::new(footer.interpret_alloc_index),
         }
     }
@@ -151,15 +151,15 @@ impl<'sess> OnDiskCache<'sess> {
     pub fn new_empty(source_map: &'sess SourceMap) -> OnDiskCache<'sess> {
         OnDiskCache {
             serialized_data: Vec::new(),
-            file_index_to_stable_id: FxHashMap(),
-            file_index_to_file: Lock::new(FxHashMap()),
+            file_index_to_stable_id: Default::default(),
+            file_index_to_file: Default::default(),
             prev_cnums: vec![],
             cnum_map: Once::new(),
             source_map,
-            current_diagnostics: Lock::new(FxHashMap()),
-            query_result_index: FxHashMap(),
-            prev_diagnostics_index: FxHashMap(),
-            synthetic_expansion_infos: Lock::new(FxHashMap()),
+            current_diagnostics: Default::default(),
+            query_result_index: Default::default(),
+            prev_diagnostics_index: Default::default(),
+            synthetic_expansion_infos: Default::default(),
             alloc_decoding_state: AllocDecodingState::new(Vec::new()),
         }
     }
@@ -174,14 +174,17 @@ impl<'sess> OnDiskCache<'sess> {
         tcx.dep_graph.with_ignore(|| {
             // Allocate SourceFileIndices
             let (file_to_file_index, file_index_to_stable_id) = {
-                let mut file_to_file_index = FxHashMap();
-                let mut file_index_to_stable_id = FxHashMap();
+                let files = tcx.sess.source_map().files();
+                let mut file_to_file_index = FxHashMap::with_capacity_and_hasher(
+                    files.len(), Default::default());
+                let mut file_index_to_stable_id = FxHashMap::with_capacity_and_hasher(
+                    files.len(), Default::default());
 
-                for (index, file) in tcx.sess.source_map().files().iter().enumerate() {
+                for (index, file) in files.iter().enumerate() {
                     let index = SourceFileIndex(index as u32);
                     let file_ptr: *const SourceFile = &**file as *const _;
                     file_to_file_index.insert(file_ptr, index);
-                    file_index_to_stable_id.insert(index, StableFilemapId::new(&file));
+                    file_index_to_stable_id.insert(index, StableSourceFileId::new(&file));
                 }
 
                 (file_to_file_index, file_index_to_stable_id)
@@ -190,10 +193,10 @@ impl<'sess> OnDiskCache<'sess> {
             let mut encoder = CacheEncoder {
                 tcx,
                 encoder,
-                type_shorthands: FxHashMap(),
-                predicate_shorthands: FxHashMap(),
-                expn_info_shorthands: FxHashMap(),
-                interpret_allocs: FxHashMap(),
+                type_shorthands: Default::default(),
+                predicate_shorthands: Default::default(),
+                expn_info_shorthands: Default::default(),
+                interpret_allocs: Default::default(),
                 interpret_allocs_inverse: Vec::new(),
                 source_map: CachingSourceMapView::new(tcx.sess.source_map()),
                 file_to_file_index,
@@ -278,7 +281,7 @@ impl<'sess> OnDiskCache<'sess> {
                         // otherwise, abort
                         break;
                     }
-                    interpret_alloc_index.reserve(new_n);
+                    interpret_alloc_index.reserve(new_n - n);
                     for idx in n..new_n {
                         let id = encoder.interpret_allocs_inverse[idx];
                         let pos = encoder.position() as u32;
@@ -342,7 +345,7 @@ impl<'sess> OnDiskCache<'sess> {
             &self.prev_diagnostics_index,
             "diagnostics");
 
-        diagnostics.unwrap_or(Vec::new())
+        diagnostics.unwrap_or_default()
     }
 
     /// Store a diagnostic emitted during the current compilation session.
@@ -447,8 +450,7 @@ impl<'sess> OnDiskCache<'sess> {
                                      .map(|&(cnum, ..)| cnum)
                                      .max()
                                      .unwrap_or(0) + 1;
-            let mut map = IndexVec::new();
-            map.resize(map_size as usize, None);
+            let mut map = IndexVec::from_elem_n(None, map_size as usize);
 
             for &(prev_cnum, ref crate_name, crate_disambiguator) in prev_cnums {
                 let key = (crate_name.clone(), crate_disambiguator);
@@ -473,7 +475,7 @@ struct CacheDecoder<'a, 'tcx: 'a, 'x> {
     cnum_map: &'x IndexVec<CrateNum, Option<CrateNum>>,
     synthetic_expansion_infos: &'x Lock<FxHashMap<AbsoluteBytePos, SyntaxContext>>,
     file_index_to_file: &'x Lock<FxHashMap<SourceFileIndex, Lrc<SourceFile>>>,
-    file_index_to_stable_id: &'x FxHashMap<SourceFileIndex, StableFilemapId>,
+    file_index_to_stable_id: &'x FxHashMap<SourceFileIndex, StableSourceFileId>,
     alloc_decoding_session: AllocDecodingSession<'x>,
 }
 

@@ -31,7 +31,6 @@ use channel;
 use util::{libdir, is_dylib, exe};
 use builder::{Builder, RunConfig, ShouldRun, Step};
 use compile;
-use native;
 use tool::{self, Tool};
 use cache::{INTERNER, Interned};
 use time;
@@ -860,8 +859,6 @@ impl Step for Src {
             "src/build_helper",
             "src/dlmalloc",
             "src/liballoc",
-            "src/liballoc_jemalloc",
-            "src/liballoc_system",
             "src/libbacktrace",
             "src/libcompiler_builtins",
             "src/libcore",
@@ -879,13 +876,12 @@ impl Step for Src {
             "src/rustc/dlmalloc_shim",
             "src/libtest",
             "src/libterm",
-            "src/jemalloc",
             "src/libprofiler_builtins",
             "src/stdsimd",
+            "src/libproc_macro",
         ];
         let std_src_dirs_exclude = [
             "src/libcompiler_builtins/compiler-rt/test",
-            "src/jemalloc/test/unit",
         ];
 
         copy_src_dirs(builder, &std_src_dirs[..], &std_src_dirs_exclude[..], &dst_src);
@@ -912,7 +908,7 @@ impl Step for Src {
     }
 }
 
-const CARGO_VENDOR_VERSION: &str = "0.1.4";
+const CARGO_VENDOR_VERSION: &str = "0.1.19";
 
 #[derive(Debug, PartialOrd, Ord, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct PlainSourceTarball;
@@ -990,12 +986,6 @@ impl Step for PlainSourceTarball {
                    .arg("--debug")
                    .arg("--vers").arg(CARGO_VENDOR_VERSION)
                    .arg("cargo-vendor");
-                if let Some(dir) = builder.openssl_install_dir(builder.config.build) {
-                    builder.ensure(native::Openssl {
-                        target: builder.config.build,
-                    });
-                    cmd.env("OPENSSL_DIR", dir);
-                }
                 builder.run(&mut cmd);
             }
 
@@ -1454,8 +1444,8 @@ impl Step for Extended {
         tarballs.extend(rls_installer.clone());
         tarballs.extend(clippy_installer.clone());
         tarballs.extend(rustfmt_installer.clone());
-        tarballs.extend(llvm_tools_installer.clone());
-        tarballs.extend(lldb_installer.clone());
+        tarballs.extend(llvm_tools_installer);
+        tarballs.extend(lldb_installer);
         tarballs.push(analysis_installer);
         tarballs.push(std_installer);
         if builder.config.docs {

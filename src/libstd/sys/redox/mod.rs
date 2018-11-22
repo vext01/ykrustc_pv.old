@@ -15,6 +15,8 @@ use io::{self, ErrorKind};
 pub use libc::strlen;
 pub use self::rand::hashmap_random_keys;
 
+#[path = "../unix/alloc.rs"]
+pub mod alloc;
 pub mod args;
 #[cfg(feature = "backtrace")]
 pub mod backtrace;
@@ -73,6 +75,29 @@ pub fn decode_error_kind(errno: i32) -> ErrorKind {
 
 pub fn cvt(result: Result<usize, syscall::Error>) -> io::Result<usize> {
     result.map_err(|err| io::Error::from_raw_os_error(err.errno))
+}
+
+#[doc(hidden)]
+pub trait IsMinusOne {
+    fn is_minus_one(&self) -> bool;
+}
+
+macro_rules! impl_is_minus_one {
+    ($($t:ident)*) => ($(impl IsMinusOne for $t {
+        fn is_minus_one(&self) -> bool {
+            *self == -1
+        }
+    })*)
+}
+
+impl_is_minus_one! { i8 i16 i32 i64 isize }
+
+pub fn cvt_libc<T: IsMinusOne>(t: T) -> io::Result<T> {
+    if t.is_minus_one() {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(t)
+    }
 }
 
 /// On Redox, use an illegal instruction to abort

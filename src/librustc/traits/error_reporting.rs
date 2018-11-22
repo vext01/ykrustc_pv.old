@@ -34,7 +34,6 @@ use hir::def_id::DefId;
 use infer::{self, InferCtxt};
 use infer::type_variable::TypeVariableOrigin;
 use std::fmt;
-use std::iter;
 use syntax::ast;
 use session::DiagnosticMessageId;
 use ty::{self, AdtKind, ToPredicate, ToPolyTraitRef, Ty, TyCtxt, TypeFoldable};
@@ -213,10 +212,11 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             // cause I have no idea for a good error message.
             if let ty::Predicate::Projection(ref data) = predicate {
                 let mut selcx = SelectionContext::new(self);
-                let (data, _) = self.replace_late_bound_regions_with_fresh_var(
+                let (data, _) = self.replace_bound_vars_with_fresh_vars(
                     obligation.cause.span,
                     infer::LateBoundRegionConversionTime::HigherRankedType,
-                    data);
+                    data
+                );
                 let mut obligations = vec![];
                 let normalized_ty = super::normalize_projection_type(
                     &mut selcx,
@@ -239,7 +239,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
 
             let msg = format!("type mismatch resolving `{}`", predicate);
             let error_id = (DiagnosticMessageId::ErrorId(271),
-                            Some(obligation.cause.span), msg.clone());
+                            Some(obligation.cause.span), msg);
             let fresh = self.tcx.sess.one_time_diagnostics.borrow_mut().insert(error_id);
             if fresh {
                 let mut diag = struct_span_err!(
@@ -281,7 +281,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 ty::Generator(..) => Some(18),
                 ty::Foreign(..) => Some(19),
                 ty::GeneratorWitness(..) => Some(20),
-                ty::Infer(..) | ty::Error => None,
+                ty::Bound(..) | ty::Infer(..) | ty::Error => None,
                 ty::UnnormalizedProjection(..) => bug!("only used with chalk-engine"),
             }
         }
@@ -352,7 +352,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         obligation: &PredicateObligation<'tcx>,
     ) -> OnUnimplementedNote {
         let def_id = self.impl_similar_to(trait_ref, obligation)
-            .unwrap_or(trait_ref.def_id());
+            .unwrap_or_else(|| trait_ref.def_id());
         let trait_ref = *trait_ref.skip_binder();
 
         let mut flags = vec![];
@@ -377,6 +377,9 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 flags.push(("from_method".to_owned(), None));
                 flags.push(("from_method".to_owned(), Some(method.to_string())));
             }
+        }
+        if let Some(t) = self.get_parent_trait_ref(&obligation.cause.code) {
+            flags.push(("parent_trait".to_owned(), Some(t)));
         }
 
         if let Some(k) = obligation.cause.span.compiler_desugaring_kind() {
@@ -409,7 +412,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             flags.push(("crate_local".to_owned(), None));
         }
 
-        // Allow targetting all integers using `{integral}`, even if the exact type was resolved
+        // Allow targeting all integers using `{integral}`, even if the exact type was resolved
         if self_ty.is_integral() {
             flags.push(("_Self".to_owned(), Some("{integral}".to_owned())));
         }
@@ -426,7 +429,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 ));
                 let tcx = self.tcx;
                 if let Some(len) = len.val.try_to_scalar().and_then(|scalar| {
-                    scalar.to_usize(tcx).ok()
+                    scalar.to_usize(&tcx).ok()
                 }) {
                     flags.push((
                         "_Self".to_owned(),
@@ -636,7 +639,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                         let (post_message, pre_message) =
                             self.get_parent_trait_ref(&obligation.cause.code)
                                 .map(|t| (format!(" in `{}`", t), format!("within `{}`, ", t)))
-                            .unwrap_or((String::new(), String::new()));
+                            .unwrap_or_default();
 
                         let OnUnimplementedNote { message, label, note }
                             = self.on_unimplemented_note(trait_ref, obligation);
@@ -752,7 +755,8 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                     }
 
                     ty::Predicate::ObjectSafe(trait_def_id) => {
-                        let violations = self.tcx.object_safety_violations(trait_def_id);
+                        let violations = self.tcx.global_tcx()
+                            .object_safety_violations(trait_def_id);
                         self.tcx.report_object_safety_error(span,
                                                             trait_def_id,
                                                             violations)
@@ -873,22 +877,14 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             }
 
             TraitNotObjectSafe(did) => {
-                let violations = self.tcx.object_safety_violations(did);
+                let violations = self.tcx.global_tcx().object_safety_violations(did);
                 self.tcx.report_object_safety_error(span, did, violations)
             }
 
-            ConstEvalFailure(ref err) => {
-                match err.struct_error(
-                    self.tcx.at(span),
-                    "could not evaluate constant expression",
-                ) {
-                    Some(err) => err,
-                    None => {
-                        self.tcx.sess.delay_span_bug(span,
-                            &format!("constant in type had an ignored error: {:?}", err));
-                        return;
-                    }
-                }
+            // already reported in the query
+            ConstEvalFailure(_) => {
+                self.tcx.sess.delay_span_bug(span, "constant in type had an ignored error");
+                return;
             }
 
             Overflow => {
@@ -1100,10 +1096,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             // found arguments is empty (assume the user just wants to ignore args in this case).
             // For example, if `expected_args_length` is 2, suggest `|_, _|`.
             if found_args.is_empty() && is_closure {
-                let underscores = iter::repeat("_")
-                                      .take(expected_args.len())
-                                      .collect::<Vec<_>>()
-                                      .join(", ");
+                let underscores = vec!["_"; expected_args.len()].join(", ");
                 err.span_suggestion_with_applicability(
                     found_span,
                     &format!(
@@ -1255,7 +1248,7 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
             trait_str);
         err.span_label(span, format!("the trait `{}` cannot be made into an object", trait_str));
 
-        let mut reported_violations = FxHashSet();
+        let mut reported_violations = FxHashSet::default();
         for violation in violations {
             if reported_violations.insert(violation.clone()) {
                 err.note(&violation.error_msg());
@@ -1401,7 +1394,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
 
             let cleaned_pred = pred.fold_with(&mut ParamToVarFolder {
                 infcx: self,
-                var_map: FxHashMap()
+                var_map: Default::default()
             });
 
             let cleaned_pred = super::project::normalize(

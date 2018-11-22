@@ -148,7 +148,7 @@ fn check_rvalue(
         Rvalue::Len(place) | Rvalue::Discriminant(place) | Rvalue::Ref(_, _, place) => {
             check_place(tcx, mir, place, span, PlaceMode::Read)
         }
-        Rvalue::Cast(_, operand, cast_ty) => {
+        Rvalue::Cast(CastKind::Misc, operand, cast_ty) => {
             use rustc::ty::cast::CastTy;
             let cast_in = CastTy::from_ty(operand.ty(mir, tcx)).expect("bad input type for cast");
             let cast_out = CastTy::from_ty(cast_ty).expect("bad output type for cast");
@@ -163,6 +163,16 @@ fn check_rvalue(
                 _ => check_operand(tcx, mir, operand, span),
             }
         }
+        Rvalue::Cast(CastKind::UnsafeFnPointer, _, _) |
+        Rvalue::Cast(CastKind::ClosureFnPointer, _, _) |
+        Rvalue::Cast(CastKind::ReifyFnPointer, _, _) => Err((
+            span,
+            "function pointer casts are not allowed in const fn".into(),
+        )),
+        Rvalue::Cast(CastKind::Unsize, _, _) => Err((
+            span,
+            "unsizing casts are not allowed in const fn".into(),
+        )),
         // binops are fine on integers
         Rvalue::BinaryOp(_, lhs, rhs) | Rvalue::CheckedBinaryOp(_, lhs, rhs) => {
             check_operand(tcx, mir, lhs, span)?;
@@ -177,8 +187,11 @@ fn check_rvalue(
                 ))
             }
         }
-        // checked by regular const fn checks
-        Rvalue::NullaryOp(..) => Ok(()),
+        Rvalue::NullaryOp(NullOp::SizeOf, _) => Ok(()),
+        Rvalue::NullaryOp(NullOp::Box, _) => Err((
+            span,
+            "heap allocations are not allowed in const fn".into(),
+        )),
         Rvalue::UnaryOp(_, operand) => {
             let ty = operand.ty(mir, tcx);
             if ty.is_integral() || ty.is_bool() {
@@ -228,7 +241,8 @@ fn check_statement(
         // These are all NOPs
         | StatementKind::StorageLive(_)
         | StatementKind::StorageDead(_)
-        | StatementKind::Validate(..)
+        | StatementKind::Retag { .. }
+        | StatementKind::EscapeToRaw { .. }
         | StatementKind::EndRegion(_)
         | StatementKind::AscribeUserType(..)
         | StatementKind::Nop => Ok(()),
@@ -304,7 +318,8 @@ fn check_terminator(
             check_place(tcx, mir, location, span, PlaceMode::Read)?;
             check_operand(tcx, mir, value, span)
         },
-        TerminatorKind::SwitchInt { .. } => Err((
+
+        TerminatorKind::FalseEdges { .. } | TerminatorKind::SwitchInt { .. } => Err((
             span,
             "`if`, `match`, `&&` and `||` are not stable in const fn".into(),
         )),
@@ -350,7 +365,7 @@ fn check_terminator(
             cleanup: _,
         } => check_operand(tcx, mir, cond, span),
 
-        | TerminatorKind::FalseEdges { .. } | TerminatorKind::FalseUnwind { .. } => span_bug!(
+        | TerminatorKind::FalseUnwind { .. } => span_bug!(
             terminator.source_info.span,
             "min_const_fn encountered `{:#?}`",
             terminator

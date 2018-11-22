@@ -155,7 +155,8 @@ impl<'cx, 'gcx, 'tcx> VerifyBoundCx<'cx, 'gcx, 'tcx> {
             .map(|subty| self.type_bound(subty))
             .collect::<Vec<_>>();
 
-        let mut regions = ty.regions();
+        let mut regions = smallvec![];
+        ty.push_regions(&mut regions);
         regions.retain(|r| !r.is_late_bound()); // ignore late-bound regions
         bounds.push(VerifyBound::AllBounds(
             regions
@@ -298,8 +299,8 @@ impl<'cx, 'gcx, 'tcx> VerifyBoundCx<'cx, 'gcx, 'tcx> {
         let assoc_item = tcx.associated_item(assoc_item_def_id);
         let trait_def_id = assoc_item.container.assert_trait();
         let trait_predicates = tcx.predicates_of(trait_def_id).predicates
-            .into_iter()
-            .map(|(p, _)| p)
+            .iter()
+            .map(|(p, _)| *p)
             .collect();
         let identity_substs = Substs::identity_for_item(tcx, assoc_item_def_id);
         let identity_proj = tcx.mk_projection(assoc_item_def_id, identity_substs);
@@ -323,7 +324,7 @@ impl<'cx, 'gcx, 'tcx> VerifyBoundCx<'cx, 'gcx, 'tcx> {
         predicates
             .into_iter()
             .filter_map(|p| p.as_ref().to_opt_type_outlives())
-            .filter_map(|p| p.no_late_bound_regions())
+            .filter_map(|p| p.no_bound_vars())
             .filter(move |p| compare_ty(p.0))
     }
 }

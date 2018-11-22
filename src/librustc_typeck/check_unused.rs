@@ -24,7 +24,7 @@ use rustc::util::nodemap::DefIdSet;
 use rustc_data_structures::fx::FxHashMap;
 
 pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
-    let mut used_trait_imports = DefIdSet();
+    let mut used_trait_imports = DefIdSet::default();
     for &body_id in tcx.hir.krate().bodies.keys() {
         let item_def_id = tcx.hir.body_owner_def_id(body_id);
         let imports = tcx.used_trait_imports(item_def_id);
@@ -164,7 +164,7 @@ fn unused_crates_lint<'tcx>(tcx: TyCtxt<'_, 'tcx, 'tcx>) {
         // If the extern crate isn't in the extern prelude,
         // there is no way it can be written as an `use`.
         let orig_name = extern_crate.orig_name.unwrap_or(item.name);
-        if !tcx.extern_prelude.contains(&orig_name) {
+        if !tcx.extern_prelude.get(&orig_name).map_or(false, |from_item| !from_item) {
             continue;
         }
 

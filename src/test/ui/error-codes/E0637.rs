@@ -8,11 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-struct Foo<'a: '_>(&'a u8); //~ ERROR invalid lifetime bound name: `'_`
-fn foo<'a: '_>(_: &'a u8) {} //~ ERROR invalid lifetime bound name: `'_`
+struct Foo<'a: '_>(&'a u8); //~ ERROR cannot be used here
+fn foo<'a: '_>(_: &'a u8) {} //~ ERROR cannot be used here
 
 struct Bar<'a>(&'a u8);
-impl<'a: '_> Bar<'a> { //~ ERROR invalid lifetime bound name: `'_`
+impl<'a: '_> Bar<'a> { //~ ERROR cannot be used here
   fn bar() {}
 }
 

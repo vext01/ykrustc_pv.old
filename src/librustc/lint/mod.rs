@@ -341,7 +341,7 @@ pub trait EarlyLintPass: LintPass {
     fn check_block_post(&mut self, _: &EarlyContext<'_>, _: &ast::Block) { }
     fn check_stmt(&mut self, _: &EarlyContext<'_>, _: &ast::Stmt) { }
     fn check_arm(&mut self, _: &EarlyContext<'_>, _: &ast::Arm) { }
-    fn check_pat(&mut self, _: &EarlyContext<'_>, _: &ast::Pat) { }
+    fn check_pat(&mut self, _: &EarlyContext<'_>, _: &ast::Pat, _: &mut bool) { }
     fn check_expr(&mut self, _: &EarlyContext<'_>, _: &ast::Expr) { }
     fn check_expr_post(&mut self, _: &EarlyContext<'_>, _: &ast::Expr) { }
     fn check_ty(&mut self, _: &EarlyContext<'_>, _: &ast::Ty) { }
@@ -470,7 +470,7 @@ pub enum LintSource {
     Default,
 
     /// Lint level was set by an attribute.
-    Node(ast::Name, Span),
+    Node(ast::Name, Span, Option<Symbol> /* RFC 2383 reason */),
 
     /// Lint level was set by a command-line flag.
     CommandLine(Symbol),
@@ -478,7 +478,7 @@ pub enum LintSource {
 
 impl_stable_hash_for!(enum self::LintSource {
     Default,
-    Node(name, span),
+    Node(name, span, reason),
     CommandLine(text)
 });
 
@@ -490,15 +490,12 @@ mod levels;
 
 pub use self::levels::{LintLevelSets, LintLevelMap};
 
+#[derive(Default)]
 pub struct LintBuffer {
     map: NodeMap<Vec<BufferedEarlyLint>>,
 }
 
 impl LintBuffer {
-    pub fn new() -> LintBuffer {
-        LintBuffer { map: NodeMap() }
-    }
-
     pub fn add_lint(&mut self,
                     lint: &'static Lint,
                     id: ast::NodeId,
@@ -519,7 +516,7 @@ impl LintBuffer {
     }
 
     pub fn take(&mut self, id: ast::NodeId) -> Vec<BufferedEarlyLint> {
-        self.map.remove(&id).unwrap_or(Vec::new())
+        self.map.remove(&id).unwrap_or_default()
     }
 
     pub fn get_any(&self) -> Option<&[BufferedEarlyLint]> {
@@ -578,7 +575,10 @@ pub fn struct_lint_level<'a>(sess: &'a Session,
                              hyphen_case_flag_val));
             }
         }
-        LintSource::Node(lint_attr_name, src) => {
+        LintSource::Node(lint_attr_name, src, reason) => {
+            if let Some(rationale) = reason {
+                err.note(&rationale.as_str());
+            }
             sess.diag_span_note_once(&mut err, DiagnosticMessageId::from(lint),
                                      src, "lint level defined here");
             if lint_attr_name.as_str() != name {

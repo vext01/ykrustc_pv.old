@@ -274,7 +274,7 @@ pub mod rt {
             // FIXME: This is wrong
             P(ast::Expr {
                 id: ast::DUMMY_NODE_ID,
-                node: ast::ExprKind::Lit(P(self.clone())),
+                node: ast::ExprKind::Lit(self.clone()),
                 span: DUMMY_SP,
                 attrs: ThinVec::new(),
             }).to_tokens(cx)
@@ -305,7 +305,7 @@ pub mod rt {
                     let lit = ast::LitKind::Int(val as u128, ast::LitIntType::Signed($tag));
                     let lit = P(ast::Expr {
                         id: ast::DUMMY_NODE_ID,
-                        node: ast::ExprKind::Lit(P(dummy_spanned(lit))),
+                        node: ast::ExprKind::Lit(dummy_spanned(lit)),
                         span: DUMMY_SP,
                         attrs: ThinVec::new(),
                     });
@@ -419,7 +419,7 @@ pub fn parse_item_panic(parser: &mut Parser) -> Option<P<Item>> {
 }
 
 pub fn parse_pat_panic(parser: &mut Parser) -> P<Pat> {
-    panictry!(parser.parse_pat())
+    panictry!(parser.parse_pat(None))
 }
 
 pub fn parse_arm_panic(parser: &mut Parser) -> Arm {

@@ -15,12 +15,19 @@
 use std::borrow::{Borrow, Cow};
 use std::hash::Hash;
 
-use rustc::hir::def_id::DefId;
-use rustc::mir::interpret::{Allocation, AllocId, EvalResult, Scalar};
+use rustc::hir::{self, def_id::DefId};
 use rustc::mir;
 use rustc::ty::{self, layout::TyLayout, query::TyCtxtAt};
 
-use super::{EvalContext, PlaceTy, OpTy, MemoryKind};
+use super::{
+    Allocation, AllocId, EvalResult, Scalar, AllocationExtra,
+    EvalContext, PlaceTy, MPlaceTy, OpTy, Pointer, MemoryKind,
+};
+
+/// Whether this kind of memory is allowed to leak
+pub trait MayLeak: Copy {
+    fn may_leak(self) -> bool;
+}
 
 /// The functionality needed by memory to manage its allocations
 pub trait AllocMap<K: Hash + Eq, V> {
@@ -62,22 +69,25 @@ pub trait AllocMap<K: Hash + Eq, V> {
 /// Methods of this trait signifies a point where CTFE evaluation would fail
 /// and some use case dependent behaviour can instead be applied.
 pub trait Machine<'a, 'mir, 'tcx>: Sized {
-    /// Additional data that can be accessed via the Memory
-    type MemoryData;
-
     /// Additional memory kinds a machine wishes to distinguish from the builtin ones
-    type MemoryKinds: ::std::fmt::Debug + Copy + Eq;
+    type MemoryKinds: ::std::fmt::Debug + MayLeak + Eq + 'static;
+
+    /// Tag tracked alongside every pointer.  This is used to implement "Stacked Borrows"
+    /// <https://www.ralfj.de/blog/2018/08/07/stacked-borrows.html>.
+    /// The `default()` is used for pointers to consts, statics, vtables and functions.
+    type PointerTag: ::std::fmt::Debug + Default + Copy + Eq + Hash + 'static;
+
+    /// Extra data stored in every allocation.
+    type AllocExtra: AllocationExtra<Self::PointerTag>;
 
     /// Memory's allocation map
     type MemoryMap:
-        AllocMap<AllocId, (MemoryKind<Self::MemoryKinds>, Allocation<Self::PointerTag>)> +
+        AllocMap<
+            AllocId,
+            (MemoryKind<Self::MemoryKinds>, Allocation<Self::PointerTag, Self::AllocExtra>)
+        > +
         Default +
         Clone;
-
-    /// Tag tracked alongside every pointer.  This is inert for now, in preparation for
-    /// a future implementation of "Stacked Borrows"
-    /// <https://www.ralfj.de/blog/2018/08/07/stacked-borrows.html>.
-    type PointerTag: ::std::fmt::Debug + Default + Copy + Eq + Hash + 'static;
 
     /// The memory kind to use for copied statics -- or None if those are not supported.
     /// Statics are copied under two circumstances: When they are mutated, and when
@@ -127,18 +137,18 @@ pub trait Machine<'a, 'mir, 'tcx>: Sized {
     fn find_foreign_static(
         tcx: TyCtxtAt<'a, 'tcx, 'tcx>,
         def_id: DefId,
-    ) -> EvalResult<'tcx, Cow<'tcx, Allocation<Self::PointerTag>>>;
+    ) -> EvalResult<'tcx, Cow<'tcx, Allocation<Self::PointerTag, Self::AllocExtra>>>;
 
     /// Called to turn an allocation obtained from the `tcx` into one that has
-    /// the appropriate tags on each pointer.
+    /// the right type for this machine.
     ///
     /// This should avoid copying if no work has to be done! If this returns an owned
-    /// allocation (because a copy had to be done to add the tags), machine memory will
+    /// allocation (because a copy had to be done to add tags or metadata), machine memory will
     /// cache the result. (This relies on `AllocMap::get_or` being able to add the
     /// owned allocation to the map even when the map is shared.)
-    fn static_with_default_tag(
+    fn adjust_static_allocation(
         alloc: &'_ Allocation
-    ) -> Cow<'_, Allocation<Self::PointerTag>>;
+    ) -> Cow<'_, Allocation<Self::PointerTag, Self::AllocExtra>>;
 
     /// Called for all binary operations on integer(-like) types when one operand is a pointer
     /// value, and for the `Offset` operation that is inherently about pointers.
@@ -153,19 +163,46 @@ pub trait Machine<'a, 'mir, 'tcx>: Sized {
         right_layout: TyLayout<'tcx>,
     ) -> EvalResult<'tcx, (Scalar<Self::PointerTag>, bool)>;
 
-    /// Heap allocations via the `box` keyword
-    ///
-    /// Returns a pointer to the allocated memory
+    /// Heap allocations via the `box` keyword.
     fn box_alloc(
         ecx: &mut EvalContext<'a, 'mir, 'tcx, Self>,
         dest: PlaceTy<'tcx, Self::PointerTag>,
     ) -> EvalResult<'tcx>;
 
-    /// Execute a validation operation
-    fn validation_op(
+    /// Add the tag for a newly allocated pointer.
+    fn tag_new_allocation(
+        ecx: &mut EvalContext<'a, 'mir, 'tcx, Self>,
+        ptr: Pointer,
+        kind: MemoryKind<Self::MemoryKinds>,
+    ) -> EvalResult<'tcx, Pointer<Self::PointerTag>>;
+
+    /// Executed when evaluating the `*` operator: Following a reference.
+    /// This has the chance to adjust the tag.  It should not change anything else!
+    /// `mutability` can be `None` in case a raw ptr is being dereferenced.
+    #[inline]
+    fn tag_dereference(
+        _ecx: &EvalContext<'a, 'mir, 'tcx, Self>,
+        place: MPlaceTy<'tcx, Self::PointerTag>,
+        _mutability: Option<hir::Mutability>,
+    ) -> EvalResult<'tcx, Scalar<Self::PointerTag>> {
+        Ok(place.ptr)
+    }
+
+    /// Execute a retagging operation
+    #[inline]
+    fn retag(
         _ecx: &mut EvalContext<'a, 'mir, 'tcx, Self>,
-        _op: ::rustc::mir::ValidationOp,
-        _operand: &::rustc::mir::ValidationOperand<'tcx, ::rustc::mir::Place<'tcx>>,
+        _fn_entry: bool,
+        _place: PlaceTy<'tcx, Self::PointerTag>,
+    ) -> EvalResult<'tcx> {
+        Ok(())
+    }
+
+    /// Execute an escape-to-raw operation
+    #[inline]
+    fn escape_to_raw(
+        _ecx: &mut EvalContext<'a, 'mir, 'tcx, Self>,
+        _ptr: OpTy<'tcx, Self::PointerTag>,
     ) -> EvalResult<'tcx> {
         Ok(())
     }

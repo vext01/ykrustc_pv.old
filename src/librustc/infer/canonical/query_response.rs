@@ -19,7 +19,7 @@
 
 use infer::canonical::substitute::substitute_value;
 use infer::canonical::{
-    Canonical, CanonicalVarKind, CanonicalVarValues, CanonicalizedQueryResponse, Certainty,
+    Canonical, CanonicalVarValues, CanonicalizedQueryResponse, Certainty,
     OriginalQueryValues, QueryRegionConstraint, QueryResponse,
 };
 use infer::region_constraints::{Constraint, RegionConstraintData};
@@ -35,7 +35,7 @@ use traits::{FulfillmentContext, TraitEngine};
 use traits::{Obligation, ObligationCause, PredicateObligation};
 use ty::fold::TypeFoldable;
 use ty::subst::{Kind, UnpackedKind};
-use ty::{self, CanonicalVar, Lift, Ty, TyCtxt};
+use ty::{self, BoundVar, Lift, Ty, TyCtxt};
 
 impl<'cx, 'gcx, 'tcx> InferCtxtBuilder<'cx, 'gcx, 'tcx> {
     /// The "main method" for a canonicalized trait query. Given the
@@ -262,13 +262,6 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
     where
         R: Debug + TypeFoldable<'tcx>,
     {
-        // In an NLL query, there should be no type variables in the
-        // query, only region variables.
-        debug_assert!(query_response.variables.iter().all(|v| match v.kind {
-            CanonicalVarKind::Ty(_) => false,
-            CanonicalVarKind::Region => true,
-        }));
-
         let result_subst =
             self.query_response_substitution_guess(cause, original_values, query_response);
 
@@ -280,7 +273,7 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
         for (index, original_value) in original_values.var_values.iter().enumerate() {
             // ...with the value `v_r` of that variable from the query.
             let result_value = query_response.substitute_projected(self.tcx, &result_subst, |v| {
-                &v.var_values[CanonicalVar::new(index)]
+                &v.var_values[BoundVar::new(index)]
             });
             match (original_value.unpack(), result_value.unpack()) {
                 (UnpackedKind::Lifetime(ty::ReErased), UnpackedKind::Lifetime(ty::ReErased)) => {
@@ -315,11 +308,14 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
         // ...also include the other query region constraints from the query.
         output_query_region_constraints.extend(
             query_response.value.region_constraints.iter().filter_map(|r_c| {
-                let &ty::OutlivesPredicate(k1, r2) = r_c.skip_binder(); // reconstructed below
-                let k1 = substitute_value(self.tcx, &result_subst, &k1);
-                let r2 = substitute_value(self.tcx, &result_subst, &r2);
+                let r_c = substitute_value(self.tcx, &result_subst, r_c);
+
+                // Screen out `'a: 'a` cases -- we skip the binder here but
+                // only care the inner values to one another, so they are still at
+                // consistent binding levels.
+                let &ty::OutlivesPredicate(k1, r2) = r_c.skip_binder();
                 if k1 != r2.into() {
-                    Some(ty::Binder::bind(ty::OutlivesPredicate(k1, r2)))
+                    Some(r_c)
                 } else {
                     None
                 }
@@ -401,6 +397,21 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
             original_values, query_response,
         );
 
+        // For each new universe created in the query result that did
+        // not appear in the original query, create a local
+        // superuniverse.
+        let mut universe_map = original_values.universe_map.clone();
+        let num_universes_in_query = original_values.universe_map.len();
+        let num_universes_in_response = query_response.max_universe.as_usize() + 1;
+        for _ in num_universes_in_query..num_universes_in_response {
+            universe_map.push(self.create_next_universe());
+        }
+        assert!(universe_map.len() >= 1); // always have the root universe
+        assert_eq!(
+            universe_map[ty::UniverseIndex::ROOT.as_usize()],
+            ty::UniverseIndex::ROOT
+        );
+
         // Every canonical query result includes values for each of
         // the inputs to the query. Therefore, we begin by unifying
         // these values with the original inputs that were
@@ -415,7 +426,7 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
         // is directly equal to one of the canonical variables in the
         // result, then we can type the corresponding value from the
         // input. See the example above.
-        let mut opt_values: IndexVec<CanonicalVar, Option<Kind<'tcx>>> =
+        let mut opt_values: IndexVec<BoundVar, Option<Kind<'tcx>>> =
             IndexVec::from_elem_n(None, query_response.variables.len());
 
         // In terms of our example above, we are iterating over pairs like:
@@ -424,16 +435,22 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
             match result_value.unpack() {
                 UnpackedKind::Type(result_value) => {
                     // e.g., here `result_value` might be `?0` in the example above...
-                    if let ty::Infer(ty::InferTy::CanonicalTy(index)) = result_value.sty {
-                        // in which case we would set `canonical_vars[0]` to `Some(?U)`.
-                        opt_values[index] = Some(*original_value);
+                    if let ty::Bound(b) = result_value.sty {
+                        // ...in which case we would set `canonical_vars[0]` to `Some(?U)`.
+
+                        // We only allow a `ty::INNERMOST` index in substitutions.
+                        assert_eq!(b.index, ty::INNERMOST);
+                        opt_values[b.var] = Some(*original_value);
                     }
                 }
                 UnpackedKind::Lifetime(result_value) => {
                     // e.g., here `result_value` might be `'?1` in the example above...
-                    if let &ty::RegionKind::ReCanonical(index) = result_value {
-                        // in which case we would set `canonical_vars[0]` to `Some('static)`.
-                        opt_values[index] = Some(*original_value);
+                    if let &ty::RegionKind::ReLateBound(index, br) = result_value {
+                        // ... in which case we would set `canonical_vars[0]` to `Some('static)`.
+
+                        // We only allow a `ty::INNERMOST` index in substitutions.
+                        assert_eq!(index, ty::INNERMOST);
+                        opt_values[br.assert_bound_var()] = Some(*original_value);
                     }
                 }
             }
@@ -447,9 +464,20 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
                 .variables
                 .iter()
                 .enumerate()
-                .map(|(index, info)| opt_values[CanonicalVar::new(index)].unwrap_or_else(||
-                    self.fresh_inference_var_for_canonical_var(cause.span, *info)
-                ))
+                .map(|(index, info)| {
+                    if info.is_existential() {
+                        match opt_values[BoundVar::new(index)] {
+                            Some(k) => k,
+                            None => self.instantiate_canonical_var(cause.span, *info, |u| {
+                                universe_map[u.as_usize()]
+                            }),
+                        }
+                    } else {
+                        self.instantiate_canonical_var(cause.span, *info, |u| {
+                            universe_map[u.as_usize()]
+                        })
+                    }
+                })
                 .collect(),
         };
 
@@ -477,7 +505,7 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
         // canonical variable; this is taken from
         // `query_response.var_values` after applying the substitution
         // `result_subst`.
-        let substituted_query_response = |index: CanonicalVar| -> Kind<'tcx> {
+        let substituted_query_response = |index: BoundVar| -> Kind<'tcx> {
             query_response.substitute_projected(self.tcx, &result_subst, |v| &v.var_values[index])
         };
 
@@ -504,22 +532,23 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
             unsubstituted_region_constraints
                 .iter()
                 .map(move |constraint| {
-                    let ty::OutlivesPredicate(k1, r2) = constraint.skip_binder(); // restored below
-                    let k1 = substitute_value(self.tcx, result_subst, k1);
-                    let r2 = substitute_value(self.tcx, result_subst, r2);
+                    let constraint = substitute_value(self.tcx, result_subst, constraint);
+                    let &ty::OutlivesPredicate(k1, r2) = constraint.skip_binder(); // restored below
 
                     Obligation::new(
                         cause.clone(),
                         param_env,
                         match k1.unpack() {
                             UnpackedKind::Lifetime(r1) => ty::Predicate::RegionOutlives(
-                                ty::Binder::dummy(
+                                ty::Binder::bind(
                                     ty::OutlivesPredicate(r1, r2)
-                            )),
+                                )
+                            ),
                             UnpackedKind::Type(t1) => ty::Predicate::TypeOutlives(
-                                ty::Binder::dummy(ty::OutlivesPredicate(
-                                    t1, r2
-                            )))
+                                ty::Binder::bind(
+                                    ty::OutlivesPredicate(t1, r2)
+                                )
+                            ),
                         }
                     )
                 })
@@ -527,18 +556,18 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
     }
 
     /// Given two sets of values for the same set of canonical variables, unify them.
-    /// The second set is produced lazilly by supplying indices from the first set.
+    /// The second set is produced lazily by supplying indices from the first set.
     fn unify_canonical_vars(
         &self,
         cause: &ObligationCause<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
         variables1: &OriginalQueryValues<'tcx>,
-        variables2: impl Fn(CanonicalVar) -> Kind<'tcx>,
+        variables2: impl Fn(BoundVar) -> Kind<'tcx>,
     ) -> InferResult<'tcx, ()> {
         self.commit_if_ok(|_| {
             let mut obligations = vec![];
             for (index, value1) in variables1.var_values.iter().enumerate() {
-                let value2 = variables2(CanonicalVar::new(index));
+                let value2 = variables2(BoundVar::new(index));
 
                 match (value1.unpack(), value2.unpack()) {
                     (UnpackedKind::Type(v1), UnpackedKind::Type(v2)) => {
@@ -601,11 +630,11 @@ pub fn make_query_outlives<'tcx>(
             }
             Constraint::RegSubReg(r1, r2) => ty::OutlivesPredicate(r2.into(), r1),
         })
-        .map(ty::Binder::dummy) // no bound regions in the code above
+        .map(ty::Binder::dummy) // no bound vars in the code above
         .chain(
             outlives_obligations
                 .map(|(ty, r)| ty::OutlivesPredicate(ty.into(), r))
-                .map(ty::Binder::dummy), // no bound regions in the code above
+                .map(ty::Binder::dummy) // no bound vars in the code above
         )
         .collect();
 

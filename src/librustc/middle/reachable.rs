@@ -207,7 +207,7 @@ impl<'a, 'tcx> ReachableContext<'a, 'tcx> {
 
     // Step 2: Mark all symbols that the symbols on the worklist touch.
     fn propagate(&mut self) {
-        let mut scanned = FxHashSet();
+        let mut scanned = FxHashSet::default();
         while let Some(search_item) = self.worklist.pop() {
             if !scanned.insert(search_item) {
                 continue
@@ -408,7 +408,7 @@ fn reachable_set<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, crate_num: CrateNum) -> 
     let mut reachable_context = ReachableContext {
         tcx,
         tables: &ty::TypeckTables::empty(None),
-        reachable_symbols: NodeSet(),
+        reachable_symbols: Default::default(),
         worklist: Vec::new(),
         any_library,
     };

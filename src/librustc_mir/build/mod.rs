@@ -35,6 +35,8 @@ use syntax_pos::Span;
 use transform::MirSource;
 use util as mir_util;
 
+use super::lints;
+
 /// Construct the MIR for a given def-id.
 pub fn mir_build<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> Mir<'tcx> {
     let id = tcx.hir.as_local_node_id(def_id).unwrap();
@@ -175,6 +177,8 @@ pub fn mir_build<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> Mir<'t
 
         mir_util::dump_mir(tcx, None, "mir_map", &0,
                            MirSource::item(def_id), &mir, |_, _| Ok(()) );
+
+        lints::check(tcx, &mir, def_id);
 
         mir
     })
@@ -332,6 +336,9 @@ impl BlockFrame {
     }
  }
 
+#[derive(Debug)]
+struct BlockContext(Vec<BlockFrame>);
+
 struct Builder<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     hir: Cx<'a, 'gcx, 'tcx>,
     cfg: CFG<'tcx>,
@@ -355,7 +362,7 @@ struct Builder<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     /// start just throwing new entries onto that vector in order to
     /// distinguish the context of EXPR1 from the context of EXPR2 in
     /// `{ STMTS; EXPR1 } + EXPR2`
-    block_context: Vec<BlockFrame>,
+    block_context: BlockContext,
 
     /// The current unsafe block in scope, even if it is hidden by
     /// a PushUnsafeBlock
@@ -402,6 +409,55 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
 
     fn var_local_id(&self, id: ast::NodeId, for_guard: ForGuard) -> Local {
         self.var_indices[&id].local_id(for_guard)
+    }
+}
+
+impl BlockContext {
+    fn new() -> Self { BlockContext(vec![]) }
+    fn push(&mut self, bf: BlockFrame) { self.0.push(bf); }
+    fn pop(&mut self) -> Option<BlockFrame> { self.0.pop() }
+
+    /// Traverses the frames on the BlockContext, searching for either
+    /// the first block-tail expression frame with no intervening
+    /// statement frame.
+    ///
+    /// Notably, this skips over `SubExpr` frames; this method is
+    /// meant to be used in the context of understanding the
+    /// relationship of a temp (created within some complicated
+    /// expression) with its containing expression, and whether the
+    /// value of that *containing expression* (not the temp!) is
+    /// ignored.
+    fn currently_in_block_tail(&self) -> Option<BlockTailInfo> {
+        for bf in self.0.iter().rev() {
+            match bf {
+                BlockFrame::SubExpr => continue,
+                BlockFrame::Statement { .. } => break,
+                &BlockFrame::TailExpr { tail_result_is_ignored } =>
+                    return Some(BlockTailInfo { tail_result_is_ignored })
+            }
+        }
+
+        return None;
+    }
+
+    /// Looks at the topmost frame on the BlockContext and reports
+    /// whether its one that would discard a block tail result.
+    ///
+    /// Unlike `currently_within_ignored_tail_expression`, this does
+    /// *not* skip over `SubExpr` frames: here, we want to know
+    /// whether the block result itself is discarded.
+    fn currently_ignores_tail_results(&self) -> bool {
+        match self.0.last() {
+            // no context: conservatively assume result is read
+            None => false,
+
+            // sub-expression: block result feeds into some computation
+            Some(BlockFrame::SubExpr) => false,
+
+            // otherwise: use accumulated is_ignored state.
+            Some(BlockFrame::TailExpr { tail_result_is_ignored: ignored }) |
+            Some(BlockFrame::Statement { ignores_expr_result: ignored }) => *ignored,
+        }
     }
 }
 
@@ -608,7 +664,7 @@ fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
             let var_hir_id = tcx.hir.node_to_hir_id(var_id);
             let closure_expr_id = tcx.hir.local_def_id(fn_id);
             let capture = hir.tables().upvar_capture(ty::UpvarId {
-                var_id: var_hir_id,
+                var_path: ty::UpvarPath {hir_id: var_hir_id},
                 closure_expr_id: LocalDefId::from_def_id(closure_expr_id),
             });
             let by_ref = match capture {
@@ -640,7 +696,7 @@ fn construct_fn<'a, 'gcx, 'tcx, A>(hir: Cx<'a, 'gcx, 'tcx>,
         }).collect()
     });
 
-    let mut builder = Builder::new(hir.clone(),
+    let mut builder = Builder::new(hir,
         span,
         arguments.len(),
         safety,
@@ -710,7 +766,7 @@ fn construct_const<'a, 'gcx, 'tcx>(
     let ty = hir.tables().expr_ty_adjusted(ast_expr);
     let owner_id = tcx.hir.body_owner(body_id);
     let span = tcx.hir.span(owner_id);
-    let mut builder = Builder::new(hir.clone(), span, 0, Safety::Safe, ty, ty_span,vec![]);
+    let mut builder = Builder::new(hir, span, 0, Safety::Safe, ty, ty_span,vec![]);
 
     let mut block = START_BLOCK;
     let expr = builder.hir.mirror(ast_expr);
@@ -760,7 +816,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             fn_span: span,
             arg_count,
             scopes: vec![],
-            block_context: vec![],
+            block_context: BlockContext::new(),
             source_scopes: IndexVec::new(),
             source_scope: OUTERMOST_SOURCE_SCOPE,
             source_scope_local_data: IndexVec::new(),
@@ -773,7 +829,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 1,
             ),
             upvar_decls,
-            var_indices: NodeMap(),
+            var_indices: Default::default(),
             unit_temp: None,
             cached_resume_block: None,
             cached_return_block: None,
@@ -841,7 +897,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             self.local_decls.push(LocalDecl {
                 mutability: Mutability::Mut,
                 ty,
-                user_ty: None,
+                user_ty: UserTypeProjections::none(),
                 source_info,
                 visibility_scope: source_info.scope,
                 name,

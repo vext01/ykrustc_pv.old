@@ -38,7 +38,7 @@
 //!   underlying object is live and no reference (just raw pointers) is used to
 //!   access the same memory.
 //!
-//! These axioms, along with careful use of [`offset`] for pointer arithmentic,
+//! These axioms, along with careful use of [`offset`] for pointer arithmetic,
 //! are enough to correctly implement many useful things in unsafe code. Stronger guarantees
 //! will be provided eventually, as the [aliasing] rules are being determined. For more
 //! information, see the [book] as well as the section in the reference devoted
@@ -75,7 +75,7 @@
 
 use convert::From;
 use intrinsics;
-use ops::CoerceUnsized;
+use ops::{CoerceUnsized, DispatchFromDyn};
 use fmt;
 use hash;
 use marker::{PhantomData, Unsize};
@@ -120,7 +120,7 @@ pub use intrinsics::write_bytes;
 ///
 /// Additionally, if `T` is not [`Copy`], using the pointed-to value after
 /// calling `drop_in_place` can cause undefined behavior. Note that `*to_drop =
-/// foo` counts as a use because it will cause the the value to be dropped
+/// foo` counts as a use because it will cause the value to be dropped
 /// again. [`write`] can be used to overwrite data without causing it to be
 /// dropped.
 ///
@@ -209,7 +209,7 @@ pub unsafe fn drop_in_place<T: ?Sized>(to_drop: *mut T) {
 /// ```
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[cfg_attr(not(stage0), rustc_promotable)]
+#[rustc_promotable]
 pub const fn null<T>() -> *const T { 0 as *const T }
 
 /// Creates a null mutable raw pointer.
@@ -224,7 +224,7 @@ pub const fn null<T>() -> *const T { 0 as *const T }
 /// ```
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[cfg_attr(not(stage0), rustc_promotable)]
+#[rustc_promotable]
 pub const fn null_mut<T>() -> *mut T { 0 as *mut T }
 
 /// Swaps the values at two mutable locations of the same type, without
@@ -371,7 +371,7 @@ pub(crate) unsafe fn swap_nonoverlapping_one<T>(x: *mut T, y: *mut T) {
 #[inline]
 unsafe fn swap_nonoverlapping_bytes(x: *mut u8, y: *mut u8, len: usize) {
     // The approach here is to utilize simd to swap x & y efficiently. Testing reveals
-    // that swapping either 32 bytes or 64 bytes at a time is most efficient for intel
+    // that swapping either 32 bytes or 64 bytes at a time is most efficient for Intel
     // Haswell E processors. LLVM is more able to optimize if we give a struct a
     // #[repr(simd)], even if we don't actually use this struct directly.
     //
@@ -1005,7 +1005,7 @@ impl<T: ?Sized> *const T {
     /// # Null-unchecked version
     ///
     /// If you are sure the pointer can never be null and are looking for some kind of
-    /// `as_ref_unchecked` that returns the `&T` instead of `Option<&T>, know that you can
+    /// `as_ref_unchecked` that returns the `&T` instead of `Option<&T>`, know that you can
     /// dereference the pointer directly.
     ///
     /// ```
@@ -1625,7 +1625,7 @@ impl<T: ?Sized> *mut T {
     /// # Null-unchecked version
     ///
     /// If you are sure the pointer can never be null and are looking for some kind of
-    /// `as_ref_unchecked` that returns the `&T` instead of `Option<&T>, know that you can
+    /// `as_ref_unchecked` that returns the `&T` instead of `Option<&T>`, know that you can
     /// dereference the pointer directly.
     ///
     /// ```
@@ -2796,6 +2796,9 @@ impl<T: ?Sized> Copy for Unique<T> { }
 impl<T: ?Sized, U: ?Sized> CoerceUnsized<Unique<U>> for Unique<T> where T: Unsize<U> { }
 
 #[unstable(feature = "ptr_internals", issue = "0")]
+impl<T: ?Sized, U: ?Sized> DispatchFromDyn<Unique<U>> for Unique<T> where T: Unsize<U> { }
+
+#[unstable(feature = "ptr_internals", issue = "0")]
 impl<T: ?Sized> fmt::Pointer for Unique<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Pointer::fmt(&self.as_ptr(), f)
@@ -2867,6 +2870,7 @@ impl<T: Sized> NonNull<T> {
     /// sentinel value. Types that lazily allocate must track initialization by
     /// some other means.
     #[stable(feature = "nonnull", since = "1.25.0")]
+    #[inline]
     pub fn dangling() -> Self {
         unsafe {
             let ptr = mem::align_of::<T>() as *mut T;
@@ -2882,12 +2886,14 @@ impl<T: ?Sized> NonNull<T> {
     ///
     /// `ptr` must be non-null.
     #[stable(feature = "nonnull", since = "1.25.0")]
+    #[inline]
     pub const unsafe fn new_unchecked(ptr: *mut T) -> Self {
         NonNull { pointer: NonZero(ptr as _) }
     }
 
     /// Creates a new `NonNull` if `ptr` is non-null.
     #[stable(feature = "nonnull", since = "1.25.0")]
+    #[inline]
     pub fn new(ptr: *mut T) -> Option<Self> {
         if !ptr.is_null() {
             Some(NonNull { pointer: NonZero(ptr as _) })
@@ -2898,7 +2904,8 @@ impl<T: ?Sized> NonNull<T> {
 
     /// Acquires the underlying `*mut` pointer.
     #[stable(feature = "nonnull", since = "1.25.0")]
-    pub fn as_ptr(self) -> *mut T {
+    #[inline]
+    pub const fn as_ptr(self) -> *mut T {
         self.pointer.0 as *mut T
     }
 
@@ -2908,6 +2915,7 @@ impl<T: ?Sized> NonNull<T> {
     /// it were actually an instance of T that is getting borrowed. If a longer
     /// (unbound) lifetime is needed, use `&*my_ptr.as_ptr()`.
     #[stable(feature = "nonnull", since = "1.25.0")]
+    #[inline]
     pub unsafe fn as_ref(&self) -> &T {
         &*self.as_ptr()
     }
@@ -2918,12 +2926,14 @@ impl<T: ?Sized> NonNull<T> {
     /// it were actually an instance of T that is getting borrowed. If a longer
     /// (unbound) lifetime is needed, use `&mut *my_ptr.as_ptr()`.
     #[stable(feature = "nonnull", since = "1.25.0")]
+    #[inline]
     pub unsafe fn as_mut(&mut self) -> &mut T {
         &mut *self.as_ptr()
     }
 
     /// Cast to a pointer of another type
     #[stable(feature = "nonnull_cast", since = "1.27.0")]
+    #[inline]
     pub fn cast<U>(self) -> NonNull<U> {
         unsafe {
             NonNull::new_unchecked(self.as_ptr() as *mut U)
@@ -2944,6 +2954,9 @@ impl<T: ?Sized> Copy for NonNull<T> { }
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 impl<T: ?Sized, U: ?Sized> CoerceUnsized<NonNull<U>> for NonNull<T> where T: Unsize<U> { }
 
+#[unstable(feature = "dispatch_from_dyn", issue = "0")]
+impl<T: ?Sized, U: ?Sized> DispatchFromDyn<NonNull<U>> for NonNull<T> where T: Unsize<U> { }
+
 #[stable(feature = "nonnull", since = "1.25.0")]
 impl<T: ?Sized> fmt::Debug for NonNull<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -2963,6 +2976,7 @@ impl<T: ?Sized> Eq for NonNull<T> {}
 
 #[stable(feature = "nonnull", since = "1.25.0")]
 impl<T: ?Sized> PartialEq for NonNull<T> {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.as_ptr() == other.as_ptr()
     }
@@ -2970,6 +2984,7 @@ impl<T: ?Sized> PartialEq for NonNull<T> {
 
 #[stable(feature = "nonnull", since = "1.25.0")]
 impl<T: ?Sized> Ord for NonNull<T> {
+    #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         self.as_ptr().cmp(&other.as_ptr())
     }
@@ -2977,6 +2992,7 @@ impl<T: ?Sized> Ord for NonNull<T> {
 
 #[stable(feature = "nonnull", since = "1.25.0")]
 impl<T: ?Sized> PartialOrd for NonNull<T> {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.as_ptr().partial_cmp(&other.as_ptr())
     }
@@ -2984,6 +3000,7 @@ impl<T: ?Sized> PartialOrd for NonNull<T> {
 
 #[stable(feature = "nonnull", since = "1.25.0")]
 impl<T: ?Sized> hash::Hash for NonNull<T> {
+    #[inline]
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         self.as_ptr().hash(state)
     }
@@ -2991,6 +3008,7 @@ impl<T: ?Sized> hash::Hash for NonNull<T> {
 
 #[unstable(feature = "ptr_internals", issue = "0")]
 impl<T: ?Sized> From<Unique<T>> for NonNull<T> {
+    #[inline]
     fn from(unique: Unique<T>) -> Self {
         NonNull { pointer: unique.pointer }
     }
@@ -2998,6 +3016,7 @@ impl<T: ?Sized> From<Unique<T>> for NonNull<T> {
 
 #[stable(feature = "nonnull", since = "1.25.0")]
 impl<'a, T: ?Sized> From<&'a mut T> for NonNull<T> {
+    #[inline]
     fn from(reference: &'a mut T) -> Self {
         NonNull { pointer: NonZero(reference as _) }
     }
@@ -3005,6 +3024,7 @@ impl<'a, T: ?Sized> From<&'a mut T> for NonNull<T> {
 
 #[stable(feature = "nonnull", since = "1.25.0")]
 impl<'a, T: ?Sized> From<&'a T> for NonNull<T> {
+    #[inline]
     fn from(reference: &'a T) -> Self {
         NonNull { pointer: NonZero(reference as _) }
     }

@@ -377,6 +377,7 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                 // by-move upvars, which is local data for generators
                 Categorization::Upvar(..) => true,
 
+                Categorization::ThreadLocal(region) |
                 Categorization::Rvalue(region) => {
                     // Rvalues promoted to 'static are no longer local
                     if let RegionKind::ReStatic = *region {
@@ -425,7 +426,6 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
 
             // These cannot exist in borrowck
             RegionKind::ReVar(..) |
-            RegionKind::ReCanonical(..) |
             RegionKind::RePlaceholder(..) |
             RegionKind::ReClosureBound(..) |
             RegionKind::ReErased => span_bug!(borrow_span,
@@ -609,12 +609,12 @@ impl<'a, 'tcx> CheckLoanCtxt<'a, 'tcx> {
                         new_loan.span, &nl, old_loan.span, previous_end_span, Origin::Ast),
                 (ty::UniqueImmBorrow, _) =>
                     self.bccx.cannot_uniquely_borrow_by_one_closure(
-                        new_loan.span, &nl, &new_loan_msg,
+                        new_loan.span, "closure", &nl, &new_loan_msg,
                         old_loan.span, &ol_pronoun, &old_loan_msg, previous_end_span, Origin::Ast),
                 (_, ty::UniqueImmBorrow) => {
                     let new_loan_str = &new_loan.kind.to_user_str();
                     self.bccx.cannot_reborrow_already_uniquely_borrowed(
-                        new_loan.span, &nl, &new_loan_msg, new_loan_str,
+                        new_loan.span, "closure", &nl, &new_loan_msg, new_loan_str,
                         old_loan.span, &old_loan_msg, previous_end_span, Origin::Ast)
                 }
                 (..) =>

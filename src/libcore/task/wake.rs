@@ -108,7 +108,7 @@ impl Drop for Waker {
 /// is ready to be run.
 ///
 /// This is similar to the `Waker` type, but cannot be sent across threads.
-/// Task executors can use this type to implement more optimized singlethreaded wakeup
+/// Task executors can use this type to implement more optimized single-threaded wakeup
 /// behavior.
 #[repr(transparent)]
 #[derive(Clone)]
@@ -188,6 +188,11 @@ impl LocalWaker {
 }
 
 impl From<LocalWaker> for Waker {
+    /// Converts a `LocalWaker` into a `Waker`.
+    ///
+    /// This conversion turns a `!Sync` `LocalWaker` into a `Sync` `Waker`, allowing a wakeup
+    /// object to be sent to another thread, but giving up its ability to do specialized
+    /// thread-local wakeup behavior.
     #[inline]
     fn from(local_waker: LocalWaker) -> Self {
         local_waker.0

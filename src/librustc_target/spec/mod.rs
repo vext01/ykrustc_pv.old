@@ -297,7 +297,9 @@ supported_targets! {
     ("mipsel-unknown-linux-gnu", mipsel_unknown_linux_gnu),
     ("powerpc-unknown-linux-gnu", powerpc_unknown_linux_gnu),
     ("powerpc-unknown-linux-gnuspe", powerpc_unknown_linux_gnuspe),
+    ("powerpc-unknown-linux-musl", powerpc_unknown_linux_musl),
     ("powerpc64-unknown-linux-gnu", powerpc64_unknown_linux_gnu),
+    ("powerpc64-unknown-linux-musl", powerpc64_unknown_linux_musl),
     ("powerpc64le-unknown-linux-gnu", powerpc64le_unknown_linux_gnu),
     ("powerpc64le-unknown-linux-musl", powerpc64le_unknown_linux_musl),
     ("s390x-unknown-linux-gnu", s390x_unknown_linux_gnu),
@@ -444,11 +446,11 @@ pub struct Target {
     pub options: TargetOptions,
 }
 
-pub trait HasTargetSpec: Copy {
+pub trait HasTargetSpec {
     fn target_spec(&self) -> &Target;
 }
 
-impl<'a> HasTargetSpec for &'a Target {
+impl HasTargetSpec for Target {
     fn target_spec(&self) -> &Target {
         self
     }
@@ -596,9 +598,6 @@ pub struct TargetOptions {
     /// `eh_unwind_resume` lang item.
     pub custom_unwind_resume: bool,
 
-    /// If necessary, a different crate to link exe allocators by default
-    pub exe_allocation_crate: Option<String>,
-
     /// Flag indicating whether ELF TLS (e.g. #[thread_local]) is available for
     /// this target.
     pub has_elf_tls: bool,
@@ -740,7 +739,6 @@ impl Default for TargetOptions {
             link_env: Vec::new(),
             archive_format: "gnu".to_string(),
             custom_unwind_resume: false,
-            exe_allocation_crate: None,
             allow_asm: true,
             has_elf_tls: false,
             obj_is_bitcode: false,
@@ -1025,7 +1023,6 @@ impl Target {
         key!(archive_format);
         key!(allow_asm, bool);
         key!(custom_unwind_resume, bool);
-        key!(exe_allocation_crate, optional);
         key!(has_elf_tls, bool);
         key!(obj_is_bitcode, bool);
         key!(no_integrated_as, bool);
@@ -1132,7 +1129,7 @@ impl ToJson for Target {
         macro_rules! target_val {
             ($attr:ident) => ( {
                 let name = (stringify!($attr)).replace("_", "-");
-                d.insert(name.to_string(), self.$attr.to_json());
+                d.insert(name, self.$attr.to_json());
             } );
             ($attr:ident, $key_name:expr) => ( {
                 let name = $key_name;
@@ -1144,7 +1141,7 @@ impl ToJson for Target {
             ($attr:ident) => ( {
                 let name = (stringify!($attr)).replace("_", "-");
                 if default.$attr != self.options.$attr {
-                    d.insert(name.to_string(), self.options.$attr.to_json());
+                    d.insert(name, self.options.$attr.to_json());
                 }
             } );
             ($attr:ident, $key_name:expr) => ( {
@@ -1160,7 +1157,7 @@ impl ToJson for Target {
                         .iter()
                         .map(|(k, v)| (k.desc().to_owned(), v.clone()))
                         .collect::<BTreeMap<_, _>>();
-                    d.insert(name.to_string(), obj.to_json());
+                    d.insert(name, obj.to_json());
                 }
             } );
             (env - $attr:ident) => ( {
@@ -1170,7 +1167,7 @@ impl ToJson for Target {
                         .iter()
                         .map(|&(ref k, ref v)| k.clone() + "=" + &v)
                         .collect::<Vec<_>>();
-                    d.insert(name.to_string(), obj.to_json());
+                    d.insert(name, obj.to_json());
                 }
             } );
 
@@ -1235,7 +1232,6 @@ impl ToJson for Target {
         target_option_val!(archive_format);
         target_option_val!(allow_asm);
         target_option_val!(custom_unwind_resume);
-        target_option_val!(exe_allocation_crate);
         target_option_val!(has_elf_tls);
         target_option_val!(obj_is_bitcode);
         target_option_val!(no_integrated_as);
@@ -1267,14 +1263,6 @@ impl ToJson for Target {
         }
 
         Json::Object(d)
-    }
-}
-
-fn maybe_jemalloc() -> Option<String> {
-    if cfg!(feature = "jemalloc") {
-        Some("alloc_jemalloc".to_string())
-    } else {
-        None
     }
 }
 

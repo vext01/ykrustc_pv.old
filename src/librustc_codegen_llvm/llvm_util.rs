@@ -184,7 +184,7 @@ const WASM_WHITELIST: &[(&str, Option<&str>)] = &[
 ];
 
 /// When rustdoc is running, provide a list of all known features so that all their respective
-/// primtives may be documented.
+/// primitives may be documented.
 ///
 /// IMPORTANT: If you're adding another whitelist to the above lists, make sure to add it to this
 /// iterator!
@@ -243,7 +243,8 @@ pub fn target_feature_whitelist(sess: &Session)
         "hexagon" => HEXAGON_WHITELIST,
         "mips" | "mips64" => MIPS_WHITELIST,
         "powerpc" | "powerpc64" => POWERPC_WHITELIST,
-        "wasm32" => WASM_WHITELIST,
+        // wasm32 on emscripten does not support these target features
+        "wasm32" if !sess.target.target.options.is_like_emscripten => WASM_WHITELIST,
         _ => &[],
     }
 }
@@ -254,6 +255,10 @@ pub fn print_version() {
         println!("LLVM version: {}.{}",
                  llvm::LLVMRustVersionMajor(), llvm::LLVMRustVersionMinor());
     }
+}
+
+pub fn get_major_version() -> u32 {
+    unsafe { llvm::LLVMRustVersionMajor() }
 }
 
 pub fn print_passes() {

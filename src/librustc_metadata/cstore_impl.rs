@@ -68,7 +68,7 @@ macro_rules! provide {
 
                 let $cdata = $tcx.crate_data_as_rc_any($def_id.krate);
                 let $cdata = $cdata.downcast_ref::<cstore::CrateMetadata>()
-                    .expect("CrateStore crated ata is not a CrateMetadata");
+                    .expect("CrateStore created data is not a CrateMetadata");
                 $compute
             })*
 
@@ -103,9 +103,9 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     generics_of => {
         tcx.alloc_generics(cdata.get_generics(def_id.index, tcx.sess))
     }
-    predicates_of => { cdata.get_predicates(def_id.index, tcx) }
-    predicates_defined_on => { cdata.get_predicates_defined_on(def_id.index, tcx) }
-    super_predicates_of => { cdata.get_super_predicates(def_id.index, tcx) }
+    predicates_of => { Lrc::new(cdata.get_predicates(def_id.index, tcx)) }
+    predicates_defined_on => { Lrc::new(cdata.get_predicates_defined_on(def_id.index, tcx)) }
+    super_predicates_of => { Lrc::new(cdata.get_super_predicates(def_id.index, tcx)) }
     trait_def => {
         tcx.alloc_trait_def(cdata.get_trait_def(def_id.index, tcx.sess))
     }
@@ -316,7 +316,7 @@ pub fn provide<'tcx>(providers: &mut Providers<'tcx>) {
             use std::collections::hash_map::Entry;
 
             assert_eq!(cnum, LOCAL_CRATE);
-            let mut visible_parent_map: DefIdMap<DefId> = DefIdMap();
+            let mut visible_parent_map: DefIdMap<DefId> = Default::default();
 
             // Issue 46112: We want the map to prefer the shortest
             // paths when reporting the path to an item. Therefore we

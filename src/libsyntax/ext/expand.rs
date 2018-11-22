@@ -252,7 +252,7 @@ impl Invocation {
 
 pub struct MacroExpander<'a, 'b:'a> {
     pub cx: &'a mut ExtCtxt<'b>,
-    monotonic: bool, // c.f. `cx.monotonic_expander()`
+    monotonic: bool, // cf. `cx.monotonic_expander()`
 }
 
 impl<'a, 'b> MacroExpander<'a, 'b> {
@@ -387,6 +387,8 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                         add_derived_markers(&mut self.cx, item.span(), &traits, item.clone());
                     let derives = derives.entry(invoc.expansion_data.mark).or_default();
 
+                    derives.reserve(traits.len());
+                    invocations.reserve(traits.len());
                     for path in &traits {
                         let mark = Mark::fresh(self.cx.current_expansion.mark);
                         derives.push(mark);
@@ -687,7 +689,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                         "proc_macro_hygiene",
                         self.span,
                         GateIssue::Language,
-                        &format!("procedural macros cannot expand to macro definitions"),
+                        "procedural macros cannot expand to macro definitions",
                     );
                 }
                 visit::walk_item(self, i);
@@ -764,7 +766,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                                                                     edition) {
                     dummy_span
                 } else {
-                    kind.make_from(expander.expand(self.cx, span, mac.node.stream()))
+                    kind.make_from(expander.expand(self.cx, span, mac.node.stream(), None))
                 }
             }
 
@@ -785,7 +787,12 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                                                                     edition) {
                     dummy_span
                 } else {
-                    kind.make_from(expander.expand(self.cx, span, mac.node.stream()))
+                    kind.make_from(expander.expand(
+                        self.cx,
+                        span,
+                        mac.node.stream(),
+                        def_info.map(|(_, s)| s),
+                    ))
                 }
             }
 
@@ -1025,7 +1032,7 @@ impl<'a> Parser<'a> {
                 }
             },
             AstFragmentKind::Ty => AstFragment::Ty(self.parse_ty()?),
-            AstFragmentKind::Pat => AstFragment::Pat(self.parse_pat()?),
+            AstFragmentKind::Pat => AstFragment::Pat(self.parse_pat(None)?),
         })
     }
 
@@ -1036,10 +1043,28 @@ impl<'a> Parser<'a> {
             // Avoid emitting backtrace info twice.
             let def_site_span = self.span.with_ctxt(SyntaxContext::empty());
             let mut err = self.diagnostic().struct_span_err(def_site_span, &msg);
-            let msg = format!("caused by the macro expansion here; the usage \
-                               of `{}!` is likely invalid in {} context",
-                               macro_path, kind_name);
-            err.span_note(span, &msg).emit();
+            err.span_label(span, "caused by the macro expansion here");
+            let msg = format!(
+                "the usage of `{}!` is likely invalid in {} context",
+                macro_path,
+                kind_name,
+            );
+            err.note(&msg);
+            let semi_span = self.sess.source_map().next_point(span);
+
+            let semi_full_span = semi_span.to(self.sess.source_map().next_point(semi_span));
+            match self.sess.source_map().span_to_snippet(semi_full_span) {
+                Ok(ref snippet) if &snippet[..] != ";" && kind_name == "expression" => {
+                    err.span_suggestion_with_applicability(
+                        semi_span,
+                        "you might be missing a semicolon here",
+                        ";".to_owned(),
+                        Applicability::MaybeIncorrect,
+                    );
+                }
+                _ => {}
+            }
+            err.emit();
         }
     }
 }

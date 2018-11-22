@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// run-rustfix
+
 #![feature(in_band_lifetimes)]
 #![deny(single_use_lifetimes)]
 #![allow(dead_code)]
@@ -19,6 +21,8 @@
 fn a(x: &'a u32, y: &'b u32) {
     //~^ ERROR `'a` only used once
     //~| ERROR `'b` only used once
+    //~| HELP elide the single-use lifetime
+    //~| HELP elide the single-use lifetime
 }
 
 fn main() { }

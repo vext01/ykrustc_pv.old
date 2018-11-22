@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// ignore-compare-mode-nll
-
 struct Foo<'a, 'b: 'a>(&'a &'b ());
 
 impl<'a, 'b> Foo<'a, 'b> {

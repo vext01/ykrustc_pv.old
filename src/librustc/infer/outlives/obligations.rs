@@ -9,7 +9,7 @@
 // except according to those terms.
 
 //! Code that handles "type-outlives" constraints like `T: 'a`. This
-//! is based on the `outlives_components` function defined on the tcx,
+//! is based on the `push_outlives_components` function defined on the tcx,
 //! but it adds a bit of heuristics on top, in particular to deal with
 //! associated types and projections.
 //!
@@ -132,7 +132,7 @@ impl<'cx, 'gcx, 'tcx> InferCtxt<'cx, 'gcx, 'tcx> {
     ///
     /// See the `region_obligations` field of `InferCtxt` for some
     /// comments about how this function fits into the overall expected
-    /// flow of the the inferencer. The key point is that it is
+    /// flow of the inferencer. The key point is that it is
     /// invoked after all type-inference variables have been bound --
     /// towards the end of regionck. This also ensures that the
     /// region-bound-pairs are available (see comments above regarding
@@ -305,19 +305,20 @@ where
             ty, region, origin
         );
 
-        assert!(!ty.has_escaping_regions());
+        assert!(!ty.has_escaping_bound_vars());
 
-        let components = self.tcx.outlives_components(ty);
-        self.components_must_outlive(origin, components, region);
+        let mut components = smallvec![];
+        self.tcx.push_outlives_components(ty, &mut components);
+        self.components_must_outlive(origin, &components, region);
     }
 
     fn components_must_outlive(
         &mut self,
         origin: infer::SubregionOrigin<'tcx>,
-        components: Vec<Component<'tcx>>,
+        components: &[Component<'tcx>],
         region: ty::Region<'tcx>,
     ) {
-        for component in components {
+        for component in components.iter() {
             let origin = origin.clone();
             match component {
                 Component::Region(region1) => {
@@ -325,13 +326,13 @@ where
                         .push_sub_region_constraint(origin, region, region1);
                 }
                 Component::Param(param_ty) => {
-                    self.param_ty_must_outlive(origin, region, param_ty);
+                    self.param_ty_must_outlive(origin, region, *param_ty);
                 }
                 Component::Projection(projection_ty) => {
-                    self.projection_must_outlive(origin, region, projection_ty);
+                    self.projection_must_outlive(origin, region, *projection_ty);
                 }
                 Component::EscapingProjection(subcomponents) => {
-                    self.components_must_outlive(origin, subcomponents, region);
+                    self.components_must_outlive(origin, &subcomponents, region);
                 }
                 Component::UnresolvedInferenceVariable(v) => {
                     // ignore this, we presume it will yield an error
@@ -388,22 +389,38 @@ where
         // rule might not apply (but another rule might). For now, we err
         // on the side of adding too few edges into the graph.
 
-        // Compute the bounds we can derive from the environment. This
-        // is an "approximate" match -- in some cases, these bounds
-        // may not apply.
-        let approx_env_bounds = self.verify_bound
-            .projection_approx_declared_bounds_from_env(projection_ty);
-        debug!(
-            "projection_must_outlive: approx_env_bounds={:?}",
-            approx_env_bounds
-        );
-
         // Compute the bounds we can derive from the trait definition.
         // These are guaranteed to apply, no matter the inference
         // results.
         let trait_bounds: Vec<_> = self.verify_bound
             .projection_declared_bounds_from_trait(projection_ty)
             .collect();
+
+        // Compute the bounds we can derive from the environment. This
+        // is an "approximate" match -- in some cases, these bounds
+        // may not apply.
+        let mut approx_env_bounds = self.verify_bound
+            .projection_approx_declared_bounds_from_env(projection_ty);
+        debug!(
+            "projection_must_outlive: approx_env_bounds={:?}",
+            approx_env_bounds
+        );
+
+        // Remove outlives bounds that we get from the environment but
+        // which are also deducable from the trait. This arises (cc
+        // #55756) in cases where you have e.g. `<T as Foo<'a>>::Item:
+        // 'a` in the environment but `trait Foo<'b> { type Item: 'b
+        // }` in the trait definition.
+        approx_env_bounds.retain(|bound| {
+            match bound.0.sty {
+                ty::Projection(projection_ty) => {
+                    self.verify_bound.projection_declared_bounds_from_trait(projection_ty)
+                        .all(|r| r != bound.1)
+                }
+
+                _ => panic!("expected only projection types from env, not {:?}", bound.0),
+            }
+        });
 
         // If declared bounds list is empty, the only applicable rule is
         // OutlivesProjectionComponent. If there are inference variables,
@@ -458,7 +475,7 @@ where
             );
             debug!("projection_must_outlive: unique declared bound appears in trait ref");
             self.delegate
-                .push_sub_region_constraint(origin.clone(), region, unique_bound);
+                .push_sub_region_constraint(origin, region, unique_bound);
             return;
         }
 

@@ -22,7 +22,7 @@
 use super::{SelectionContext, FulfillmentContext};
 use super::util::impl_trait_ref_and_oblig;
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::FxHashSet;
 use hir::def_id::DefId;
 use infer::{InferCtxt, InferOk};
 use ty::subst::{Subst, Substs};
@@ -284,26 +284,6 @@ fn fulfill_implication<'a, 'gcx, 'tcx>(infcx: &InferCtxt<'a, 'gcx, 'tcx>,
     })
 }
 
-pub struct SpecializesCache {
-    map: FxHashMap<(DefId, DefId), bool>,
-}
-
-impl SpecializesCache {
-    pub fn new() -> Self {
-        SpecializesCache {
-            map: FxHashMap()
-        }
-    }
-
-    pub fn check(&self, a: DefId, b: DefId) -> Option<bool> {
-        self.map.get(&(a, b)).cloned()
-    }
-
-    pub fn insert(&mut self, a: DefId, b: DefId, result: bool) {
-        self.map.insert((a, b), result);
-    }
-}
-
 // Query provider for `specialization_graph_of`.
 pub(super) fn specialization_graph_provider<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                                       trait_id: DefId)
@@ -416,7 +396,10 @@ fn to_pretty_impl_header(tcx: TyCtxt<'_, '_, '_>, impl_def_id: DefId) -> Option<
     if !substs.is_noop() {
         types_without_default_bounds.extend(substs.types());
         w.push('<');
-        w.push_str(&substs.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", "));
+        w.push_str(&substs.iter()
+            .map(|k| k.to_string())
+            .filter(|k| &k[..] != "'_")
+            .collect::<Vec<_>>().join(", "));
         w.push('>');
     }
 
@@ -424,7 +407,7 @@ fn to_pretty_impl_header(tcx: TyCtxt<'_, '_, '_>, impl_def_id: DefId) -> Option<
 
     // The predicates will contain default bounds like `T: Sized`. We need to
     // remove these bounds, and add `T: ?Sized` to any untouched type parameters.
-    let predicates = tcx.predicates_of(impl_def_id).predicates;
+    let predicates = &tcx.predicates_of(impl_def_id).predicates;
     let mut pretty_predicates = Vec::with_capacity(
         predicates.len() + types_without_default_bounds.len());
 

@@ -413,7 +413,7 @@ impl String {
     ///
     /// // These are all done without reallocating...
     /// let cap = s.capacity();
-    /// for i in 0..10 {
+    /// for _ in 0..10 {
     ///     s.push('a');
     /// }
     ///
@@ -502,7 +502,7 @@ impl String {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn from_utf8(vec: Vec<u8>) -> Result<String, FromUtf8Error> {
         match str::from_utf8(&vec) {
-            Ok(..) => Ok(String { vec: vec }),
+            Ok(..) => Ok(String { vec }),
             Err(e) => {
                 Err(FromUtf8Error {
                     bytes: vec,
@@ -618,7 +618,15 @@ impl String {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn from_utf16(v: &[u16]) -> Result<String, FromUtf16Error> {
-        decode_utf16(v.iter().cloned()).collect::<Result<_, _>>().map_err(|_| FromUtf16Error(()))
+        let mut ret = String::with_capacity(v.len());
+        for c in decode_utf16(v.iter().cloned()) {
+            if let Ok(c) = c {
+                ret.push(c);
+            } else {
+                return Err(FromUtf16Error(()));
+            }
+        }
+        Ok(ret)
     }
 
     /// Decode a UTF-16 encoded slice `v` into a `String`, replacing
@@ -2206,6 +2214,20 @@ impl<'a> From<&'a str> for String {
 #[cfg(not(test))]
 #[stable(feature = "string_from_box", since = "1.18.0")]
 impl From<Box<str>> for String {
+    /// Converts the given boxed `str` slice to a `String`.
+    /// It is notable that the `str` slice is owned.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let s1: String = String::from("hello world");
+    /// let s2: Box<str> = s1.into_boxed_str();
+    /// let s3: String = String::from(s2);
+    ///
+    /// assert_eq!("hello world", s3)
+    /// ```
     fn from(s: Box<str>) -> String {
         s.into_string()
     }
@@ -2213,6 +2235,19 @@ impl From<Box<str>> for String {
 
 #[stable(feature = "box_from_str", since = "1.20.0")]
 impl From<String> for Box<str> {
+    /// Converts the given `String` to a boxed `str` slice that is owned.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let s1: String = String::from("hello world");
+    /// let s2: Box<str> = Box::from(s1);
+    /// let s3: String = String::from(s2);
+    ///
+    /// assert_eq!("hello world", s3)
+    /// ```
     fn from(s: String) -> Box<str> {
         s.into_boxed_str()
     }
@@ -2272,6 +2307,20 @@ impl<'a> FromIterator<String> for Cow<'a, str> {
 
 #[stable(feature = "from_string_for_vec_u8", since = "1.14.0")]
 impl From<String> for Vec<u8> {
+    /// Converts the given `String` to a vector `Vec` that holds values of type `u8`.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let s1 = String::from("hello world");
+    /// let v1 = Vec::from(s1);
+    ///
+    /// for b in v1 {
+    ///     println!("{}", b);
+    /// }
+    /// ```
     fn from(string: String) -> Vec<u8> {
         string.into_bytes()
     }

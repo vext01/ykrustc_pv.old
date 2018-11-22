@@ -13,7 +13,6 @@ use rustc::session::Session;
 use std::path::{Path, PathBuf};
 use syntax::{ast, attr};
 use syntax_pos::Span;
-use rustc_metadata_utils::validate_crate_name;
 
 pub fn out_filename(sess: &Session,
                 crate_type: config::CrateType,
@@ -52,7 +51,7 @@ pub fn find_crate_name(sess: Option<&Session>,
                        attrs: &[ast::Attribute],
                        input: &Input) -> String {
     let validate = |s: String, span: Option<Span>| {
-        validate_crate_name(sess, &s, span);
+        ::rustc_metadata::validate_crate_name(sess, &s, span);
         s
     };
 
@@ -103,7 +102,7 @@ pub fn filename_for_metadata(sess: &Session,
     let libname = format!("{}{}", crate_name, sess.opts.cg.extra_filename);
 
     let out_filename = outputs.single_output_file.clone()
-        .unwrap_or(outputs.out_directory.join(&format!("lib{}.rmeta", libname)));
+        .unwrap_or_else(|| outputs.out_directory.join(&format!("lib{}.rmeta", libname)));
 
     check_file_is_writeable(&out_filename, sess);
 
@@ -138,7 +137,7 @@ pub fn filename_for_input(sess: &Session,
             let suffix = &sess.target.target.options.exe_suffix;
             let out_filename = outputs.path(OutputType::Exe);
             if suffix.is_empty() {
-                out_filename.to_path_buf()
+                out_filename
             } else {
                 out_filename.with_extension(&suffix[1..])
             }

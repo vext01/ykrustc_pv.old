@@ -2011,6 +2011,46 @@ match 5u32 {
 ```
 "##,
 
+E0515: r##"
+Cannot return value that references local variable
+
+Local variables, function parameters and temporaries are all dropped before the
+end of the function body. So a reference to them cannot be returned.
+
+```compile_fail,E0515
+#![feature(nll)]
+fn get_dangling_reference() -> &'static i32 {
+    let x = 0;
+    &x
+}
+```
+
+```compile_fail,E0515
+#![feature(nll)]
+use std::slice::Iter;
+fn get_dangling_iterator<'a>() -> Iter<'a, i32> {
+    let v = vec![1, 2, 3];
+    v.iter()
+}
+```
+
+Consider returning an owned value instead:
+
+```
+use std::vec::IntoIter;
+
+fn get_integer() -> i32 {
+    let x = 0;
+    x
+}
+
+fn get_owned_iterator() -> IntoIter<i32> {
+    let v = vec![1, 2, 3];
+    v.into_iter()
+}
+```
+"##,
+
 E0595: r##"
 Closures cannot mutate immutable captured variables.
 
@@ -2239,7 +2279,7 @@ fn demo<'a>(s: &'a mut S<'a>) -> &'a mut String { let p = &mut *(*s).data; p }
 
 Note that this approach needs a reference to S with lifetime `'a`.
 Nothing shorter than `'a` will suffice: a shorter lifetime would imply
-that after `demo` finishes excuting, something else (such as the
+that after `demo` finishes executing, something else (such as the
 destructor!) could access `s.data` after the end of that shorter
 lifetime, which would again violate the `&mut`-borrow's exclusive
 access.
@@ -2339,6 +2379,7 @@ register_diagnostics! {
 //  E0471, // constant evaluation error (in pattern)
 //    E0385, // {} in an aliasable location
     E0493, // destructors cannot be evaluated at compile-time
+    E0521,  // borrowed data escapes outside of closure
     E0524, // two closures require unique access to `..` at the same time
     E0526, // shuffle indices are not constant
     E0594, // cannot assign to {}

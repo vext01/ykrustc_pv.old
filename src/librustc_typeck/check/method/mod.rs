@@ -289,8 +289,14 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         // Trait must have a method named `m_name` and it should not have
         // type parameters or early-bound regions.
         let tcx = self.tcx;
-        let method_item =
-            self.associated_item(trait_def_id, m_name, Namespace::Value).unwrap();
+        let method_item = match self.associated_item(trait_def_id, m_name, Namespace::Value) {
+            Some(method_item) => method_item,
+            None => {
+                tcx.sess.delay_span_bug(span,
+                    "operator trait does not have corresponding operator method");
+                return None;
+            }
+        };
         let def_id = method_item.def_id;
         let generics = tcx.generics_of(def_id);
         assert_eq!(generics.params.len(), 0);
@@ -305,9 +311,11 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         // `instantiate_type_scheme` can normalize associated types that
         // may reference those regions.
         let fn_sig = tcx.fn_sig(def_id);
-        let fn_sig = self.replace_late_bound_regions_with_fresh_var(span,
-                                                                    infer::FnCall,
-                                                                    &fn_sig).0;
+        let fn_sig = self.replace_bound_vars_with_fresh_vars(
+            span,
+            infer::FnCall,
+            &fn_sig
+        ).0;
         let fn_sig = fn_sig.subst(self.tcx, substs);
         let fn_sig = match self.normalize_associated_types_in_as_infer_ok(span, &fn_sig) {
             InferOk { value, obligations: o } => {
@@ -331,7 +339,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 value
             }
         };
-        assert!(!bounds.has_escaping_regions());
+        assert!(!bounds.has_escaping_bound_vars());
 
         let cause = traits::ObligationCause::misc(span, self.body_id);
         obligations.extend(traits::predicates_for_generics(cause.clone(),

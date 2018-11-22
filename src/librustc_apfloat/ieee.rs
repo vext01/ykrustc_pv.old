@@ -11,6 +11,7 @@
 use {Category, ExpInt, IEK_INF, IEK_NAN, IEK_ZERO};
 use {Float, FloatConvert, ParseError, Round, Status, StatusAnd};
 
+use smallvec::{SmallVec, smallvec};
 use std::cmp::{self, Ordering};
 use std::convert::TryFrom;
 use std::fmt::{self, Write};
@@ -894,7 +895,7 @@ impl<S: Semantics> Float for IeeeFloat<S> {
             }
 
             // The intermediate result of the multiplication has "2 * S::PRECISION"
-            // signicant bit; adjust the addend to be consistent with mul result.
+            // significant bit; adjust the addend to be consistent with mul result.
             let mut ext_addend_sig = [addend.sig[0], 0];
 
             // Extend the addend significand to ext_precision - 1. This guarantees
@@ -919,7 +920,7 @@ impl<S: Semantics> Float for IeeeFloat<S> {
 
         // Convert the result having "2 * S::PRECISION" significant-bits back to the one
         // having "S::PRECISION" significant-bits. First, move the radix point from
-        // poision "2*S::PRECISION - 1" to "S::PRECISION - 1". The exponent need to be
+        // position "2*S::PRECISION - 1" to "S::PRECISION - 1". The exponent need to be
         // adjusted by "2*S::PRECISION - 1" - "S::PRECISION - 1" = "S::PRECISION".
         self.exp -= S::PRECISION as ExpInt + 1;
 
@@ -1962,7 +1963,7 @@ impl<S: Semantics> IeeeFloat<S> {
         // to hold the full significand, and an extra limb required by
         // tcMultiplyPart.
         let max_limbs = limbs_for_bits(1 + 196 * significand_digits / 59);
-        let mut dec_sig = Vec::with_capacity(max_limbs);
+        let mut dec_sig: SmallVec<[Limb; 1]> = SmallVec::with_capacity(max_limbs);
 
         // Convert to binary efficiently - we do almost all multiplication
         // in a Limb. When this would overflow do we do a single
@@ -2021,11 +2022,11 @@ impl<S: Semantics> IeeeFloat<S> {
 
             const FIRST_EIGHT_POWERS: [Limb; 8] = [1, 5, 25, 125, 625, 3125, 15625, 78125];
 
-            let mut p5_scratch = vec![];
-            let mut p5 = vec![FIRST_EIGHT_POWERS[4]];
+            let mut p5_scratch = smallvec![];
+            let mut p5: SmallVec<[Limb; 1]> = smallvec![FIRST_EIGHT_POWERS[4]];
 
-            let mut r_scratch = vec![];
-            let mut r = vec![FIRST_EIGHT_POWERS[power & 7]];
+            let mut r_scratch = smallvec![];
+            let mut r: SmallVec<[Limb; 1]> = smallvec![FIRST_EIGHT_POWERS[power & 7]];
             power >>= 3;
 
             while power > 0 {
@@ -2064,7 +2065,7 @@ impl<S: Semantics> IeeeFloat<S> {
             let calc_precision = (LIMB_BITS << attempt) - 1;
             attempt += 1;
 
-            let calc_normal_from_limbs = |sig: &mut Vec<Limb>,
+            let calc_normal_from_limbs = |sig: &mut SmallVec<[Limb; 1]>,
                                           limbs: &[Limb]|
              -> StatusAnd<ExpInt> {
                 sig.resize(limbs_for_bits(calc_precision), 0);

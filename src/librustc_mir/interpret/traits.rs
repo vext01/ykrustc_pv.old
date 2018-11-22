@@ -24,46 +24,59 @@ impl<'a, 'mir, 'tcx, M: Machine<'a, 'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> 
     pub fn get_vtable(
         &mut self,
         ty: Ty<'tcx>,
-        trait_ref: ty::PolyTraitRef<'tcx>,
+        poly_trait_ref: ty::PolyExistentialTraitRef<'tcx>,
     ) -> EvalResult<'tcx, Pointer<M::PointerTag>> {
-        debug!("get_vtable(trait_ref={:?})", trait_ref);
+        trace!("get_vtable(trait_ref={:?})", poly_trait_ref);
 
-        // FIXME: Cache this!
+        let (ty, poly_trait_ref) = self.tcx.erase_regions(&(ty, poly_trait_ref));
 
-        let layout = self.layout_of(trait_ref.self_ty())?;
+        if let Some(&vtable) = self.vtables.get(&(ty, poly_trait_ref)) {
+            return Ok(Pointer::from(vtable).with_default_tag());
+        }
+
+        let trait_ref = poly_trait_ref.with_self_ty(*self.tcx, ty);
+        let trait_ref = self.tcx.erase_regions(&trait_ref);
+
+        let methods = self.tcx.vtable_methods(trait_ref);
+
+        let layout = self.layout_of(ty)?;
         assert!(!layout.is_unsized(), "can't create a vtable for an unsized type");
         let size = layout.size.bytes();
         let align = layout.align.abi();
 
         let ptr_size = self.pointer_size();
         let ptr_align = self.tcx.data_layout.pointer_align;
-        let methods = self.tcx.vtable_methods(trait_ref);
+        // /////////////////////////////////////////////////////////////////////////////////////////
+        // If you touch this code, be sure to also make the corresponding changes to
+        // `get_vtable` in rust_codegen_llvm/meth.rs
+        // /////////////////////////////////////////////////////////////////////////////////////////
         let vtable = self.memory.allocate(
             ptr_size * (3 + methods.len() as u64),
             ptr_align,
             MemoryKind::Vtable,
-        )?;
+        )?.with_default_tag();
 
         let drop = ::monomorphize::resolve_drop_in_place(*self.tcx, ty);
-        let drop = self.memory.create_fn_alloc(drop);
+        let drop = self.memory.create_fn_alloc(drop).with_default_tag();
         self.memory.write_ptr_sized(vtable, ptr_align, Scalar::Ptr(drop).into())?;
 
-        let size_ptr = vtable.offset(ptr_size, &self)?;
+        let size_ptr = vtable.offset(ptr_size, self)?;
         self.memory.write_ptr_sized(size_ptr, ptr_align, Scalar::from_uint(size, ptr_size).into())?;
-        let align_ptr = vtable.offset(ptr_size * 2, &self)?;
+        let align_ptr = vtable.offset(ptr_size * 2, self)?;
         self.memory.write_ptr_sized(align_ptr, ptr_align,
             Scalar::from_uint(align, ptr_size).into())?;
 
         for (i, method) in methods.iter().enumerate() {
             if let Some((def_id, substs)) = *method {
                 let instance = self.resolve(def_id, substs)?;
-                let fn_ptr = self.memory.create_fn_alloc(instance);
-                let method_ptr = vtable.offset(ptr_size * (3 + i as u64), &self)?;
+                let fn_ptr = self.memory.create_fn_alloc(instance).with_default_tag();
+                let method_ptr = vtable.offset(ptr_size * (3 + i as u64), self)?;
                 self.memory.write_ptr_sized(method_ptr, ptr_align, Scalar::Ptr(fn_ptr).into())?;
             }
         }
 
         self.memory.mark_immutable(vtable.alloc_id)?;
+        assert!(self.vtables.insert((ty, poly_trait_ref), vtable.alloc_id).is_none());
 
         Ok(vtable)
     }

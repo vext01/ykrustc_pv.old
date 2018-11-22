@@ -66,6 +66,14 @@ extern crate syntax_pos;
 extern crate rustc_yk_sections;
 extern crate rustc_yk_link;
 
+// Note that the linkage here should be all that we need, on Linux we're not
+// prefixing the symbols here so this should naturally override our default
+// allocator. On OSX it should override via the zone allocator. We shouldn't
+// enable this by default on other platforms, so other platforms aren't handled
+// here yet.
+#[cfg(feature = "jemalloc-sys")]
+extern crate jemalloc_sys;
+
 use driver::CompileController;
 use pretty::{PpMode, UserIdentifiedItem};
 
@@ -637,8 +645,8 @@ impl Compilation {
     }
 }
 
-/// A trait for customising the compilation process. Offers a number of hooks for
-/// executing custom code or customising input.
+/// A trait for customizing the compilation process. Offers a number of hooks for
+/// executing custom code or customizing input.
 pub trait CompilerCalls<'a> {
     /// Hook for a callback early in the process of handling arguments. This will
     /// be called straight after options have been parsed but before anything
@@ -946,7 +954,7 @@ impl<'a> CompilerCalls<'a> for RustcDefaultCalls {
             control.compilation_done.callback = box move |state| {
                 old_callback(state);
                 let sess = state.session;
-                println!("Fuel used by {}: {}",
+                eprintln!("Fuel used by {}: {}",
                     sess.print_fuel_crate.as_ref().unwrap(),
                     sess.print_fuel.get());
             }

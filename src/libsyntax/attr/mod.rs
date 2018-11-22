@@ -219,6 +219,15 @@ impl MetaItem {
         name_from_path(&self.ident)
     }
 
+    // #[attribute(name = "value")]
+    //             ^^^^^^^^^^^^^^
+    pub fn name_value_literal(&self) -> Option<&Lit> {
+        match &self.node {
+            MetaItemKind::NameValue(v) => Some(v),
+            _ => None,
+        }
+    }
+
     pub fn value_str(&self) -> Option<Symbol> {
         match self.node {
             MetaItemKind::NameValue(ref v) => {
@@ -444,6 +453,11 @@ pub fn contains_name(attrs: &[Attribute], name: &str) -> bool {
 
 pub fn find_by_name<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a Attribute> {
     attrs.iter().find(|attr| attr.check_name(name))
+}
+
+pub fn filter_by_name<'a>(attrs: &'a [Attribute], name: &'a str)
+    -> impl Iterator<Item = &'a Attribute> {
+    attrs.iter().filter(move |attr| attr.check_name(name))
 }
 
 pub fn first_attr_value_str_by_name(attrs: &[Attribute], name: &str) -> Option<Symbol> {

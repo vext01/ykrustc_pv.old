@@ -207,8 +207,8 @@ use ptr;
 ///
 /// # Examples
 ///
-/// Here you can see how using `Cell<T>` allows to use mutable field inside
-/// immutable struct (which is also called 'interior mutability').
+/// In this example, you can see that `Cell<T>` enables mutation inside an
+/// immutable struct. In other words, it enables "interior mutability".
 ///
 /// ```
 /// use std::cell::Cell;
@@ -225,10 +225,11 @@ use ptr;
 ///
 /// let new_value = 100;
 ///
-/// // ERROR, because my_struct is immutable
+/// // ERROR: `my_struct` is immutable
 /// // my_struct.regular_field = new_value;
 ///
-/// // WORKS, although `my_struct` is immutable, field `special_field` is mutable because it is Cell
+/// // WORKS: although `my_struct` is immutable, `special_field` is a `Cell`,
+/// // which can always be mutated
 /// my_struct.special_field.set(new_value);
 /// assert_eq!(my_struct.special_field.get(), new_value);
 /// ```
@@ -473,7 +474,7 @@ impl<T: ?Sized> Cell<T> {
     /// ```
     #[inline]
     #[stable(feature = "cell_as_ptr", since = "1.12.0")]
-    pub fn as_ptr(&self) -> *mut T {
+    pub const fn as_ptr(&self) -> *mut T {
         self.value.get()
     }
 
@@ -1507,8 +1508,10 @@ impl<T: ?Sized> UnsafeCell<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn get(&self) -> *mut T {
-        &self.value as *const T as *mut T
+    pub const fn get(&self) -> *mut T {
+        // We can just cast the pointer from `UnsafeCell<T>` to `T` because of
+        // #[repr(transparent)]
+        self as *const UnsafeCell<T> as *const T as *mut T
     }
 }
 
