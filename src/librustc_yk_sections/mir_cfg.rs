@@ -59,7 +59,10 @@ pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>,
     // First serialise the CFG into a plain binary file.
     let mut template = std::env::temp_dir();
     template.push(MIR_CFG_TEMPLATE);
-    let mut fh = TempFile::new(template.to_str().unwrap(), false).unwrap();
+
+    // FIXME -- need a comment about the error string? And guard th call to this function?
+    let mut fh = TempFile::new(template.to_str().unwrap(), false)
+        .unwrap_or_else(|err| tcx.sess.fatal(&format!("couldn't create a temp dir: {}", err)));
 
     // Write a version field for sanity checking when deserialising.
     fh.write_u16::<NativeEndian>(SECTION_VERSION).unwrap();
