@@ -109,11 +109,6 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         )
     }
 
-    #[cfg(yk_hwt)]
-    pub fn fn_metadata(&self, span: Span) -> &DISubprogram {
-        self.debug_context.get_ref(span).fn_metadata
-    }
-
     pub fn set_debug_loc(
         &mut self,
         bx: &mut Bx,
@@ -121,14 +116,6 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     ) {
         let (scope, span) = self.debug_loc(source_info);
         bx.set_source_location(&self.debug_context, scope, span);
-    }
-
-    #[cfg(yk_hwt)]
-    pub fn has_debug(&self) -> bool {
-        match self.debug_context {
-            FunctionDebugContext::RegularContext(_) => true,
-            _ => false,
-        }
     }
 
     pub fn debug_loc(&self, source_info: mir::SourceInfo) -> (Option<Bx::DIScope>, Span) {

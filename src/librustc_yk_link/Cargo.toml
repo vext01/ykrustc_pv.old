@@ -8,5 +8,3 @@ name = "rustc_yk_link"
 path = "lib.rs"
 test = false
 crate-type = ["dylib"]
-
-[dependencies]
