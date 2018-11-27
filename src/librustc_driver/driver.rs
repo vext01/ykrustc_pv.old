@@ -11,6 +11,7 @@
 use rustc::dep_graph::DepGraph;
 use rustc::hir::{self, map as hir_map};
 use rustc::hir::lowering::lower_crate;
+use rustc::hir::def_id::LOCAL_CRATE;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::stable_hasher::StableHasher;
 use rustc_mir as mir;
@@ -33,12 +34,14 @@ use rustc_metadata::creader::CrateLoader;
 use rustc_metadata::cstore::{self, CStore};
 use rustc_traits;
 use rustc_codegen_utils::codegen_backend::CodegenBackend;
+use rustc_codegen_utils::link::out_filename;
 use rustc_typeck as typeck;
 use rustc_privacy;
 use rustc_plugin::registry::Registry;
 use rustc_plugin as plugin;
 use rustc_passes::{self, ast_validation, hir_stats, loops, rvalue_promotion};
 use rustc_yk_sections::mir_cfg::emit_mir_cfg_section;
+use rustc_yk_sections::with_yk_debug_sections;
 use rustc::util::nodemap::DefIdSet;
 use super::Compilation;
 
@@ -342,9 +345,14 @@ pub fn compile_input(
                 }
 
                 // Output Yorick debug sections into binary targets.
-                if sess.crate_types.borrow().contains(&config::CrateType::Executable) {
+                if sess.crate_types.borrow().contains(&config::CrateType::Executable) &&
+                    with_yk_debug_sections() {
+                    let out_fname = out_filename(
+                        tcx.sess, config::CrateType::Executable, &outputs,
+                        &*tcx.crate_name(LOCAL_CRATE).as_str());
+
                     tcx.sess.yk_link_objects.borrow_mut()
-                       .push(emit_mir_cfg_section(&tcx, &def_ids));
+                       .push(emit_mir_cfg_section(&tcx, &def_ids, out_fname));
                 }
 
                 Ok((outputs.clone(), ongoing_codegen, tcx.dep_graph.clone()))

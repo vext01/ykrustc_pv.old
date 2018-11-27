@@ -18,7 +18,7 @@ use rustc::mir::{Mir, TerminatorKind, Operand, Constant, BasicBlock};
 use rustc::ty::{TyS, TyKind, Const};
 use rustc::util::nodemap::DefIdSet;
 use std::path::PathBuf;
-use mkstemp::TempFile;
+use std::fs::File;
 use rustc_yk_link::YkExtraLinkObject;
 use std::fs;
 use byteorder::{NativeEndian, WriteBytesExt};
@@ -49,25 +49,29 @@ const NO_MIR: u8 = 254;
 const SENTINAL: u8 = 255;
 
 const MIR_CFG_SECTION_NAME: &'static str = ".yk_mir_cfg";
-const MIR_CFG_TEMPLATE: &'static str = ".ykcfg.XXXXXXXX";
 const SECTION_VERSION: u16 = 0;
 
 /// Serialises the control flow for the given `DefId`s into a ELF object file and returns a handle
 /// for linking.
-pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>,
-                                            def_ids: &DefIdSet) -> YkExtraLinkObject {
-    // First serialise the CFG into a plain binary file.
-    let mut template = std::env::temp_dir();
-    template.push(MIR_CFG_TEMPLATE);
+pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(
+    tcx: &'a TyCtxt<'a, 'tcx, 'gcx>, def_ids: &DefIdSet, exe_filename: PathBuf)
+    -> YkExtraLinkObject {
 
-    // FIXME -- need a comment about the error string? And guard th call to this function?
-    let mut fh = TempFile::new(template.to_str().unwrap(), false)
-        .unwrap_or_else(|err| tcx.sess.fatal(&format!("couldn't create a temp dir: {}", err)));
+    // Serialise the MIR into a file whose name is derived from the output binary. The filename
+    // must be the same between builds of the same binary for the reproducible build tests to pass.
+    let mut mir_path: String = exe_filename.to_str().unwrap().to_owned();
+    mir_path.push_str(".ykcfg");
+    let mut fh = File::create(&mir_path).unwrap();
 
     // Write a version field for sanity checking when deserialising.
     fh.write_u16::<NativeEndian>(SECTION_VERSION).unwrap();
 
-    for def_id in def_ids {
+    // To satisfy the reproducible build tests, the CFG must be written out in a deterministic
+    // order, thus we sort the `DefId`s first.
+    let mut sorted_def_ids: Vec<&DefId> = def_ids.iter().collect();
+    sorted_def_ids.sort();
+
+    for def_id in sorted_def_ids {
         if tcx.is_mir_available(*def_id) {
             process_mir(&mut fh, tcx, def_id, tcx.optimized_mir(*def_id));
         } else {
@@ -81,7 +85,7 @@ pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>,
     fh.write_u8(SENTINAL).unwrap();
 
     // Now graft it into an object file.
-    let path = PathBuf::from(fh.path());
+    let path = PathBuf::from(mir_path);
     let ret = YkExtraLinkObject::new(&path, MIR_CFG_SECTION_NAME);
     fs::remove_file(path).unwrap();
 
@@ -89,7 +93,7 @@ pub fn emit_mir_cfg_section<'a, 'tcx, 'gcx>(tcx: &'a TyCtxt<'a, 'tcx, 'gcx>,
 }
 
 /// For each block in the given MIR write out one CFG edge record.
-fn process_mir(fh: &mut TempFile, tcx: &TyCtxt, def_id: &DefId, mir: &Mir) {
+fn process_mir(fh: &mut File, tcx: &TyCtxt, def_id: &DefId, mir: &Mir) {
     for (bb, maybe_bb_data) in mir.basic_blocks().iter_enumerated() {
         let bb_data = maybe_bb_data.terminator.as_ref().unwrap();
         match bb_data.kind {
@@ -202,7 +206,7 @@ fn process_mir(fh: &mut TempFile, tcx: &TyCtxt, def_id: &DefId, mir: &Mir) {
 }
 
 /// Writes the "header" of a record, which is common to all record types.
-fn write_rec_header(fh: &mut TempFile, tcx: &TyCtxt, kind: u8, def_id: &DefId, bb: BasicBlock) {
+fn write_rec_header(fh: &mut File, tcx: &TyCtxt, kind: u8, def_id: &DefId, bb: BasicBlock) {
     fh.write_u8(kind).unwrap();
     fh.write_u64::<NativeEndian>(tcx.crate_hash(def_id.krate).as_u64()).unwrap();
     fh.write_u32::<NativeEndian>(def_id.index.as_raw_u32()).unwrap();

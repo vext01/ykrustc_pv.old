@@ -1322,14 +1322,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mkstemp-rs"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-dependencies = [
- "libc 0.2.43 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
 name = "new_debug_unreachable"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2171,6 +2163,7 @@ dependencies = [
  "rustc-demangle 0.1.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "rustc_codegen_ssa 0.0.0",
  "rustc_llvm 0.0.0",
+ "rustc_yk_sections 0.0.0",
 ]
 
 [[package]]
@@ -2528,8 +2521,8 @@ name = "rustc_yk_sections"
 version = "0.0.0"
 dependencies = [
  "byteorder 1.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "mkstemp-rs 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rustc 0.0.0",
+ "rustc_codegen_utils 0.0.0",
  "rustc_yk_link 0.0.0",
 ]
 
@@ -3364,7 +3357,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum minifier 0.0.20 (registry+https://github.com/rust-lang/crates.io-index)" = "96c269bb45c39b333392b2b18ad71760b34ac65666591386b0e959ed58b3f474"
 "checksum miniz-sys 0.1.10 (registry+https://github.com/rust-lang/crates.io-index)" = "609ce024854aeb19a0ef7567d348aaa5a746b32fb72e336df7fcc16869d7e2b4"
 "checksum miow 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)" = "396aa0f2003d7df8395cb93e09871561ccc3e785f0acb369170e8cc74ddf9226"
-"checksum mkstemp-rs 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)" = "ab06da7d0a30c709867eb54e757f86b69e3b4dd4ac3c0f9502edec4e077a604e"
 "checksum new_debug_unreachable 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)" = "0cdc457076c78ab54d5e0d6fa7c47981757f1e34dc39ff92787f217dede586c4"
 "checksum nodrop 0.1.12 (registry+https://github.com/rust-lang/crates.io-index)" = "9a2228dca57108069a5262f2ed8bd2e82496d2e074a06d1ccc7ce1687b6ae0a2"
 "checksum num-derive 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "0d2c31b75c36a993d30c7a13d70513cb93f02acafdd5b7ba250f9b0e18615de7"
