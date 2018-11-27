@@ -1,4 +1,4 @@
 # Yorick-specific Notes
 
-Experimental code for hardware tracing is gated by `#[cfg(yk_hwt)]`. Software
-tracing support will still be available if this compile-time variable is unset.
+To enable the experimental `.yk_mir_cfg` ELF section, set `YK_DEBUG_SECTIONS`
+in your environment.

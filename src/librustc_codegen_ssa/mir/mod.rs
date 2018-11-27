@@ -9,10 +9,6 @@
 // except according to those terms.
 
 use libc::c_uint;
-//use llvm::{self, BasicBlock};
-//use llvm::debuginfo::DIScope;
-#[cfg(yk_hwt)]
-use llvm::DISubprogram;
 use rustc::ty::{self, Ty, TypeFoldable, UpvarSubsts};
 use rustc::ty::layout::{LayoutOf, TyLayout, HasTyCtxt};
 use rustc::mir::{self, Mir};
